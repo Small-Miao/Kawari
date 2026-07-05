@@ -10,11 +10,15 @@ use diesel::{
     sqlite::Sqlite,
 };
 use kawari::ipc::zone::PlateDesign;
+use kawari::ipc::zone::PortraitBanner;
 use serde::{Deserialize, Serialize};
 
 /// The size in bytes of the serialized adventurer plate design block
 /// (`PlateDesign`, i.e. the `version`..`timestamp` span of the plate packet).
 const PLATE_DESIGN_SIZE: usize = 192;
+
+/// The size in bytes of the serialized gearset portrait banner block ([`PortraitBanner`]).
+const PLATE_BANNER_SIZE: usize = 52;
 
 /// Persistent adventurer plate (CharaCard) data.
 ///
@@ -33,6 +37,12 @@ pub struct PlateStorage {
     pub has_plate: bool,
     /// The raw wire bytes of the [`PlateDesign`] block (192 bytes).
     pub design: Vec<u8>,
+    /// Whether the character has a valid gearset portrait banner set.
+    #[serde(default)]
+    pub has_banner: bool,
+    /// The raw wire bytes of the [`PortraitBanner`] block (52 bytes).
+    #[serde(default)]
+    pub banner: Vec<u8>,
 }
 
 impl Default for PlateStorage {
@@ -40,6 +50,8 @@ impl Default for PlateStorage {
         Self {
             has_plate: false,
             design: Self::design_to_bytes(&PlateDesign::default()),
+            has_banner: false,
+            banner: Self::banner_to_bytes(&PortraitBanner::default()),
         }
     }
 }
@@ -82,6 +94,35 @@ impl PlateStorage {
         let mut design = self.design();
         design.flags |= 1;
         self.design = Self::design_to_bytes(&design);
+    }
+
+    /// Serializes a [`PortraitBanner`] to its 52-byte wire form.
+    fn banner_to_bytes(banner: &PortraitBanner) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(PLATE_BANNER_SIZE);
+        let mut cursor = Cursor::new(&mut buffer);
+        banner
+            .write_le(&mut cursor)
+            .expect("failed to serialize PortraitBanner");
+        buffer
+    }
+
+    /// Decodes the stored banner block into a [`PortraitBanner`]. Returns the default banner if
+    /// the stored bytes are missing or malformed.
+    pub fn banner(&self) -> PortraitBanner {
+        let mut cursor = Cursor::new(&self.banner);
+        PortraitBanner::read_le(&mut cursor).unwrap_or_default()
+    }
+
+    /// Stores a submitted banner block and marks the banner as set.
+    pub fn set_banner(&mut self, banner: PortraitBanner) {
+        self.banner = Self::banner_to_bytes(&banner);
+        self.has_banner = true;
+    }
+
+    /// Marks the banner as unset without discarding the stored bytes. Called when equipping a
+    /// gearset that has no valid linked portrait.
+    pub fn clear_banner(&mut self) {
+        self.has_banner = false;
     }
 }
 

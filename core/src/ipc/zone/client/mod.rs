@@ -34,9 +34,9 @@ pub use save_glamour_plate::SaveGlamourPlate;
 
 use crate::ipc::zone::{
     CWLSPermissionRank, InviteReply, InviteType, LETTER_MSG_MAX_LENGTH, LinkshellInviteResponse,
-    MAX_MAIL_ATTACHMENTS_STORAGE, OnlineStatusMask, PlateDesign, SearchInfo, SearchUIClassJobMask,
-    SearchUIGrandCompanies, SocialListUILanguages, StrategyBoard, StrategyBoardUpdate,
-    WaymarkPreset,
+    MAX_MAIL_ATTACHMENTS_STORAGE, OnlineStatusMask, PlateDesign, PortraitBanner, SearchInfo,
+    SearchUIClassJobMask, SearchUIGrandCompanies, SocialListUILanguages, StrategyBoard,
+    StrategyBoardUpdate, WaymarkPreset,
 };
 
 use crate::ipc::zone::black_list::RequestBlacklist;
@@ -203,15 +203,11 @@ pub enum ClientZoneIpcData {
         #[brw(pad_after = 6)]
         glasses: [u16; 2],
         /// The client sends `EquipGearset2` (instead of `EquipGearset`) when the gearset has a
-        /// valid linked portrait/adventurer-plate. This is that 52-byte "banner" display block:
-        /// byte 0 = valid flag, bytes 3..=6 / 7..=10 = directional/ambient light RGB+brightness,
-        /// bytes 48..=51 = a u32 checksum, with camera/pose half-vectors in between. Treated as
-        /// opaque for now — parsed so packet framing is correct, but not applied. There are also
-        /// 4 trailing padding bytes after this block that the client leaves uninitialized.
-        #[br(count = 52)]
-        #[bw(pad_size_to = 52)]
+        /// valid linked portrait/adventurer-plate. This is that 52-byte "banner" display block
+        /// (see [`PortraitBanner`]), followed by 4 trailing padding bytes the client leaves
+        /// uninitialized.
         #[brw(pad_after = 4)]
-        portrait: Vec<u8>,
+        portrait: PortraitBanner,
     },
     StartWalkInEvent {
         event_arg: u32,
@@ -381,6 +377,14 @@ pub enum ClientZoneIpcData {
         /// The save action; observed as 3 (apply/commit).
         action: u32,
         design: PlateDesign,
+        /// Empty on the wire.
+        pad: u32,
+    },
+    /// Sent when the player toggles the custom-portrait button on a gearset or saves the banner
+    /// editor. Body = the 52-byte BannerData block + 4 pad. The server acks with ActorControlSelf
+    /// cat 3101 (result=0). This is the display banner for a gearset, not the plate itself.
+    SubmitBannerData {
+        banner: PortraitBanner,
         /// Empty on the wire.
         pad: u32,
     },

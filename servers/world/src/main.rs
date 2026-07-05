@@ -2862,20 +2862,26 @@ async fn process_packet(
                                 *glamour_plate_id,
                             )
                             .await;
+                        // Plain EquipGearset means the gearset has no valid linked portrait, so
+                        // clear the active banner and persist that (symmetric with EquipGearset2).
+                        connection.player_data.plate.clear_banner();
+                        {
+                            let mut database = connection.database.lock();
+                            database.commit_plate(&connection.player_data);
+                        }
                     }
                     ClientZoneIpcData::EquipGearset2 {
                         gearset_index,
                         containers,
                         indices,
                         glamour_plate_id,
+                        portrait,
                         ..
                     } => {
                         // EquipGearset2 carries the same gearset payload as EquipGearset (the client
-                        // sends it instead when the job portrait is considered available), plus an
-                        // extra trailing blob (`unk3`) whose purpose is still unknown. The equip
-                        // behavior is identical, so reuse the shared path and ignore unk3 for now.
-                        // TODO: figure out what the trailing portrait/unk3 data means and whether we
-                        // need to echo anything back for the job portrait UI.
+                        // sends it instead when the gearset has a valid linked portrait), plus the
+                        // 52-byte portrait/banner block for that gearset. Equip identically, then
+                        // persist the banner and ack it like a SubmitBannerData submission.
                         connection
                             .equip_gearset(
                                 *gearset_index,
@@ -2883,6 +2889,16 @@ async fn process_packet(
                                 indices,
                                 *glamour_plate_id,
                             )
+                            .await;
+                        connection.player_data.plate.set_banner(portrait.clone());
+                        {
+                            let mut database = connection.database.lock();
+                            database.commit_plate(&connection.player_data);
+                        }
+                        connection
+                            .actor_control_self(ActorControlCategory::BannerDataUpdateResult {
+                                result: 0,
+                            })
                             .await;
                     }
                     ClientZoneIpcData::StartWalkInEvent {
@@ -3192,6 +3208,19 @@ async fn process_packet(
                                 result: 0,
                                 action: *action,
                                 token: design.timestamp,
+                            })
+                            .await;
+                    }
+                    ClientZoneIpcData::SubmitBannerData { banner, .. } => {
+                        // Persist the submitted gearset portrait banner and acknowledge the save.
+                        connection.player_data.plate.set_banner(banner.clone());
+                        {
+                            let mut database = connection.database.lock();
+                            database.commit_plate(&connection.player_data);
+                        }
+                        connection
+                            .actor_control_self(ActorControlCategory::BannerDataUpdateResult {
+                                result: 0,
                             })
                             .await;
                     }

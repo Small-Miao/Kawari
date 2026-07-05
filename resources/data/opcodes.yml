@@ -399,7 +399,7 @@ ServerZoneIpcType:
   comment: Unknown purpose.
   opcode: 504
   size: 32
-- name: PartyMemberPortraits
+- name: PartyMemberPortrait
   comment: Displays the party member portraits for this duty.
   opcode: 634
   size: 184
@@ -1028,6 +1028,10 @@ ClientZoneIpcType:
   comment: Happens when the client saves edits to their own adventurer plate.
   opcode: 487
   size: 200
+- name: SubmitBannerData
+  comment: Client submits the current gearset's portrait/banner (BannerData block).
+  opcode: 924
+  size: 56
 - name: SearchPlayers
   comment: Happens when the client searches for players under the Social window.
   opcode: 225

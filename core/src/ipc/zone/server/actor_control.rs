@@ -1100,6 +1100,16 @@ pub enum ActorControlCategory {
         token: u32,
     },
 
+    /// Acknowledges a banner/portrait submission (client opcode 924 SubmitBannerData, or an
+    /// EquipGearset2 carrying a portrait block). Corresponds to the client's
+    /// CharaCard::HandleBannerDataUpdatePacket. Only param1 (result) is read.
+    #[brw(magic = 3101u32)]
+    BannerDataUpdateResult {
+        /// param1 — 0 == success (client promotes its staged TempBannerData to CurrentBannerData);
+        /// non-zero == failure (client discards it).
+        result: u32,
+    },
+
     /// Collection UI stuff.
     #[brw(magic = 2251u32)]
     McGuffinUnk {
