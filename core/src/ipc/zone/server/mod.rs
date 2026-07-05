@@ -422,6 +422,30 @@ impl Default for PortraitBanner {
     }
 }
 
+/// One party member's job portrait slot. 176 bytes. Wire-identical across opcode 634
+/// (single-slot, prefixed by an 8-byte slot header) and the batch packets 814 / 623
+/// (N of these back-to-back, no header). Field offsets verified against client
+/// sub_140BA7960 / sub_140BA7C90 / sub_140BA7F30.
+#[binrw]
+#[derive(Debug, Clone, Default)]
+pub struct PartyPortraitEntry {
+    /// Encrypted/session-level actor id. Kawari has no such system — send 0.
+    pub encrypted_aid: u64, // entry +0
+    pub content_id: u64,    // +8
+    /// Bitfield: show main/off-hand & head gear when weapon sheathed (same semantics as
+    /// `PlateDesign.gear_visibility_flag`).
+    pub gear_visibility_flag: u8, // +16
+    #[brw(pad_after = 2)] // +18..19 pad
+    pub class_job_id: u8, // +17
+    pub banner: PortraitBanner, // +20  (52B, checksum at entry+68)
+    pub item_ids: [u32; 12],    // +72
+    pub glasses: [u16; 2],      // +120
+    pub customize: CustomizeData, // +124 (26B)
+    pub stain0: [u8; 12],       // +150
+    #[brw(pad_after = 2)] // +174..175 pad
+    pub stain1: [u8; 12], // +162
+}
+
 #[opcode_data(ServerZoneIpcType)]
 #[binrw]
 #[br(import(magic: &ServerZoneIpcType, size: &u32))]
@@ -936,25 +960,18 @@ pub enum ServerZoneIpcData {
     /// A single party member's job portrait, sent when entering a duty (opcode 634, 184 bytes).
     /// Phase 1 only defines the structure; the server does not yet send these.
     PartyMemberPortrait {
-        /// Target slot 0..7.
+        /// Target slot 0..=7. Client discards the packet if >= 8.
         #[brw(pad_after = 7)] // reserved
         slot_index: u8,
-        /// Encrypted/session-level actor id (constant while online, changes on reconnect). The
-        /// server has no such system — fill 0 when sending.
-        encrypted_aid: u64,
-        content_id: u64,
-        /// Bitfield: show main/off-hand & head gear when weapon sheathed (same semantics as
-        /// `PlateDesign.gear_visibility_flag`).
-        gear_visibility_flag: u8,
-        #[brw(pad_after = 2)] // pad
-        class_job_id: u8,
-        banner: PortraitBanner,
-        item_ids: [u32; 12],
-        glasses: [u16; 2],
-        customize: CustomizeData,
-        stain0: [u8; 12],
-        #[brw(pad_after = 2)] // pad
-        stain1: [u8; 12],
+        entry: PartyPortraitEntry,
+    },
+    /// Batch portraits for a 4-man duty: 4 entries (slots 0..=3), no header. Opcode 814.
+    PartyMemberPortraits4 {
+        portraits: [PartyPortraitEntry; 4],
+    },
+    /// Batch portraits for an 8-man duty: 8 entries (slots 0..=7), no header. Opcode 623.
+    PartyMemberPortraits8 {
+        portraits: [PartyPortraitEntry; 8],
     },
     FieldMarkerPreset(WaymarkPreset),
     DeleteObject {
@@ -1745,5 +1762,12 @@ mod tests {
     #[test]
     fn portrait_banner_size() {
         crate::common::ensure_size::<PortraitBanner, 52>();
+    }
+
+    // The shared party portrait entry must serialize to exactly 176 bytes, wire-identical
+    // across opcodes 634 / 814 / 623.
+    #[test]
+    fn party_portrait_entry_size() {
+        crate::common::ensure_size::<PartyPortraitEntry, 176>();
     }
 }

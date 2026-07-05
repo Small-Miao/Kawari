@@ -403,6 +403,14 @@ ServerZoneIpcType:
   comment: Displays the party member portraits for this duty.
   opcode: 634
   size: 184
+- name: PartyMemberPortraits4
+  comment: Batch portraits for a 4-man duty (4 x 176B entries, slots 0..3).
+  opcode: 814
+  size: 704
+- name: PartyMemberPortraits8
+  comment: Batch portraits for an 8-man duty (8 x 176B entries, slots 0..7).
+  opcode: 623
+  size: 1408
 - name: FieldMarkerPreset
   comment: A player in the client's party has applied a waymark preset.
   opcode: 384

@@ -57,10 +57,12 @@ pub fn opcode_data(_metadata: TokenStream, input: TokenStream) -> TokenStream {
             if let Some(ident) = &field.ident {
                 field_idents.push(ident.clone());
 
-                // Because Rust is stupid, we need to manually implement Default for >32 length arrays.
-                if let Type::Array(array) = &field.ty {
-                    let len = &array.len;
-                    field_defaults.push(quote! { [Default::default(); #len] });
+                // Because Rust is stupid, we need to manually build arrays element-by-element:
+                // this both handles >32 length arrays and non-`Copy` element types (which the
+                // `[expr; N]` repeat form rejects).
+                if let Type::Array(_) = &field.ty {
+                    field_defaults
+                        .push(quote! { ::std::array::from_fn(|_| Default::default()) });
                 } else {
                     field_defaults.push(quote! { Default::default() });
                 }
