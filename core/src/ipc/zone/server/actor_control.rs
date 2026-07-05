@@ -1087,8 +1087,8 @@ pub enum ActorControlCategory {
         alt_target: u32,
     },
 
-    /// Acknowledges an adventurer plate (CharaCard) save submitted via `SubmitAdventurerPlate`
-    /// (opcode 487). Corresponds to the client's `CharaCard::HandleCharaCardUpdatePacket`.
+    /// Acknowledges an adventurer plate (CharaCard) save submitted via `SubmitAdventurerPlate`.
+    /// Corresponds to the client's `CharaCard::HandleCharaCardUpdatePacket`.
     #[brw(magic = 3102u32)]
     CharaCardUpdateResult {
         /// param1 — 0 == success (the client promotes its staged design to current data and
@@ -1100,9 +1100,9 @@ pub enum ActorControlCategory {
         token: u32,
     },
 
-    /// Acknowledges a banner/portrait submission (client opcode 924 SubmitBannerData, or an
-    /// EquipGearset2 carrying a portrait block). Corresponds to the client's
-    /// CharaCard::HandleBannerDataUpdatePacket. Only param1 (result) is read.
+    /// Acknowledges a banner/portrait submission (client `SubmitBannerData`, or an `EquipGearset2`
+    /// carrying a portrait block). Corresponds to the client's
+    /// `CharaCard::HandleBannerDataUpdatePacket`. Only param1 (result) is read.
     #[brw(magic = 3101u32)]
     BannerDataUpdateResult {
         /// param1 — 0 == success (client promotes its staged TempBannerData to CurrentBannerData);

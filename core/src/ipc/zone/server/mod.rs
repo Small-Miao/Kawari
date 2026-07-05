@@ -203,8 +203,8 @@ pub type ServerZoneIpcSegment =
 /// The editable "design block" of an adventurer plate (CharaCard).
 ///
 /// This is the 192-byte span from `version` to `timestamp` (inclusive) that the client
-/// submits verbatim when saving a plate (opcode 487, `SubmitAdventurerPlate`) and that the
-/// server echoes back inside the `AdventurerPlate` response (opcode 482). The client treats
+/// submits verbatim when saving a plate (`SubmitAdventurerPlate`) and that the server echoes
+/// back inside the `AdventurerPlate` response. The client treats
 /// this as a frozen snapshot: it includes not only style/portrait fields but also a snapshot
 /// of the character's customize (face) data, gear dye stains, and equipped item ids taken at
 /// save time. That is why the game has a "reset due to Fantasia" flag (`flags & 1`) and a
@@ -335,10 +335,10 @@ impl Default for PlateDesign {
 /// The display "banner" block attached to a gearset's job portrait.
 ///
 /// This is ClientStructs `BannerData` (0x34 / 52 bytes). It is reused verbatim across several
-/// packets: the client submits it via the `SubmitBannerData` upstream packet (opcode 924) when
-/// toggling the custom-portrait button or saving the banner editor, it is carried inline by
-/// `EquipGearset2` when switching to a gearset that has a valid linked portrait, and it forms
-/// the per-member `banner` field of `PartyMemberPortrait` (opcode 634).
+/// packets: the client submits it via the `SubmitBannerData` upstream packet when toggling the
+/// custom-portrait button or saving the banner editor, it is carried inline by `EquipGearset2`
+/// when switching to a gearset that has a valid linked portrait, and it forms the per-member
+/// `banner` field of `PartyMemberPortrait`.
 ///
 /// Every field is a raw scalar (`u8`/`u16`/`u32`), written little-endian in declaration order.
 /// The trailing `checksum` is a CRC32 fingerprint of the gearset the banner was captured for;
@@ -422,10 +422,10 @@ impl Default for PortraitBanner {
     }
 }
 
-/// One party member's job portrait slot. 176 bytes. Wire-identical across opcode 634
-/// (single-slot, prefixed by an 8-byte slot header) and the batch packets 814 / 623
-/// (N of these back-to-back, no header). Field offsets verified against client
-/// sub_140BA7960 / sub_140BA7C90 / sub_140BA7F30.
+/// One party member's job portrait slot. 176 bytes. Wire-identical across the single-slot
+/// `PartyMemberPortrait` (prefixed by an 8-byte slot header) and the batch packets
+/// `PartyMemberPortraits4` / `PartyMemberPortraits8` (N of these back-to-back, no header).
+/// Field offsets verified against client sub_140BA7960 / sub_140BA7C90 / sub_140BA7F30.
 #[binrw]
 #[derive(Debug, Clone, Default)]
 pub struct PartyPortraitEntry {
@@ -957,19 +957,20 @@ pub enum ServerZoneIpcData {
     UnkDirector1 {
         unk: [u8; 32],
     },
-    /// A single party member's job portrait, sent when entering a duty (opcode 634, 184 bytes).
-    /// Phase 1 only defines the structure; the server does not yet send these.
+    /// A single party member's job portrait (8-byte slot header + one entry, 184 bytes), used to
+    /// fill an individual slot when a batch packet doesn't cover the whole party (under-sized /
+    /// unrestricted parties). The structure is defined but the server does not yet send these.
     PartyMemberPortrait {
         /// Target slot 0..=7. Client discards the packet if >= 8.
         #[brw(pad_after = 7)] // reserved
         slot_index: u8,
         entry: PartyPortraitEntry,
     },
-    /// Batch portraits for a 4-man duty: 4 entries (slots 0..=3), no header. Opcode 814.
+    /// Batch portraits for a 4-member duty: 4 entries (slots 0..=3), no header.
     PartyMemberPortraits4 {
         portraits: [PartyPortraitEntry; 4],
     },
-    /// Batch portraits for an 8-man duty: 8 entries (slots 0..=7), no header. Opcode 623.
+    /// Batch portraits for an 8-member duty: 8 entries (slots 0..=7), no header.
     PartyMemberPortraits8 {
         portraits: [PartyPortraitEntry; 8],
     },
@@ -1765,7 +1766,7 @@ mod tests {
     }
 
     // The shared party portrait entry must serialize to exactly 176 bytes, wire-identical
-    // across opcodes 634 / 814 / 623.
+    // across the single-slot and batch portrait packets.
     #[test]
     fn party_portrait_entry_size() {
         crate::common::ensure_size::<PartyPortraitEntry, 176>();

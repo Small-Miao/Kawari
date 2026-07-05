@@ -3192,8 +3192,8 @@ async fn process_packet(
                     }
                     ClientZoneIpcData::SubmitAdventurerPlate { action, design, .. } => {
                         // Persist the submitted design snapshot. The client re-requests the plate
-                        // (opcode 677) after the acknowledgement below, so commit immediately to
-                        // the database — that request reads the plate back from there.
+                        // after the acknowledgement below, so commit immediately to the database —
+                        // that request reads the plate back from there.
                         connection.player_data.plate.set_design(design.clone());
                         {
                             let mut database = connection.database.lock();

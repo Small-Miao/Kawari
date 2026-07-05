@@ -371,8 +371,8 @@ pub enum ClientZoneIpcData {
     /// Sent when the player saves edits to their own adventurer plate. The `design` block is a
     /// verbatim snapshot of the plate's `version`..`timestamp` span (identical layout to the
     /// `AdventurerPlate` response). After acknowledging this, the client re-requests the plate
-    /// (opcode 677) so the server can merge the design with the non-submitted header fields
-    /// (name, comment, free company, grand company) and send back the full plate.
+    /// (via `RequestAdventurerPlate`) so the server can merge the design with the non-submitted
+    /// header fields (name, comment, free company, grand company) and send back the full plate.
     SubmitAdventurerPlate {
         /// The save action; observed as 3 (apply/commit).
         action: u32,
@@ -381,8 +381,9 @@ pub enum ClientZoneIpcData {
         pad: u32,
     },
     /// Sent when the player toggles the custom-portrait button on a gearset or saves the banner
-    /// editor. Body = the 52-byte BannerData block + 4 pad. The server acks with ActorControlSelf
-    /// cat 3101 (result=0). This is the display banner for a gearset, not the plate itself.
+    /// editor. Body = the 52-byte BannerData block + 4 pad. The server acks with an
+    /// `ActorControlSelf` `BannerDataUpdateResult` (result=0). This is the display banner for a
+    /// gearset, not the plate itself.
     SubmitBannerData {
         banner: PortraitBanner,
         /// Empty on the wire.
