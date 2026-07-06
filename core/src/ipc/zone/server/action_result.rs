@@ -55,13 +55,17 @@ fn encode_heal_params(amount: u32, params: [u8; 5]) -> [u8; 5] {
 #[brw(repr = u8)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum DamageKind {
-    // These are all "normal" attacks, not direct hits/criticals or anything special.
+    // This value is written verbatim into the effect's `param0` byte, where the client reads the
+    // hit-severity flags: bit5 (0x20) = critical, bit6 (0x40) = direct hit (per the retail client
+    // and ffxiv_bossmod's ActionEffect: `Param0 & 0x20` = crit, `Param0 & 0x40` = dhit). The plain
+    // ordinals 0/1/2/3 land in bits 0/1 instead, which the client never inspects, so every hit
+    // showed as Normal. The values below place the flags in the bits the client actually reads.
     #[default]
     Normal = 0x0,
-    Critical = 0x1,
-    DirectHit = 0x2,
-    /// Both a critical *and* a direct hit (the severity field is a bitfield: 0x1 | 0x2).
-    CriticalDirectHit = 0x3,
+    Critical = 0x20,
+    DirectHit = 0x40,
+    /// Both a critical *and* a direct hit (param0 is a bitfield: crit 0x20 | direct hit 0x40).
+    CriticalDirectHit = 0x60,
 }
 
 #[cfg(feature = "server")]
