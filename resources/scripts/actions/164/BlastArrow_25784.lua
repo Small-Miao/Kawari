@@ -1,8 +1,8 @@
 -- Blast Arrow (BRD, ClassJob 23) - Level 86 weaponskill (AoE)
--- Potency: 600 (main target), 300 (secondary targets)
+-- Potency: 700 (main target), 350 (secondary targets)
 -- Requires: Blast Arrow Ready status (2692 or 3142)
-MAIN_POTENCY = 600
-AOE_POTENCY = 300
+MAIN_POTENCY = 700
+AOE_POTENCY = 350
 BLAST_ARROW_READY_STATUS = 2692
 BLAST_ARROW_READY_STATUS_ALT = 3142
 

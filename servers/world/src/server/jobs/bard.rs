@@ -155,6 +155,10 @@ pub struct BardState {
     /// Damage bonus granted by the current Radiant Finale status: 2/4/6.
     #[serde(default)]
     pub radiant_finale_damage_bonus_percent: u8,
+    /// Number of Coda consumed by the most recent Radiant Finale, captured at Finale press because
+    /// the coda flags are cleared immediately. Read by Radiant Encore to scale its potency.
+    #[serde(default)]
+    pub radiant_encore_coda: u8,
     /// Barrage stacks remaining
     pub barrage_stacks: u8,
     /// When Barrage expires
@@ -475,17 +479,19 @@ fn apply_repertoire_proc(
         );
     }
 
-    let cooldown_update = if proc.reduce_bloodletter_cooldown {
-        combat_state
+    let cooldown_update = if proc.reduce_bloodletter_cooldown
+        && combat_state
             .reduce_cooldown_recovery(
                 BLOODLETTER_COOLDOWN_GROUP_INDEX,
                 MAGES_BALLAD_COOLDOWN_REDUCTION,
             )
-            .map(|(elapsed_centisec, total_centisec)| BardCooldownUpdate {
-                cooldown_group: BLOODLETTER_COOLDOWN_GROUP_INDEX as u32,
-                elapsed_centisec,
-                total_centisec,
-            })
+            .is_some()
+    {
+        Some(BardCooldownUpdate {
+            cooldown_group: BLOODLETTER_COOLDOWN_GROUP_INDEX as u32,
+            // Retail sends the reduction as a relative skew (7.5s → 750 centiseconds).
+            delta_centisec: (MAGES_BALLAD_COOLDOWN_REDUCTION.as_millis() / 10) as u32,
+        })
     } else {
         None
     };
@@ -568,8 +574,9 @@ pub(crate) fn can_execute_bard_action(
                 && brd.repertoire > 0
         }
 
-        // Apex Arrow requires Soul Voice >= 80
-        ACTION_APEX_ARROW => brd.soul_voice >= 80 && level >= 80,
+        // Apex Arrow requires Soul Voice >= 20 (80 is only the threshold to grant Blast Arrow Ready,
+        // not to use Apex Arrow itself).
+        ACTION_APEX_ARROW => brd.soul_voice >= 20 && level >= 80,
 
         // Blast Arrow requires Blast Arrow Ready
         ACTION_BLAST_ARROW => brd.blast_arrow_ready,
@@ -714,6 +721,7 @@ pub(crate) fn update_bard_state_after_action(
         }
         ACTION_RADIANT_FINALE => {
             let coda = coda_count(combat_state.bard.song_flags);
+            combat_state.bard.radiant_encore_coda = coda;
             combat_state.bard.radiant_finale_damage_bonus_percent = match coda {
                 0 => 0,
                 1 => 2,
@@ -823,8 +831,12 @@ pub(crate) fn apply_bard_gauge_action(
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BardCooldownUpdate {
     pub cooldown_group: u32,
-    pub elapsed_centisec: u32,
-    pub total_centisec: u32,
+    /// Relative cooldown reduction in centiseconds, sent to the client as ActorControl
+    /// category 1537 (IncrementRecast / SkewCooldownForGroup). The client does
+    /// `Elapsed += delta/100` on the recast group (clamped to Total, no-op if not running),
+    /// which advances the shared charge pool — matching retail. Server-side charge bookkeeping
+    /// is handled separately by `reduce_cooldown_recovery`.
+    pub delta_centisec: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

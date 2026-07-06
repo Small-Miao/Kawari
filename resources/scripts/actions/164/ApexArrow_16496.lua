@@ -1,15 +1,17 @@
 -- Apex Arrow (BRD, ClassJob 23) - Level 80 weaponskill (AoE)
--- Potency: 500 (main target), 250 (secondary targets)
--- Consumes all Soul Voice gauge (requires 80+ to use)
--- At level 86+, grants Blast Arrow Ready status
-MAIN_POTENCY = 500
-AOE_POTENCY = 250
+-- Potency: 7 * Soul Voice (140 at SV=20 .. 700 at SV=100), scaled by Soul Voice spent.
+-- Consumes all Soul Voice gauge (usable at SV >= 20).
+-- At level 86+, grants Blast Arrow Ready status.
+-- No AoE falloff: every target takes full potency (confirmed via ActionTransient 7.51).
 BLAST_ARROW_READY_STATUS = 2692
 BLAST_ARROW_READY_DURATION = 10.0
+SOUL_VOICE_POTENCY_PER_POINT = 7
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(MAIN_POTENCY))
+    local soul_voice = player:bard_soul_voice()
+    local potency = SOUL_VOICE_POTENCY_PER_POINT * soul_voice
+    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
 
     -- At level 86+, Apex Arrow grants Blast Arrow Ready
     if player:get_level() >= 86 then

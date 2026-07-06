@@ -771,7 +771,18 @@ pub enum ActorControlCategory {
     #[brw(magic = 609u32)]
     ToggleWireframeRendering(),
 
-    /// ActionRejected (ActorControlSelf)
+    /// Tells the client an action request was rejected. The client optimistically locks the recast
+    /// group (and the shared GCD) at cast-send time, *before* the request reaches the server, so a
+    /// genuine rejection must be rolled back or the player stays locked for the whole predicted
+    /// recast (e.g. a full 2.5s GCD) for an action that never happened.
+    ///
+    /// The client resolves the recast group from `(action_type, action_id)` internally. When
+    /// `recast_elapsed_centisec == 0 && recast_total_centisec == 0` it runs the charge-aware
+    /// `ResetCooldownForGroup`: single-charge actions are cleared/unlocked, multi-charge actions get
+    /// exactly one charge refunded (the rest of the pool is preserved). Otherwise it applies
+    /// `(elapsed, total)` as an absolute correction. Sending zeros is the correct rollback for both
+    /// single- and multi-charge actions — unlike `SetCooldownTimer{0,0}` (cat 16), which force-sets
+    /// the group active with a 0 total and desyncs multi-charge pools to "full charges".
     #[brw(magic = 700u32)]
     ActionRejected {
         /// This corresponds to row id from the LogMessage sheet.
@@ -1002,7 +1013,7 @@ pub enum ActorControlCategory {
     #[brw(magic = 1529u32)]
     UnkAnimationRelated {},
 
-    #[brw(magic = 1536u32)]
+    #[brw(magic = 1537u32)]
     IncrementRecast {
         cooldown_group: u32,
         delta_time_centisec: u32,

@@ -153,7 +153,11 @@ impl CooldownState {
             return (0, 0);
         };
 
-        let total_centisec = duration_to_centisec(self.charge_duration);
+        // Scale total to the full charge pool so SetCooldownTimer stays consistent with the
+        // SetCooldownTimerMax value sent on use for multi-charge actions (which carries
+        // MaxCharges × R). The client's charge math requires total = MaxCharges × R.
+        let pool_duration = self.charge_duration * u32::from(self.max_charges());
+        let total_centisec = duration_to_centisec(pool_duration);
         let elapsed_centisec = duration_to_centisec(started_at.elapsed().min(self.charge_duration));
         (elapsed_centisec, total_centisec)
     }
@@ -254,5 +258,17 @@ impl PlayerCombatState {
         let cooldown = self.cooldowns[cooldown_group_index].as_mut()?;
         cooldown.reduce_recovery(amount);
         Some(cooldown.timer_values())
+    }
+
+    /// Returns `(elapsed_centisec, total_centisec)` for a cooldown group, scaled to the full
+    /// charge pool (matching the wire encoding used by SetCooldownTimer). Returns `(0, 0)` if the
+    /// group is untracked or fully ready — which the client reads as "reset this group" (Path A),
+    /// exactly what we want for a rejection where the action never happened (job-state/MP).
+    pub fn cooldown_timer_values(&mut self, cooldown_group_index: usize) -> (u32, u32) {
+        self.ensure_capacity();
+        self.cooldowns[cooldown_group_index]
+            .as_mut()
+            .map(CooldownState::timer_values)
+            .unwrap_or((0, 0))
     }
 }

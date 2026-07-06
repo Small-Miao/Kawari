@@ -235,10 +235,9 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             if let Some(cooldown_update) = result.cooldown_update {
                 network.send_to_by_actor_id(
                     actor_id,
-                    FromServer::ActorControlSelf(ActorControlCategory::SetCooldownTimer {
+                    FromServer::ActorControlSelf(ActorControlCategory::IncrementRecast {
                         cooldown_group: cooldown_update.cooldown_group,
-                        elapsed_centisec: cooldown_update.elapsed_centisec,
-                        total_centisec: cooldown_update.total_centisec,
+                        delta_time_centisec: cooldown_update.delta_centisec,
                     }),
                     DestinationNetwork::ZoneClients,
                 );
@@ -766,7 +765,7 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
             let category = if is_heal {
                 ActorControlCategory::TickHeal {
                     status_id,
-                    amount: amount as u32,
+                    amount,
                     source_actor_id: source_id,
                     unk2: 0,
                     unk3: 0,
@@ -774,7 +773,7 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
             } else {
                 ActorControlCategory::TickDamage {
                     status_id,
-                    amount: amount as u32,
+                    amount,
                     source_actor_id: source_id,
                     unk2: u32::MAX,
                     unk3: 0,

@@ -1,8 +1,8 @@
 -- Resonant Arrow (BRD, ClassJob 23) - Level 96 ability
--- Potency: 240 (single target)
+-- Potency: 640 (single target)
 -- Requires: Resonant Arrow Ready status (3862)
 -- Recast: 1s (CooldownGroup 1, shares with Pitch Perfect)
-POTENCY = 240
+POTENCY = 640
 RESONANT_ARROW_READY_STATUS = 3862
 
 function doAction(player, in_combo)

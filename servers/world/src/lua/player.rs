@@ -998,6 +998,15 @@ impl UserData for LuaPlayer {
         methods.add_method("summoner_lux_solaris_ready", |_, this, _: ()| {
             Ok(this.combat_state.summoner.lux_solaris_ready)
         });
+        methods.add_method("bard_soul_voice", |_, this, _: ()| {
+            Ok(this.combat_state.bard.soul_voice)
+        });
+        methods.add_method("bard_repertoire", |_, this, _: ()| {
+            Ok(this.combat_state.bard.repertoire)
+        });
+        methods.add_method("bard_radiant_encore_coda", |_, this, _: ()| {
+            Ok(this.combat_state.bard.radiant_encore_coda)
+        });
         methods.add_method_mut("start_talk_event", |_, this, _: ()| {
             this.start_talk_event();
             Ok(())

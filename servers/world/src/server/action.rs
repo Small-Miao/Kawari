@@ -68,6 +68,14 @@ const ADDITIONAL_ACTION_LOCK_100MS: u32 = 10;
 /// through. See [[gcd-cast-timing]].
 const COOLDOWN_TOLERANCE: Duration = Duration::from_millis(50);
 
+/// Extra grace applied only to the *rejection* check for an incoming action request. The client
+/// predicts cooldowns/charges locally and fires the instant its own timer says ready; the request
+/// reaches the server ~one uplink latency later (~120ms observed, up to ~200ms on jitter), so the
+/// server's authoritative timer is slightly behind. Accept an action whose cooldown is within this
+/// window of expiring instead of rejecting it — matching retail's early-use grace. This is only
+/// for the accept/reject decision; the cooldown itself still starts from the real (unshifted) time.
+const COOLDOWN_REJECTION_TOLERANCE: Duration = Duration::from_millis(500);
+
 /// Mounting always uses a fixed 1-second summon cast ("Summoning..."), regardless of which mount or
 /// the caster's stats. The client sends the *Mount* sheet row as the action_id, so reading a cast
 /// time from the Action sheet would be meaningless, and mount casts aren't shortened by spell/skill
@@ -284,6 +292,25 @@ fn target_action_result_effects(effects: &[ActionEffect]) -> ([ActionEffect; 8],
     (target_effects, count as u8)
 }
 
+/// AoE damage falloff applied to *secondary* targets (the primary at slot 0 always takes full
+/// damage). FFXIV does not encode falloff in any Excel sheet — two actions with byte-identical
+/// Action-sheet geometry can have different falloff — so this is a hardcoded table sourced from the
+/// per-action ActionTransient tooltip ("对目标之外的敌人威力降低50%"). Actions absent from the table
+/// take no falloff (full damage to every target), which is correct for spread-type AoEs
+/// (Shadowbite, Rain of Death, Ladonsbite, Quick Nock, Wide Volley, Apex Arrow, ...).
+fn aoe_secondary_falloff_base(action_id: u32, base_damage: u32) -> u32 {
+    let fraction = match action_id {
+        // Bard 50%-falloff finishers/procs.
+        7404 | 25784 | 36976 | 36977 => 0.5_f32,
+        _ => 1.0_f32,
+    };
+    if fraction >= 1.0 {
+        base_damage
+    } else {
+        (base_damage as f32 * fraction).round() as u32
+    }
+}
+
 fn cooldown_groups_for_action(game_data: &mut GameData, action_id: u32) -> Vec<usize> {
     let mut groups = Vec::new();
 
@@ -304,11 +331,29 @@ fn action_cooldown_rejections(
     game_data: &mut GameData,
     combat_state: &mut PlayerCombatState,
     action_id: u32,
+    level: u8,
 ) -> Vec<(usize, Duration)> {
+    let primary_group = game_data.get_action_cooldown_group(action_id);
+    let max_charges = game_data.get_action_max_charges_at_level(action_id, level);
+
     cooldown_groups_for_action(game_data, action_id)
         .into_iter()
+        // For multi-charge actions the additional non-GCD group carries a 1s client-side
+        // visual lock only (retail behaviour confirmed by capture). The server must not
+        // reject on it: two consecutive charges both land inside that 1s window. Only the
+        // primary charge group gates real availability; the GCD group (58) always gates GCDs.
+        .filter(|&group| {
+            if max_charges > 1
+                && primary_group > 0
+                && group != (usize::from(primary_group) - 1)
+                && group != (usize::from(GCD_COOLDOWN_GROUP) - 1)
+            {
+                return false;
+            }
+            true
+        })
         .filter_map(|group| {
-            if combat_state.cooldown_ready(group, COOLDOWN_TOLERANCE) {
+            if combat_state.cooldown_ready(group, COOLDOWN_REJECTION_TOLERANCE) {
                 None
             } else {
                 Some((group, combat_state.cooldown_remaining(group)))
@@ -369,6 +414,7 @@ fn start_action_cooldowns(
         if group_id == 0 || applied.contains(&group_id) {
             continue;
         }
+
         applied.push(group_id);
 
         // Primary group → action's own Recast100ms. Additional GCD group → the standard 2.5s GCD
@@ -403,34 +449,69 @@ fn start_action_cooldowns(
             },
             COOLDOWN_TOLERANCE,
         );
+        // For multi-charge actions the wire packet must encode the *entire pool* duration
+        // (MaxCharges × R). The client derives perCharge = total / MaxCharges and displays
+        // charges as floor(elapsed / perCharge). With total = R the client computes
+        // perCharge = R/MaxCharges → wrong; the UI never decrements correctly.
+        // CooldownState.start_cooldown above still receives the single-charge duration so
+        // internal charge accounting is unaffected.
+        let wire_duration_centisec = if group_id == primary_group && max_charges > 1 {
+            recast_centisec.saturating_mul(u32::from(max_charges))
+        } else {
+            recast_centisec
+        };
         started.push(StartedCooldown {
             // ActorControl uses zero-based cooldown group ids on the wire.
             cooldown_group: u32::from(group_id - 1),
             action_id,
-            duration_centisec: recast_centisec,
+            duration_centisec: wire_duration_centisec,
         });
     }
 
     started
 }
 
+/// LogMessage row 582 = "该动作暂时无法发动。" — the standard "action not ready" reject text.
+const LOG_MESSAGE_ACTION_NOT_READY: u32 = 582;
+
 fn reset_client_action_cooldowns(
     network: &mut NetworkState,
-    game_data: &mut GameData,
     actor_id: ObjectId,
     action_id: u32,
+    recast_elapsed_centisec: u32,
+    recast_total_centisec: u32,
+    source_seq: u32,
 ) {
-    for cooldown_group in cooldown_groups_for_action(game_data, action_id) {
-        network.send_to_by_actor_id(
-            actor_id,
-            FromServer::ActorControlSelf(ActorControlCategory::SetCooldownTimer {
-                cooldown_group: cooldown_group as u32,
-                elapsed_centisec: 0,
-                total_centisec: 0,
-            }),
-            DestinationNetwork::ZoneClients,
-        );
-    }
+    // The client optimistically locks the recast group (and the shared GCD) at cast-send time,
+    // *before* the request reaches us. On a genuine rejection we must roll that lock back or the
+    // player is stuck waiting the full predicted recast for an action that never happened. Retail
+    // does this with ActorControlSelf category 700, which the client interprets in one of two ways
+    // depending on the elapsed/total fields (confirmed by IDA + retail capture):
+    //   * elapsed==0 && total==0 -> ResetCooldownForGroup: charge-aware reset (full clear for a
+    //     non-charge action, refund exactly one charge for a multi-charge pool, plus clears the
+    //     shared GCD group). This is the "the action never happened, give it all back" path — used
+    //     for job-state / resource rejections where the group is genuinely idle.
+    //   * either nonzero -> SetCooldown: writes Elapsed=elapsed/100, Total=total/100 (seconds)
+    //     verbatim to the action's primary recast group, calibrating the client to the server's
+    //     authoritative cooldown. This is the path for cooldown rejections (double-tap / charge not
+    //     ready): the caller passes the group's real pool-scaled timer values so the client's charge
+    //     math (floor(MaxCharges * Elapsed / Total)) lands on the correct remaining charges.
+    // The caller resolves which path applies simply by reading the primary group's timer values:
+    // an on-cooldown group yields nonzero (Path B); a ready/untracked group yields (0,0) (Path A).
+    // source_seq echoes the client's ActionRequest.sequence so the client cancels the correct
+    // in-flight optimistic action.
+    network.send_to_by_actor_id(
+        actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::ActionRejected {
+            log_message_id: LOG_MESSAGE_ACTION_NOT_READY,
+            action_type: 1,
+            action_id,
+            recast_elapsed_centisec,
+            recast_total_centisec,
+            source_seq,
+        }),
+        DestinationNetwork::ZoneClients,
+    );
 }
 
 pub(super) fn clear_action_cooldowns(
@@ -533,7 +614,7 @@ fn resolve_player_action_id(
     if check_cooldown && request.action_type == ActionType::Action && !*remove_cooldowns {
         let mut combat_state = combat_state.clone();
         let rejected_groups =
-            action_cooldown_rejections(game_data, &mut combat_state, resolved_action_id);
+            action_cooldown_rejections(game_data, &mut combat_state, resolved_action_id, level);
         if !rejected_groups.is_empty() {
             tracing::warn!(
                 ?actor_id,
@@ -591,13 +672,38 @@ pub fn handle_action_messages(
             };
 
             let Some(resolved_action_id) = resolved_action_id else {
+                // Genuine rejection: roll back the client's optimistic recast lock. Read the
+                // primary cooldown group's authoritative timer so the client calibrates (Path B)
+                // when the group is really on cooldown, and fully resets (Path A) when it's idle.
+                let (recast_elapsed_centisec, recast_total_centisec) = {
+                    let mut world = data.lock();
+                    let mut game_data = game_data.lock();
+                    world
+                        .find_actor_instance_mut(*from_actor_id)
+                        .and_then(|instance| instance.find_actor_mut(*from_actor_id))
+                        .and_then(|actor| {
+                            if let NetworkedActor::Player { combat_state, .. } = actor {
+                                let group = game_data.get_action_cooldown_group(request.action_id);
+                                if group > 0 {
+                                    Some(combat_state
+                                        .cooldown_timer_values(usize::from(group - 1)))
+                                } else {
+                                    Some((0, 0))
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or((0, 0))
+                };
                 let mut network = network.lock();
-                let mut game_data = game_data.lock();
                 reset_client_action_cooldowns(
                     &mut network,
-                    &mut game_data,
                     *from_actor_id,
                     request.action_id,
+                    recast_elapsed_centisec,
+                    recast_total_centisec,
+                    u32::from(request.sequence),
                 );
                 return true;
             };
@@ -1406,10 +1512,9 @@ pub fn execute_action(
             if let Some(cooldown_update) = bard_action_update.cooldown_update {
                 network.send_to_by_actor_id(
                     from_actor_id,
-                    FromServer::ActorControlSelf(ActorControlCategory::SetCooldownTimer {
+                    FromServer::ActorControlSelf(ActorControlCategory::IncrementRecast {
                         cooldown_group: cooldown_update.cooldown_group,
-                        elapsed_centisec: cooldown_update.elapsed_centisec,
-                        total_centisec: cooldown_update.total_centisec,
+                        delta_time_centisec: cooldown_update.delta_centisec,
                     }),
                     DestinationNetwork::ZoneClients,
                 );
@@ -1505,8 +1610,10 @@ pub fn execute_action(
                     }
 
                     for target_id in secondaries {
+                        let falloff_base =
+                            aoe_secondary_falloff_base(resolved_request.action_id, aoe_base_damage);
                         let base_amount =
-                            source_damage_modifiers.apply_base_damage(aoe_base_damage);
+                            source_damage_modifiers.apply_base_damage(falloff_base);
                         let (rolled, kind) = lua_player
                             .base_parameters
                             .roll_damage_with_modifiers(base_amount, source_damage_modifiers.roll);
