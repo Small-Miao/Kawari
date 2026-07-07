@@ -31,25 +31,6 @@ function onTalk(target, player)
 end
 
 function onReturn(scene, results, player)
-    -- Note that the scene yields, not returns - unlike the other openings.
-    if scene == 1 then
-        player:play_scene(00002, HIDE_HOTBAR, {})
-        return
-    elseif scene == 4 then
-        player:play_scene(00005, HIDE_HOTBAR, {})
-        return
-    elseif scene == 6 then
-        -- Move the player into the destination position
-        player:move_to_pop_range(POS_INN_WARP, true)
-    elseif scene == 11 then
-        player:play_scene(00012, HIDE_HOTBAR, {})
-        return
-    end
-
-    player:finish_event()
-end
-
-function onYield(scene, id, results, player)
     if scene == 0 then
         -- first param: whether the quest was accepted
         local accepted = results[1] == 1
@@ -60,7 +41,9 @@ function onYield(scene, id, results, player)
             player:play_scene(00003, HIDE_HOTBAR, {})
             return
         end
-
+    elseif scene == 1 then
+        player:play_scene(00002, HIDE_HOTBAR, {})
+        return
     elseif scene == 2 then
         player:accept_quest(EVENT_ID)
 
@@ -68,16 +51,29 @@ function onYield(scene, id, results, player)
         player:start_event(OPENING_EVENT_HANDLER, EVENT_TYPE_NEST, 0)
         player:play_scene(30, HIDE_HOTBAR | NO_DEFAULT_CAMERA, {2})
         return
+    elseif scene == 4 then
+        player:play_scene(00005, HIDE_HOTBAR, {})
+        return
     elseif scene == 5 then
         if results[1] == 1 then
             -- take the warp
             player:play_scene(6, HIDE_HOTBAR, {})
             return
         end
+    elseif scene == 6 then
+        -- Move the player into the destination position
+        player:move_to_pop_range(POS_INN_WARP, true)
+    elseif scene == 11 then
+        player:play_scene(00012, HIDE_HOTBAR, {})
+        return
     elseif scene == 12 then
         local completed = results[1] == 1
         player:finish_quest(EVENT_ID)
     end
 
+    player:finish_event()
+end
+
+function onYield(scene, id, results, player)
     player:finish_event()
 end
