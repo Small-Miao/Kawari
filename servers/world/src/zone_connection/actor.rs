@@ -1,6 +1,10 @@
 //! Everything to do with spawning, managing and moving actors - including the player.
 
-use crate::{ToServer, ZoneConnection, common::SpawnKind};
+use crate::{
+    ToServer, ZoneConnection,
+    common::SpawnKind,
+    inventory::{display_flags_to_checksum_flag, gearset_checksum_from_equipped},
+};
 use kawari::{
     common::{
         CharacterMode, EquipDisplayFlag, JumpState, MoveAnimationState, MoveAnimationType,
@@ -9,8 +13,9 @@ use kawari::{
     config::get_config,
     ipc::zone::{
         ActorControl, ActorControlCategory, ActorControlSelf, ActorControlTarget, ActorMove,
-        CommonSpawn, Config, DisplayFlag, ObjectKind, PlayerSubKind, ServerZoneIpcData,
-        ServerZoneIpcSegment, SpawnObject, SpawnPlayer, SpawnTreasure,
+        CommonSpawn, Config, DisplayFlag, ObjectKind, PartyPortraitEntry, PlayerSubKind,
+        PortraitBanner, ServerZoneIpcData, ServerZoneIpcSegment, SpawnObject, SpawnPlayer,
+        SpawnTreasure,
     },
 };
 
@@ -237,6 +242,133 @@ impl ZoneConnection {
             },
             ..Default::default()
         }
+    }
+
+    /// Builds this player's own [`PartyPortraitEntry`] from their live connection data.
+    ///
+    /// All data comes from `self.player_data` (own connection context): equipped gear (apparent
+    /// ids + stains), live glasses, stored plate/banner, customize, class job and content id.
+    /// The 12-slot gear ordering mirrors the adventurer plate exactly (waist and soul crystal are
+    /// excluded).
+    ///
+    /// The banner style is gated by the gearset checksum: the stored custom banner is only used if
+    /// the player has one saved AND its checksum still matches the current live gear; otherwise the
+    /// banner falls back to [`PortraitBanner::default()`]. The gear/customize/stains fields always
+    /// carry the current live appearance regardless.
+    fn build_own_portrait_entry(&self) -> PartyPortraitEntry {
+        let equipped = &self.player_data.inventory.equipped;
+        let glasses = equipped.glasses;
+
+        // Customize + class job come from the same sources get_player_common_spawn uses.
+        let customize = {
+            let mut database = self.database.lock();
+            database
+                .get_chara_make(self.player_data.character.content_id as u64)
+                .customize
+        };
+        let class_job_id = self.player_data.classjob.current_class as u8;
+
+        // Wire field for the entry: the client-submitted plate visibility byte (its own encoding),
+        // i.e. the visibility captured with the portrait. 0 when the player has never saved a plate.
+        let gear_visibility_flag = if self.player_data.plate.has_plate {
+            self.player_data.plate.design().gear_visibility_flag
+        } else {
+            0
+        };
+
+        // checksum gate: recompute the fingerprint from the live gear and compare against the
+        // stored banner's captured checksum. Only reuse the stored banner if it still matches.
+        //
+        // The visibility component of the checksum must come from the player's LIVE display flags,
+        // NOT the stored plate byte: the client bakes the banner checksum from the gearset's
+        // visibility at capture (== the live toggles then), and switching a gearset re-sends the
+        // banner. If the player later changes a visibility toggle without switching gearset, the
+        // client marks the gearset out-of-date and the live flags no longer match the captured
+        // banner — which is exactly the mismatch this recompute must detect. (See
+        // display_flags_to_checksum_flag for the verified bit mapping.)
+        let checksum_vis_flag = display_flags_to_checksum_flag(self.player_data.volatile.display_flags);
+        let recompute = gearset_checksum_from_equipped(equipped, glasses, checksum_vis_flag);
+        let banner = if self.player_data.plate.has_banner
+            && recompute == self.player_data.plate.banner().checksum
+        {
+            self.player_data.plate.banner()
+        } else {
+            PortraitBanner::default()
+        };
+
+        // 12-slot ordering (waist and soul crystal excluded): MainHand, OffHand, Head, Body,
+        // Hands, Legs, Feet, Ears, Neck, Wrists, RightRing, LeftRing. The client fills item_ids
+        // and both stain arrays from a single loop over the equipped container (verified against
+        // BannerHelper_TryGetItemDataFromEquippedItems), so ids and stains MUST use the same ring
+        // order: right ring at index 10, left ring at index 11. (Note: the adventurer-plate code
+        // in database/character.rs swaps the rings between item_ids and stains — that is a bug
+        // there; do not mirror it.)
+        let item_ids = [
+            equipped.main_hand.apparent_id(),
+            equipped.off_hand.apparent_id(),
+            equipped.head.apparent_id(),
+            equipped.body.apparent_id(),
+            equipped.hands.apparent_id(),
+            equipped.legs.apparent_id(),
+            equipped.feet.apparent_id(),
+            equipped.ears.apparent_id(),
+            equipped.neck.apparent_id(),
+            equipped.wrists.apparent_id(),
+            equipped.right_ring.apparent_id(),
+            equipped.left_ring.apparent_id(),
+        ];
+        let stain0 = [
+            equipped.main_hand.stains[0],
+            equipped.off_hand.stains[0],
+            equipped.head.stains[0],
+            equipped.body.stains[0],
+            equipped.hands.stains[0],
+            equipped.legs.stains[0],
+            equipped.feet.stains[0],
+            equipped.ears.stains[0],
+            equipped.neck.stains[0],
+            equipped.wrists.stains[0],
+            equipped.right_ring.stains[0],
+            equipped.left_ring.stains[0],
+        ];
+        let stain1 = [
+            equipped.main_hand.stains[1],
+            equipped.off_hand.stains[1],
+            equipped.head.stains[1],
+            equipped.body.stains[1],
+            equipped.hands.stains[1],
+            equipped.legs.stains[1],
+            equipped.feet.stains[1],
+            equipped.ears.stains[1],
+            equipped.neck.stains[1],
+            equipped.wrists.stains[1],
+            equipped.right_ring.stains[1],
+            equipped.left_ring.stains[1],
+        ];
+
+        PartyPortraitEntry {
+            encrypted_aid: 0, // Kawari has no AID encryption
+            content_id: self.player_data.character.content_id as u64,
+            gear_visibility_flag,
+            class_job_id,
+            banner,
+            item_ids,
+            glasses,
+            customize,
+            stain0,
+            stain1,
+        }
+    }
+
+    /// Sends this player their own job portrait in slot 0 via the single-slot 634 packet.
+    /// First-cut party-portrait dispatch (Phase 4): own portrait only, own connection context.
+    pub async fn send_own_party_portrait(&mut self) {
+        let entry = self.build_own_portrait_entry();
+        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PartyMemberPortrait {
+            slot_index: 0,
+            entry,
+        });
+        self.send_ipc_self(ipc).await;
     }
 
     pub async fn send_conditions(&mut self) {

@@ -726,5 +726,10 @@ impl ZoneConnection {
             ],
         }))
         .await;
+
+        // First-cut party-portrait dispatch (Phase 4): send the player their own portrait in
+        // slot 0. This runs only inside an instanced duty because setup_director early-returns
+        // unless current_instance_id is set.
+        self.send_own_party_portrait().await;
     }
 }

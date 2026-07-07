@@ -941,8 +941,8 @@ impl WorldDatabase {
                 equipped.ears.stains[0],
                 equipped.neck.stains[0],
                 equipped.wrists.stains[0],
-                equipped.left_ring.stains[0],
                 equipped.right_ring.stains[0],
+                equipped.left_ring.stains[0],
             ];
             design.stain_ids2 = [
                 equipped.main_hand.stains[1],
@@ -955,8 +955,8 @@ impl WorldDatabase {
                 equipped.ears.stains[1],
                 equipped.neck.stains[1],
                 equipped.wrists.stains[1],
-                equipped.left_ring.stains[1],
                 equipped.right_ring.stains[1],
+                equipped.left_ring.stains[1],
             ];
             // Use the apparent (glamoured) id so glamoured gear shows its glamour on the plate,
             // matching what the player sees on their character.
