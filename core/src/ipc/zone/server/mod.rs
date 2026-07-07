@@ -446,6 +446,40 @@ pub struct PartyPortraitEntry {
     pub stain1: [u8; 12], // +162
 }
 
+/// One melded materia within an examine equipment entry. 4 bytes: u16 id + u8 grade + u8 pad.
+/// Verified against the client examine handler (materia loop at 0x140c15570, 4-byte stride).
+#[binrw]
+#[derive(Debug, Clone, Default)]
+pub struct ExamineMateria {
+    /// Materia catalog id (index into the Materia sheet). 0 = empty.
+    pub id: u16,
+    /// Materia grade (0-based; grade 11 = Materia XII). Only the low byte is used by the client.
+    pub grade: u8,
+    pub pad: u8,
+}
+
+/// One equipment slot in the examine packet. 40 bytes. Slot order follows the equipment array
+/// (main, off, head, body, hands, waist, legs, feet, ears, neck, right ring, left ring, soul
+/// crystal). Field offsets verified against the client handler `Inspect.HandleExaminePacket`
+/// (0x140c15120): catalog +0x00, glamour +0x04, crafter +0x08, materia +0x12, stains +0x26/+0x27.
+#[binrw]
+#[derive(Debug, Clone, Default)]
+pub struct ExamineEquipEntry {
+    /// Real (unglamoured) item catalog id. 0 = empty slot.
+    pub catalog_id: u32, // +0x00
+    /// Glamoured-to item id, or 0 for none.
+    pub glamour_id: u32, // +0x04
+    /// Crafter content id / signature (0 for non-signed items).
+    pub crafter_content_id: u64, // +0x08
+    pub unk_10: u16, // +0x10 (not read by the client)
+    /// Up to 5 melded materia.
+    pub materia: [ExamineMateria; 5], // +0x12 (20 bytes)
+    /// Primary dye.
+    pub stain0: u8, // +0x26
+    /// Secondary dye.
+    pub stain1: u8, // +0x27
+}
+
 #[opcode_data(ServerZoneIpcType)]
 #[binrw]
 #[br(import(magic: &ServerZoneIpcType, size: &u32))]
@@ -1324,15 +1358,48 @@ pub enum ServerZoneIpcData {
         unk2: u8,
         map_data: [DeepDungeonRoomFlag; 25],
     },
+    /// Sent in response to examining another character. 944 bytes. Field offsets verified against
+    /// the client handler `Inspect.HandleExaminePacket` (0x140c15120). Only the fields needed for
+    /// the examine window are modelled; the rest is opaque padding.
+    ///
+    /// NOTE: retail scrambles this packet's header/name/equipment when packet obfuscation is
+    /// active. Kawari sends plaintext (obfuscation is off by default); if obfuscation is ever
+    /// enabled, `scramble_packet` needs an arm for this opcode.
     ExamineCharacterInformation {
-        unk1: [u8; 640],
-        /// The requested player's name.
+        /// Examine kind / entity discriminator (4 = a normal player character).
+        examine_kind: u8, // 0x00
+        unk_01: u8,       // 0x01
+        /// Current class/job (index into the ClassJob sheet). Not derived from the soul crystal.
+        class_job_id: u8, // 0x02
+        /// Current level.
+        level: u8, // 0x03
+        #[brw(pad_before = 1, pad_after = 11)] // 0x04 unk04, 0x05..0x0F pad
+        unk_04: u8,
+        /// The examined player's content id.
+        content_id: u64, // 0x10
+        #[brw(pad_before = 25)] // 0x18..0x31 (26 bytes) opaque header block
+        /// Home world id (index into the World sheet).
+        world_id: u16, // 0x32
+        #[brw(pad_before = 20)] // 0x34..0x47 opaque
+        /// Title id (index into the Title sheet).
+        title_id: u16, // 0x48
+        #[brw(pad_before = 6)] // 0x4A..0x4F pad
+        /// The 14 equipment slots (main, off, head, body, hands, waist, legs, feet, ears, neck,
+        /// right ring, left ring, soul crystal), in EquipSlot order. 0x50..0x27F.
+        equipment: [ExamineEquipEntry; 14],
+        /// The examined player's name. 0x280, 32 bytes null-padded.
         #[brw(pad_size_to = CHAR_NAME_MAX_LENGTH)]
         #[br(count = CHAR_NAME_MAX_LENGTH)]
         #[br(map = read_string)]
         #[bw(map = write_string)]
         name: String,
-        unk2: [u8; 272],
+        /// Appearance/name-tail block copied by the client to its inspect struct. 0x2A0.
+        appearance_block: [u8; 32],
+        /// The examined player's appearance. 0x2C0, 26 bytes.
+        customize: CustomizeData,
+        /// Remaining tail: free company name, display block, and the stat/attribute array
+        /// (0x2DA..0x3AF). Not needed for the basic examine window; sent as zeroes.
+        tail: [u8; 214],
     },
     OtherSearchInfo {
         /// The requested player's content ID.

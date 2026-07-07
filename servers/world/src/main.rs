@@ -1760,15 +1760,17 @@ async fn process_packet(
                                     ))
                                     .await;
                             }
-                            ClientTriggerCommand::ExamineCharacter { .. } => {
-                                let ipc = ServerZoneIpcSegment::new(
-                                    ServerZoneIpcData::ExamineCharacterInformation {
-                                        unk1: [0; 640],
-                                        name: "test".to_string(),
-                                        unk2: [0; 272],
-                                    },
-                                );
-                                connection.send_ipc_self(ipc).await;
+                            ClientTriggerCommand::ExamineCharacter { target_actor_id } => {
+                                let examine_data = {
+                                    let mut game_data = connection.gamedata.lock();
+                                    let mut database = connection.database.lock();
+                                    database.build_examine_data(target_actor_id, &mut game_data)
+                                };
+                                // `None` => the target isn't a player (NPC/summon/etc.); don't respond.
+                                if let Some(examine_data) = examine_data {
+                                    let ipc = ServerZoneIpcSegment::new(examine_data);
+                                    connection.send_ipc_self(ipc).await;
+                                }
                             }
                             ClientTriggerCommand::ToggleNoviceStatus { .. } => {
                                 if connection.player_data.search_info.online_status

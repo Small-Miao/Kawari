@@ -3,7 +3,7 @@ use diesel::prelude::*;
 use super::{Character, WorldDatabase, models, schema};
 use crate::{
     CharaMake, ClassLevels, ClientSelectData, GameData, GrandCompanyRanks, PlayerData, RemakeMode,
-    inventory::Inventory,
+    inventory::{Inventory, Storage},
 };
 use kawari::{
     common::{
@@ -13,8 +13,8 @@ use kawari::{
     ipc::{
         lobby::{CharacterDetails, CharacterFlag},
         zone::{
-            GameMasterRank, GrandCompany as IpcGrandCompany, OnlineStatus, ServerZoneIpcData,
-            ServerZoneIpcSegment, SocialListUILanguages,
+            ExamineEquipEntry, ExamineMateria, GameMasterRank, GrandCompany as IpcGrandCompany,
+            OnlineStatus, ServerZoneIpcData, ServerZoneIpcSegment, SocialListUILanguages,
         },
     },
 };
@@ -1002,6 +1002,96 @@ impl WorldDatabase {
             design,
             comment: search_info.comment.clone(),
             name: for_character.name.clone(),
+        })
+    }
+
+    /// Builds the examine (`ExamineCharacterInformation`, opcode 812) response for `for_actor_id`.
+    ///
+    /// Returns `None` when no character row exists for the actor id — i.e. the examine target is
+    /// not a player (NPC, summon, etc.). The handler skips sending in that case rather than
+    /// panicking. When the target is a player, all fields are read from the DB (this is the
+    /// "querying another player" pattern; no live `ZoneConnection` for the target exists).
+    pub fn build_examine_data(
+        &mut self,
+        for_actor_id: ObjectId,
+        game_data: &mut GameData,
+    ) -> Option<ServerZoneIpcData> {
+        use models::*;
+
+        let for_character;
+        {
+            use schema::character::dsl::*;
+
+            // Non-player guard: no matching character row => not a player, don't respond.
+            for_character = character
+                .filter(actor_id.eq(for_actor_id))
+                .select(Character::as_select())
+                .first(&mut self.connection)
+                .ok()?;
+        }
+
+        let inventory = Inventory::belonging_to(&for_character)
+            .select(Inventory::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+        let classjob = ClassJob::belonging_to(&for_character)
+            .select(ClassJob::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+        let volatile = Volatile::belonging_to(&for_character)
+            .select(Volatile::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+        let customize = Customize::belonging_to(&for_character)
+            .select(Customize::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+
+        let equipped = &inventory.contents.equipped;
+
+        // Build the 14-slot equipment array in EquipSlot order (main, off, head, body, hands,
+        // waist, legs, feet, ears, neck, right ring, left ring, soul crystal).
+        let mut equipment: [ExamineEquipEntry; 14] = Default::default();
+        for (slot, entry) in equipment.iter_mut().enumerate() {
+            let item = equipped.get_slot(slot as u16);
+            let mut materia: [ExamineMateria; 5] = Default::default();
+            for (i, m) in materia.iter_mut().enumerate() {
+                m.id = item.materia[i];
+                m.grade = item.materia_grades[i];
+            }
+            *entry = ExamineEquipEntry {
+                catalog_id: item.item_id,
+                glamour_id: item.glamour_id,
+                crafter_content_id: item.crafter_content_id,
+                unk_10: 0,
+                materia,
+                stain0: item.stains[0],
+                stain1: item.stains[1],
+            };
+        }
+
+        // Resolve the current class level via the EXP array index (same mapping the live
+        // connection uses in `current_level`).
+        let level = game_data
+            .get_exp_array_index(classjob.current_class as u16)
+            .map(|index| classjob.levels.0[index as usize])
+            .unwrap_or(0);
+
+        let config = get_config();
+        Some(ServerZoneIpcData::ExamineCharacterInformation {
+            examine_kind: 4,
+            unk_01: 0,
+            class_job_id: classjob.current_class as u8,
+            level: level as u8,
+            unk_04: 0,
+            content_id: for_character.content_id as u64,
+            world_id: config.world.world_id,
+            title_id: volatile.title as u16,
+            equipment,
+            name: for_character.name.clone(),
+            appearance_block: [0; 32],
+            customize: customize.chara_make.customize,
+            tail: [0; 214],
         })
     }
 
