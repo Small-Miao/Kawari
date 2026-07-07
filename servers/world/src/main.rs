@@ -1785,6 +1785,7 @@ async fn process_packet(
                                     database.commit_search_info(&connection.player_data);
                                 }
                                 connection.update_online_status().await;
+                                connection.update_search_info().await;
                             }
                             ClientTriggerCommand::OpenUnk1 { .. } => {
                                 for i in 0..10 {
@@ -3317,6 +3318,7 @@ async fn process_packet(
                             database.commit_search_info(&connection.player_data);
                         }
                         connection.update_online_status().await;
+                        connection.update_search_info().await;
                     }
                     ClientZoneIpcData::RequestOwnSearchInfo { .. } => {
                         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::SetSearchInfo(

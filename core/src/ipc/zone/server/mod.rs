@@ -737,6 +737,22 @@ pub enum ServerZoneIpcData {
         linkshells: Vec<CrossworldLinkshell>,
     },
     SetSearchInfo(SearchInfo),
+    /// Echoes the player's own search info back after they edit it. Same fields as
+    /// [`SearchInfo`], but the wire layout differs: here `unk1` is 13 bytes (vs 9) and the
+    /// trailing padding is 134 bytes (vs 138), keeping the total at 216 bytes.
+    UpdateSearchInfo {
+        online_status: OnlineStatusMask,
+        unk1: [u8; 13],
+        selected_languages: SocialListUILanguages,
+        #[brw(pad_size_to = 60)]
+        #[br(count = 60)]
+        #[br(map = read_string)]
+        #[bw(map = write_string)]
+        comment: String,
+        #[br(count = 134)]
+        #[bw(pad_size_to = 134)]
+        unk: Vec<u8>,
+    },
     Blacklist(Blacklist),
     WalkInEvent {
         /// Object ID of the ClientPath in the zone.

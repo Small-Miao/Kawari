@@ -587,6 +587,10 @@ ServerZoneIpcType:
   comment: Used when the player requests someone else's search info.
   opcode: 664
   size: 424
+- name: UpdateSearchInfo
+  comment: Echoes the player's own search info back to them after they edit it (e.g. changing online status or search comment). Sent only to the editing player.
+  opcode: 766
+  size: 216
 - name: SetPlayerCustomizeData
   comment: Unknown purpose.
   opcode: 522

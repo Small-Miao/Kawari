@@ -411,6 +411,20 @@ impl ZoneConnection {
             .await;
     }
 
+    /// Echoes the player's own search info (online status + comment + languages) back to them,
+    /// mirroring retail behaviour after editing search info or online status. Sent only to self.
+    pub async fn update_search_info(&mut self) {
+        let search_info = &self.player_data.search_info;
+        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateSearchInfo {
+            online_status: OnlineStatusMask::from_online_status(search_info.online_status),
+            unk1: [0; 13],
+            selected_languages: search_info.selected_languages,
+            comment: search_info.comment.clone(),
+            unk: vec![0; 134],
+        });
+        self.send_ipc_self(ipc).await;
+    }
+
     /// Searches for online players.
     pub async fn search_players(
         &mut self,
