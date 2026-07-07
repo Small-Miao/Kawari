@@ -345,10 +345,30 @@ impl ZoneConnection {
         self.send_ipc_self(ipc).await;
     }
 
-    /// Determine the online status mask, with party/novice/mentor status.
+    /// Determine our OWN online status mask, with party/novice/mentor status.
+    ///
+    /// The party bits come from this connection's LIVE in-memory party state
+    /// (`party_id`/`is_party_leader`), NOT the `party` DB table. The DB table is committed
+    /// asynchronously (see `commit_parties`) and therefore lags behind party changes; reading it
+    /// here would broadcast a stale party icon after leaving/disbanding a party, leaving the
+    /// leader/member icon stuck on observers' nametags. The live fields are already updated by
+    /// `send_party_update` before it calls `update_online_status`, so they are always current.
     pub fn get_online_status_mask(&self) -> OnlineStatusMask {
-        let mut database = self.database.lock();
-        database.determine_online_status_mask(self.player_data.character.content_id)
+        let mut mask = {
+            let mut database = self.database.lock();
+            database.determine_base_online_status_mask(self.player_data.character.content_id)
+        };
+
+        // Layer party bits from live state, but only if we're actually online (base mask carries
+        // the Online bit; it's empty otherwise).
+        if mask.has_status(OnlineStatus::Online) && self.party_id != 0 {
+            mask.set_status(OnlineStatus::PartyMember);
+            if self.is_party_leader {
+                mask.set_status(OnlineStatus::PartyLeader);
+            }
+        }
+
+        mask
     }
 
     /// Grabs the correct online status, taking into account the priority of each icon.

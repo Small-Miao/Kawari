@@ -147,8 +147,17 @@ impl WorldDatabase {
         online_players
     }
 
-    /// Determine the online status mask, with party/novice/mentor status.
-    pub fn determine_online_status_mask(&mut self, for_content_id: i64) -> OnlineStatusMask {
+    /// Determine the base online status mask (online bit + the user's chosen status), WITHOUT
+    /// any party membership bits.
+    ///
+    /// Party bits are intentionally excluded here because the `party` DB table is committed
+    /// asynchronously (see `commit_parties`), so it lags behind live party changes. Callers that
+    /// know the authoritative party state (e.g. a `ZoneConnection` via its in-memory
+    /// `party_id`/`is_party_leader`) should layer the party bits on top themselves. Callers that
+    /// only have the DB (querying *other* players) should use [`determine_online_status_mask`].
+    ///
+    /// Returns an empty mask if the player is not online.
+    pub fn determine_base_online_status_mask(&mut self, for_content_id: i64) -> OnlineStatusMask {
         let mut new_status_mask = OnlineStatusMask::default();
 
         // Only apply online-related statuses if they're actually online.
@@ -160,6 +169,31 @@ impl WorldDatabase {
         {
             new_status_mask.set_status(OnlineStatus::Online);
 
+            // And of course, add the user's chosen status
+            new_status_mask.set_status(
+                schema::search_info::dsl::search_info
+                    .select(schema::search_info::dsl::online_status)
+                    .filter(schema::search_info::dsl::content_id.eq(for_content_id))
+                    .first::<OnlineStatus>(&mut self.connection)
+                    .unwrap(),
+            );
+        }
+
+        new_status_mask
+    }
+
+    /// Determine the online status mask, with party/novice/mentor status.
+    ///
+    /// The party bits are read from the (asynchronously committed) `party` DB table, so this
+    /// reflects the *last committed* party state. Use this only when querying players for whom no
+    /// live `ZoneConnection` is available (social list, search results, examining others). For a
+    /// player's OWN status, prefer the connection-side path that reads live party state, to avoid
+    /// the commit-lag race that would otherwise leave stale party icons on observers' nametags.
+    pub fn determine_online_status_mask(&mut self, for_content_id: i64) -> OnlineStatusMask {
+        let mut new_status_mask = self.determine_base_online_status_mask(for_content_id);
+
+        // Only apply party bits if they're actually online (base mask is empty otherwise).
+        if new_status_mask.has_status(OnlineStatus::Online) {
             let parties: Vec<models::Party> = schema::party::dsl::party
                 .load(&mut self.connection)
                 .unwrap();
@@ -172,15 +206,6 @@ impl WorldDatabase {
                     break;
                 }
             }
-
-            // And of course, add the user's chosen status
-            new_status_mask.set_status(
-                schema::search_info::dsl::search_info
-                    .select(schema::search_info::dsl::online_status)
-                    .filter(schema::search_info::dsl::content_id.eq(for_content_id))
-                    .first::<OnlineStatus>(&mut self.connection)
-                    .unwrap(),
-            );
         }
 
         new_status_mask
