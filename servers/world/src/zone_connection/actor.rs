@@ -222,6 +222,7 @@ impl ZoneConnection {
             sec_weapon_model: inventory.get_sub_weapon_id(&mut game_data),
             models: inventory.legacy_model_ids(&mut game_data),
             second_model_stain_ids: inventory.second_model_stain_ids(),
+            glasses_ids: inventory.equipped.glasses,
             position: self.player_data.volatile.position,
             rotation: self.player_data.volatile.rotation as f32,
             voice: chara_make.voice_id as u8,

@@ -1541,6 +1541,60 @@ async fn process_packet(
                                     ))
                                     .await;
                             }
+                            ClientTriggerCommand::EquipGlasses { slot, id } => {
+                                let slot_idx = slot as usize;
+                                if slot_idx >= 2 {
+                                    tracing::warn!(
+                                        "Ignoring EquipGlasses for out-of-range facewear slot {slot}"
+                                    );
+                                } else {
+                                    // Capture the previously-worn facewear before overwriting it:
+                                    // on removal (id == 0) the client still logs "took off <name>",
+                                    // so the LogMessage must reference the OLD id, not the new 0.
+                                    let previous_id = connection
+                                        .player_data
+                                        .inventory
+                                        .equipped
+                                        .glasses[slot_idx];
+
+                                    // Mutate live facewear state. This lives in the inventory blob,
+                                    // so it persists via commit_player_data on logout like other
+                                    // equipped changes.
+                                    connection.player_data.inventory.equipped.glasses[slot_idx] =
+                                        id as u16;
+
+                                    // Inform the player via chat: equip uses row 10569 with the
+                                    // newly-equipped id, removal (id == 0) uses row 10570 with the
+                                    // id that was just taken off. param1 carries the facewear id
+                                    // (the message text's `<sheet(Glasses,lnum1,4)>` reads lnum1).
+                                    let (log_message, log_facewear_id) = if id == 0 {
+                                        (10570, previous_id as u32)
+                                    } else {
+                                        (10569, id)
+                                    };
+                                    connection
+                                        .actor_control_self(ActorControlCategory::LogMessage {
+                                            log_message,
+                                            param1: log_facewear_id,
+                                            param2: 0,
+                                            param3: 0,
+                                            param4: 0,
+                                            param5: 0,
+                                        })
+                                        .await;
+
+                                    // Inform the server, so it updates the authoritative spawn and
+                                    // broadcasts the visual update to self + nearby players.
+                                    connection
+                                        .handle
+                                        .send(ToServer::ClientTrigger(
+                                            connection.id,
+                                            connection.player_data.character.actor_id,
+                                            trigger.clone(),
+                                        ))
+                                        .await;
+                                }
+                            }
                             ClientTriggerCommand::AbandonContent { .. } => {
                                 // Remove ourselves from this instance.
                                 connection

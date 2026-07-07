@@ -22,6 +22,10 @@ pub struct EquippedStorage {
     pub right_ring: Item,
     pub left_ring: Item,
     pub soul_crystal: Item,
+    /// Live facewear (glasses) ids, indexed by facewear slot (0/1; only slot 0 used in practice).
+    /// Persisted with the inventory JSON blob; `#[serde(default)]` keeps old rows compatible.
+    #[serde(default)]
+    pub glasses: [u16; 2],
 }
 
 // On the EquipSlotCategory sheet, -1 means that item slot can't be equipped while another item restricts it.

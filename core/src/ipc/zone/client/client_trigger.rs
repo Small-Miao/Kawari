@@ -1136,6 +1136,13 @@ pub enum ClientTriggerCommand {
         action_id: u32,
     },
 
+    #[brw(magic = 1820u32)]
+    PlayInstrument {
+        /// 0 to stop playing
+        /// Corresponding to row id of Perform sheet.
+        instrument_id: u32,
+    },
+
     /// The client opens the General tab in the Gold Saucer window.
     #[brw(magic = 1850u32)]
     OpenGoldSaucerGeneralTab {},

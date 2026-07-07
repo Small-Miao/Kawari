@@ -2449,6 +2449,45 @@ pub async fn server_main_loop(
                                 DestinationNetwork::ZoneClients,
                             );
                         }
+                        ClientTriggerCommand::EquipGlasses { slot, id } => {
+                            let slot_idx = *slot as usize;
+                            let mut data = data.lock();
+                            if slot_idx < 2
+                                && let Some(instance) =
+                                    data.find_actor_instance_mut(from_actor_id)
+                                && let Some(actor) = instance.find_actor_mut(from_actor_id)
+                            {
+                                match actor {
+                                    NetworkedActor::Player { spawn, .. } => {
+                                        spawn.common.glasses_ids[slot_idx] = *id as u16;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+
+                            // Inform the equipping player AND nearby players. The equipping
+                            // player must receive this too: it drives their own visual facewear
+                            // update and (via refresh_own_gearset_ui=1) their gearset-list UI
+                            // refresh, so the broadcast is inclusive of the source actor.
+                            let msg = FromServer::ActorControl(
+                                from_actor_id,
+                                ActorControlCategory::UpdateFacewear {
+                                    slot: *slot,
+                                    facewear_id: *id,
+                                    refresh_own_gearset_ui: 1,
+                                },
+                            );
+
+                            if let Some(instance) = data.find_actor_instance(from_actor_id) {
+                                let mut network = network.lock();
+                                network.send_in_range_inclusive_instance(
+                                    from_actor_id,
+                                    instance,
+                                    msg,
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+                        }
                         ClientTriggerCommand::PlaceWaymark { id, pos } => {
                             let data = data.lock();
                             let mut network = network.lock();

@@ -898,6 +898,16 @@ pub enum ActorControlCategory {
         unlocked: bool,
     },
 
+    /// Sent when a player equips or removes facewear (glasses). Updates the target's visual
+    /// facewear (unconditional client-side); `refresh_own_gearset_ui` (always 1) additionally
+    /// tells the receiving client to re-evaluate its own gearset list UI.
+    #[brw(magic = 944u32)]
+    UpdateFacewear {
+        slot: u32,
+        facewear_id: u32,
+        refresh_own_gearset_ui: u32,
+    },
+
     #[brw(magic = 945u32)]
     ToggleGlassesStyleUnlock {
         id: u32, // Index to GlassesStyle sheet

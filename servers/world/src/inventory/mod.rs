@@ -19,6 +19,11 @@ use kawari::ipc::zone::ItemOperation;
 mod buyback;
 pub use buyback::BuyBackList;
 
+mod checksum;
+pub use checksum::{
+    display_flags_to_checksum_flag, gearset_checksum, gearset_checksum_from_equipped,
+};
+
 mod equipped;
 pub use equipped::{EQUIP_RESTRICTED, EquippedStorage};
 
