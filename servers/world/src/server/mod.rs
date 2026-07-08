@@ -1665,6 +1665,23 @@ pub async fn server_main_loop(
                                     DestinationNetwork::ZoneClients,
                                 );
                             }
+                            QueuedTaskData::BroadcastPacketSegment { segment } => {
+                                let data = data.lock();
+                                let mut network = network.lock();
+                                if let Some(instance) =
+                                    data.find_actor_instance(task.from_actor_id)
+                                {
+                                    network.send_in_range_instance(
+                                        task.from_actor_id,
+                                        instance,
+                                        FromServer::PacketSegment(
+                                            segment.clone(),
+                                            task.from_actor_id,
+                                        ),
+                                        DestinationNetwork::ZoneClients,
+                                    );
+                                }
+                            }
                             QueuedTaskData::WarpToPopRange { id } => {
                                 let mut data = data.lock();
                                 let mut network = network.lock();

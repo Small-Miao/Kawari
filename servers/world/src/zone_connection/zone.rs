@@ -528,6 +528,11 @@ impl ZoneConnection {
 
     pub async fn warp(&mut self, warp_id: u32) {
         self.teleport_reason = TeleportReason::NotSpecified;
+        // A same-zone warp never runs `handle_zone_change`, so `zone_in_confirmed` would stay `true`
+        // from the last zone-in and the client's post-warp `FinishZoning` would be ignored — leaving
+        // us (and observers, via the ZoneIn broadcast) without the teleport-in re-show. Reset it here
+        // so the upcoming `FinishZoning` fires `ToServer::ZoneIn`.
+        self.zone_in_confirmed = false;
         self.handle
             .send(ToServer::Warp(
                 self.id,
@@ -544,6 +549,9 @@ impl ZoneConnection {
         taking_offered_teleport: bool,
     ) {
         self.teleport_reason = TeleportReason::Aetheryte;
+        // See `warp`: reset so the post-warp `FinishZoning` re-triggers ZoneIn even for a same-zone
+        // aetheryte teleport (which otherwise skips `handle_zone_change`).
+        self.zone_in_confirmed = false;
         self.handle
             .send(ToServer::WarpAetheryte(
                 self.id,

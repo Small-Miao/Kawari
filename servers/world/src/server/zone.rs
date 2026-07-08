@@ -905,13 +905,33 @@ fn begin_change_zone<'a>(
 
         // inform the players in this zone that this actor left
         if let Some(current_instance) = data.find_actor_instance_mut(actor_id) {
-            // HACK: This is to prevent actors from disappearing when warping within the same zone.
             if current_instance.zone.id != destination_zone_id {
+                // Cross-zone warp: fully despawn the actor for everyone in the old zone.
                 carried_combat_state =
                     take_combat_state_and_despawn_pets(current_instance, network, actor_id);
 
                 network.remove_actor(current_instance, actor_id);
                 needs_init_zone = true;
+            } else {
+                // Same-zone warp: the actor must stay spawned (retail keeps it — the party list
+                // HP/MP bars never clear). Instead of removing it, play the teleport-out vanish
+                // effect on it for *observers* so their copy fades away here rather than sliding to
+                // the destination. The warping player themselves fades via PrepareZoning (above) and
+                // must not receive this. Observers are re-shown at the destination later by ZoneIn
+                // (triggered when the warping client sends FinishZoning). Retail sends this at
+                // teleport start, alongside the teleporter's PrepareZoning.
+                network.send_in_range_instance(
+                    actor_id,
+                    current_instance,
+                    FromServer::ActorControl(
+                        actor_id,
+                        ActorControlCategory::ActorDespawnEffect {
+                            warp_mode: 1,
+                            animation: 0,
+                        },
+                    ),
+                    DestinationNetwork::ZoneClients,
+                );
             }
         }
 
@@ -1207,7 +1227,8 @@ fn do_change_zone(
         );
         network.send_to(from_id, msg, DestinationNetwork::ZoneClients);
     } else {
-        // We want to delay sending this to give time for the client to fade out.
+        // Same-zone warp: no re-init/respawn. Relocate the actor in place. We delay this to give
+        // the client time to fade out (the warping player) / finish the vanish effect (observers).
         let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(ActorSetPos {
             position: exit_position.unwrap_or_default(),
             rotation: exit_rotation.unwrap_or_default(),
@@ -1215,11 +1236,22 @@ fn do_change_zone(
             warp_type_arg: 2, // unknown
             ..Default::default()
         }));
+        // Snap the warping player themselves.
         target_instance.insert_task(
             from_id,
             actor_id,
             WARP_DELAY,
-            QueuedTaskData::PacketSegment { segment },
+            QueuedTaskData::PacketSegment {
+                segment: segment.clone(),
+            },
+        );
+        // Snap the actor for everyone else in the zone too, so their (currently faded-out) copy is
+        // repositioned to the destination instead of lerping across the map once ZoneIn re-shows it.
+        target_instance.insert_task(
+            from_id,
+            actor_id,
+            WARP_DELAY,
+            QueuedTaskData::BroadcastPacketSegment { segment },
         );
     }
 }
@@ -1488,6 +1520,11 @@ pub fn handle_zone_messages(
                 .get_aetheryte(*aetheryte_id, *housing_aethernet)
                 .expect("Failed to find the aetheryte!");
 
+            // Aetheryte teleports use WarpType::Teleport (4), NOT Normal (1). The client echoes this
+            // in PrepareZoning/ActorSetPos/FinishZoning and it selects the teleport-specific arrival
+            // transition; with Normal, the teleport-out animation never gets cleared and the caster
+            // stays stuck in the teleport pose (for themselves and for observers of the broadcast
+            // ActorSetPos). Matches retail captures.
             change_zone_warp_to_pop_range(
                 &mut data,
                 &mut network,
@@ -1496,7 +1533,7 @@ pub fn handle_zone_messages(
                 destination_instance_id,
                 *actor_id,
                 *from_id,
-                WarpType::Normal,
+                WarpType::Teleport,
                 0,
                 0,
                 0,

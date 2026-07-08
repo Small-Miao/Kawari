@@ -989,6 +989,31 @@ pub fn execute_action(
     };
 
     if let Some(mut effects_builder) = effects_builder {
+        // Retail's Teleport (action 5) ActionResult carries a single magic-61 effect holding the
+        // destination TerritoryType (effect_count = 1). Kawari's Teleport Lua returns an empty
+        // builder, so without this the result is malformed (effect_count = 0) and the teleport-out
+        // animation never resolves — the caster stays stuck in the teleport pose. Resolve the
+        // destination territory from the queued aetheryte and attach the effect to match retail.
+        const TELEPORT_ACTION_ID: u32 = 5;
+        if resolved_request.action_id == TELEPORT_ACTION_ID {
+            let territory = {
+                let mut game_data = game_data.lock();
+                game_data
+                    .get_aetheryte(
+                        lua_player.player_data.teleport_query.aetheryte_id as u32,
+                        false,
+                    )
+                    .map(|(_, zone)| zone)
+                    .unwrap_or_default()
+            };
+            effects_builder.effects.push(ActionEffect {
+                kind: EffectKind::Teleport {
+                    unk: [0; 5],
+                    territory,
+                },
+            });
+        }
+
         let cleared_cooldown_groups;
         let summoner_gauge_data;
         let bard_gauge_data;

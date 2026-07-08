@@ -138,6 +138,12 @@ pub enum QueuedTaskData {
     PacketSegment {
         segment: ServerZoneIpcSegment,
     },
+    /// Like `PacketSegment`, but broadcast to every client in range of the actor *except* the actor
+    /// itself. Used by `do_change_zone` to snap observers to a same-zone warp destination (the
+    /// teleporter gets their own copy via `PacketSegment`).
+    BroadcastPacketSegment {
+        segment: ServerZoneIpcSegment,
+    },
     /// Used by directors since its tough to fit this into the director logic.
     WarpToPopRange {
         id: u32,

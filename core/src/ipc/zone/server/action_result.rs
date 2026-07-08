@@ -270,6 +270,13 @@ pub enum EffectKind {
     /// really NoEffectText). Empty payload. Server must ALSO cancel the target's cast.
     #[brw(magic = 76u8)]
     Interrupt {},
+    /// The effect retail attaches to the Teleport action's `ActionResult` (effect type 0x3D / 61).
+    /// `territory` holds the destination TerritoryType. The client's per-target effect handler is a
+    /// no-op for the base Teleport action, but retail always sends this so the action result is
+    /// well-formed (`effect_count = 1`); an empty result (`effect_count = 0`) leaves the teleport-out
+    /// visuals unresolved (the caster stays stuck in the teleport animation). `unk` is zero in captures.
+    #[brw(magic = 61u8)]
+    Teleport { unk: [u8; 5], territory: u16 },
     /// Unknown effect (that should be added!)
     Unknown { magic: u8, unk: [u8; 7] },
 }
@@ -669,6 +676,35 @@ mod tests {
         let mut reader = Cursor::new(raw);
         let parsed = ActionEffect::read_le(&mut reader).unwrap();
         assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_teleport_matches_capture() {
+        // Golden bytes from a retail Teleport (action 5) ActionResult effect[0]: magic 0x3D (61),
+        // all params zero, destination territory 759 (0x02F7) in the trailing u16.
+        let effect = ActionEffect {
+            kind: EffectKind::Teleport {
+                unk: [0; 5],
+                territory: 759,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw, [0x3D, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7, 0x02]);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(
+            parsed.kind,
+            EffectKind::Teleport {
+                unk: [0; 5],
+                territory: 759,
+            }
+        );
     }
 
     #[test]
