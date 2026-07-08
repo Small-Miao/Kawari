@@ -2824,12 +2824,6 @@ async fn process_packet(
                     ClientZoneIpcData::Config(config) => {
                         // Update our own state so it's committed on log out
                         connection.player_data.volatile.display_flags = config.display_flag;
-                        // Commit immediately so other systems (e.g. examine) always read
-                        // the current display flags rather than the login-time snapshot.
-                        {
-                            let mut database = connection.database.lock();
-                            database.commit_volatile(&connection.player_data);
-                        }
                         connection
                             .handle
                             .send(ToServer::Config(
