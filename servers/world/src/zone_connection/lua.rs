@@ -150,6 +150,13 @@ impl ZoneConnection {
                 LuaTask::UnlockAll {} => {
                     self.player_data.unlock.unlocks.set_all();
                 }
+                LuaTask::UnlockAllTitles {} => {
+                    self.player_data.unlock.titles.set_all();
+                    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::TitleList {
+                        unlock_bitmask: self.player_data.unlock.titles.data.clone(),
+                    });
+                    self.send_ipc_self(ipc).await;
+                }
                 LuaTask::UnlockAetheryte { id, on } => {
                     let unlock_all = *id == 0;
                     if unlock_all {

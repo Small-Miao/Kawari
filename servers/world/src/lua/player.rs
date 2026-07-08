@@ -122,6 +122,10 @@ impl LuaPlayer {
         self.queued_tasks.push(LuaTask::UnlockAll {});
     }
 
+    fn unlock_all_titles(&mut self) {
+        self.queued_tasks.push(LuaTask::UnlockAllTitles {});
+    }
+
     fn set_speed(&mut self, speed: u16) {
         let ipc =
             ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
@@ -667,6 +671,10 @@ impl UserData for LuaPlayer {
         });
         methods.add_method_mut("unlock_all", |_, this, _: ()| {
             this.unlock_all();
+            Ok(())
+        });
+        methods.add_method_mut("unlock_all_titles", |_, this, _: ()| {
+            this.unlock_all_titles();
             Ok(())
         });
         methods.add_method_mut("set_speed", |_, this, speed: u16| {
