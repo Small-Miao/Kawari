@@ -1129,6 +1129,35 @@ impl WorldDatabase {
         })
     }
 
+    /// Builds the examine free-company info (`ExamineFCInfo`, opcode 603) response for
+    /// `for_actor_id`.
+    ///
+    /// Kawari has no free company system, so the FC fields are always zero (rendered by the
+    /// client as "not in a free company"); only the content id and actor id are populated.
+    /// Returns `None` when no character row exists for the actor id (non-player target).
+    pub fn build_examine_fc_info(
+        &mut self,
+        for_actor_id: ObjectId,
+    ) -> Option<ServerZoneIpcData> {
+        let for_character;
+        {
+            use schema::character::dsl::*;
+
+            // Non-player guard: no matching character row => not a player, don't respond.
+            for_character = character
+                .filter(actor_id.eq(for_actor_id))
+                .select(Character::as_select())
+                .first(&mut self.connection)
+                .ok()?;
+        }
+
+        Some(ServerZoneIpcData::ExamineFCInfo {
+            content_id: for_character.content_id as u64,
+            actor_id: for_actor_id,
+            fc_data: vec![0; 300],
+        })
+    }
+
     /// Builds the "plate request error" response (not set / not visible / unavailable) carrying
     /// the given LogMessage row id.
     fn adventurer_plate_error(log_message_id: u32) -> ServerZoneIpcSegment {

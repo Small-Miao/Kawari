@@ -587,6 +587,10 @@ ServerZoneIpcType:
   comment: Sent in response to ExamineRequestComments; carries the examined player's search comment shown in the Examine window.
   opcode: 304
   size: 200
+- name: ExamineFCInfo
+  comment: Sent in response to ExamineRequestFCInfo; carries the examined player's free company info in the Examine window. All-zero FC fields mean no free company.
+  opcode: 603
+  size: 336
 - name: OtherSearchInfo
   comment: Used when the player requests someone else's search info.
   opcode: 664

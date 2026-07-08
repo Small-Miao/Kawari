@@ -1412,6 +1412,18 @@ pub enum ServerZoneIpcData {
         #[bw(map = write_string)]
         comment: String,
     },
+    /// Sent in response to `ExamineRequestFCInfo`. 336 bytes carrying the examined player's free
+    /// company info. Kawari has no free company system, so the FC fields (0x24 onward) are always
+    /// zero, which the client renders as "not in a free company".
+    ExamineFCInfo {
+        content_id: u64, // 0x00
+        #[brw(pad_before = 24)] // 0x08..0x1F reserved/unknown, all zero
+        actor_id: ObjectId, // 0x20
+        /// Free company fields (id, name, tag, crest, etc.), 0x24..0x14F. All zero => no FC.
+        #[br(count = 300)]
+        #[bw(pad_size_to = 300)]
+        fc_data: Vec<u8>,
+    },
     OtherSearchInfo {
         /// The requested player's content ID.
         content_id: u64,
