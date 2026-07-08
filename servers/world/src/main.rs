@@ -2088,6 +2088,15 @@ async fn process_packet(
                                             true,
                                         )
                                         .await;
+
+                                    // Dismiss the teleport offer window and clear the client's
+                                    // teleport-pending state. Retail sends this to the accepting
+                                    // party member right after they take an offered teleport;
+                                    // without it the AgentTeleport offer window stays stuck
+                                    // on-screen and the client is left in a teleport-pending state.
+                                    connection
+                                        .actor_control_self(ActorControlCategory::TeleportDone {})
+                                        .await;
                                 } else {
                                     connection.offered_teleport = None;
                                 }

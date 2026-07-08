@@ -438,6 +438,32 @@ pub enum ActorControlCategory {
         party_member_index: u32,
     },
 
+    /// Tells the client a teleport has finished, dismissing the teleport UI. The client's DOWN
+    /// handler (PacketDispatcher::HandleActorControlPacket case 205 -> Telepo_Instance) clears the
+    /// teleport-pending flag and hides the AgentTeleport (internal id 52) offer/progress window.
+    /// Retail sends this to a party member right after they accept an offered teleport (following
+    /// PrepareZoning); without it the offer window stays stuck on-screen and the client remains in a
+    /// teleport-pending state. Payload is all-zero.
+    #[brw(magic = 205u32)]
+    TeleportDone {},
+
+    /// Plays the "teleport out" vanish effect on an actor without removing it from the world. The
+    /// client's DOWN handler (PacketDispatcher::HandleActorControlPacket case 212 -> WarpInfo_Instance)
+    /// hides the actor and plays a fade/despawn animation; the guard only suppresses it for one's own
+    /// local player, so this must be broadcast to *observers* (never sent as ActorControlSelf). Retail
+    /// sends this to everyone around a player who teleports within the same zone, at teleport start
+    /// (alongside the teleporter's own PrepareZoning), so the actor fades out instead of sliding to
+    /// the destination. Pair it with a snap (ActorSetPos) and a re-show (ZoneIn) to complete the move.
+    #[brw(magic = 212u32)]
+    ActorDespawnEffect {
+        /// Selects the vanish animation. Retail: 1 for a self aetheryte teleport, 2 for a
+        /// followed/offered teleport. Both hide the actor; the difference is purely cosmetic.
+        warp_mode: u32,
+        /// Optional ActionTimeline id for the vanish animation, or 0 for the default warp-out.
+        /// Retail uses 112 for the offered/follow teleport.
+        animation: u32,
+    },
+
     /// Used for things like the water pads in Gold Saucer.
     #[brw(magic = 220u32)]
     ExecuteGimmickJump {
