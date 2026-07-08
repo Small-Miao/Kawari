@@ -1129,13 +1129,13 @@ impl WorldDatabase {
         })
     }
 
-    /// Builds the examine free-company info (`ExamineFCInfo`, opcode 603) response for
+    /// Builds the free-company short info (`FreeCompanyShortInfo`, opcode 603) response for
     /// `for_actor_id`.
     ///
     /// Kawari has no free company system, so the FC fields are always zero (rendered by the
     /// client as "not in a free company"); only the content id and actor id are populated.
     /// Returns `None` when no character row exists for the actor id (non-player target).
-    pub fn build_examine_fc_info(
+    pub fn build_free_company_short_info(
         &mut self,
         for_actor_id: ObjectId,
     ) -> Option<ServerZoneIpcData> {
@@ -1151,10 +1151,19 @@ impl WorldDatabase {
                 .ok()?;
         }
 
-        Some(ServerZoneIpcData::ExamineFCInfo {
+        Some(ServerZoneIpcData::FreeCompanyShortInfo {
             content_id: for_character.content_id as u64,
             actor_id: for_actor_id,
-            fc_data: vec![0; 300],
+            fc_create_time: 0,
+            fc_total_members: 0,
+            fc_online_members: 0,
+            fc_level: 0,
+            fc_alliance_index: 0,
+            fc_name: [0; 0x16],
+            fc_short_name: [0; 0x07],
+            fc_owner_name: [0; 0x20],
+            fc_comments: [0; 0xC1],
+            fc_housing_name: [0; 0x18],
         })
     }
 

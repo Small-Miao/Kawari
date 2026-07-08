@@ -3237,10 +3237,10 @@ async fn process_packet(
                             connection.send_ipc_self(ipc).await;
                         }
                     }
-                    ClientZoneIpcData::ExamineRequestFCInfo { target_actor_id, .. } => {
+                    ClientZoneIpcData::RequestFreeCompanyShortInfo { target_actor_id, .. } => {
                         let fc_info = {
                             let mut database = connection.database.lock();
-                            database.build_examine_fc_info(*target_actor_id)
+                            database.build_free_company_short_info(*target_actor_id)
                         };
                         // `None` => the target isn't a player; don't respond.
                         if let Some(fc_info) = fc_info {

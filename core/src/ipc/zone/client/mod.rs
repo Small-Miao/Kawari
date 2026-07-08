@@ -364,13 +364,14 @@ pub enum ClientZoneIpcData {
         target_actor_id: ObjectId,
         unk: u32,
     },
-    /// Sent alongside the Examine ClientTrigger to request the examined player's free company
-    /// info. The target actor id sits at offset 8; the other bytes are padding/stack garbage and
-    /// are ignored.
-    ExamineRequestFCInfo {
-        unk1: u64,
+    /// Requests a player's free company info. Sent both alongside the Examine ClientTrigger and
+    /// when selecting "Free Company Information" from a player's context menu. `content_id` is 0
+    /// when requested via the Examine detail button; `target_actor_id` (offset 8) identifies the
+    /// player. The trailing bytes are stack garbage and are ignored.
+    RequestFreeCompanyShortInfo {
+        content_id: u64,
         target_actor_id: ObjectId,
-        unk2: u32,
+        unk: u32,
     },
     RequestAdventurerPlate {
         /// The target identifier: a content id when `flag` == 0, or an actor id when

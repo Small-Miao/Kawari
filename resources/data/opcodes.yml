@@ -587,8 +587,8 @@ ServerZoneIpcType:
   comment: Sent in response to ExamineRequestComments; carries the examined player's search comment shown in the Examine window.
   opcode: 304
   size: 200
-- name: ExamineFCInfo
-  comment: Sent in response to ExamineRequestFCInfo; carries the examined player's free company info in the Examine window. All-zero FC fields mean no free company.
+- name: FreeCompanyShortInfo
+  comment: Sent in response to RequestFreeCompanyShortInfo; carries a player's free company info (shown in the Examine window and the context-menu FC info view). All-zero FC fields mean no free company.
   opcode: 603
   size: 336
 - name: OtherSearchInfo
@@ -1044,8 +1044,8 @@ ClientZoneIpcType:
   comment: Sent alongside the Examine ClientTrigger to request the examined player's search comment. Body starts with the target actor id.
   opcode: 182
   size: 8
-- name: ExamineRequestFCInfo
-  comment: Sent alongside the Examine ClientTrigger to request the examined player's free company info. Target actor id is at offset 8.
+- name: RequestFreeCompanyShortInfo
+  comment: Requests a player's free company info. Sent both alongside the Examine ClientTrigger and when selecting Free Company Information from a player's context menu. Content id at offset 0 (0 when requesting via the Examine detail button), target actor id at offset 8.
   opcode: 351
   size: 16
 - name: RequestAdventurerPlate

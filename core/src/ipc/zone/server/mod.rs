@@ -1412,17 +1412,28 @@ pub enum ServerZoneIpcData {
         #[bw(map = write_string)]
         comment: String,
     },
-    /// Sent in response to `ExamineRequestFCInfo`. 336 bytes carrying the examined player's free
-    /// company info. Kawari has no free company system, so the FC fields (0x24 onward) are always
-    /// zero, which the client renders as "not in a free company".
-    ExamineFCInfo {
+    /// Sent in response to `RequestFreeCompanyShortInfo`. 336 bytes carrying a player's free
+    /// company info (shown in the Examine window and the context-menu FC info view). Kawari has no
+    /// free company system, so the FC fields are always zero, which the client renders as "not in
+    /// a free company"; only `content_id` and `actor_id` are populated.
+    FreeCompanyShortInfo {
         content_id: u64, // 0x00
-        #[brw(pad_before = 24)] // 0x08..0x1F reserved/unknown, all zero
+        #[brw(pad_before = 24)] // 0x08..0x1F reserved, all zero
+        /// Not filled when the request came in by content id.
         actor_id: ObjectId, // 0x20
-        /// Free company fields (id, name, tag, crest, etc.), 0x24..0x14F. All zero => no FC.
-        #[br(count = 300)]
-        #[bw(pad_size_to = 300)]
-        fc_data: Vec<u8>,
+        /// FC creation time (time_t, 32-bit).
+        fc_create_time: u32, // 0x24
+        #[brw(pad_before = 4)] // 0x28..0x2B
+        fc_total_members: u16, // 0x2C
+        fc_online_members: u16, // 0x2E
+        #[brw(pad_before = 8)] // 0x30..0x37
+        fc_level: u8, // 0x38
+        fc_alliance_index: u8, // 0x39
+        fc_name: [u8; 0x16],       // 0x3A
+        fc_short_name: [u8; 0x07], // 0x50
+        fc_owner_name: [u8; 0x20], // 0x57
+        fc_comments: [u8; 0xC1],   // 0x77
+        fc_housing_name: [u8; 0x18], // 0x138..0x14F
     },
     OtherSearchInfo {
         /// The requested player's content ID.
