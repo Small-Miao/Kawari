@@ -1531,6 +1531,14 @@ async fn process_packet(
                             ClientTriggerCommand::SetTitle { title_id } => {
                                 connection.player_data.volatile.title = title_id as i32;
 
+                                // Refresh the title on the client's own view (retail sends this
+                                // ActorControlSelf immediately after the ClientTrigger).
+                                connection
+                                    .actor_control_self(ActorControlCategory::SetTitle {
+                                        title_id,
+                                    })
+                                    .await;
+
                                 // Inform the server, so it sends out the AC.
                                 connection
                                     .handle
