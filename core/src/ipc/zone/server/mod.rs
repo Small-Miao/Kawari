@@ -99,8 +99,9 @@ pub use free_company::FcHierarchy;
 
 mod actor_move;
 use crate::common::{
-    DeepDungeonRoomFlag, HandlerId, LandData, ObjectTypeId, Position, read_packed_position,
-    read_quantized_rotation, write_packed_position, write_quantized_rotation,
+    DeepDungeonRoomFlag, HandlerId, LandData, LegacyEquipmentModelId, ObjectTypeId, Position,
+    WeaponModelId, read_packed_position, read_quantized_rotation, write_packed_position,
+    write_quantized_rotation,
 };
 use crate::constants::{
     AVAILABLE_CLASSJOBS, COMPLETED_LEGACY_QUEST_BITMASK_SIZE, COMPLETED_LEVEQUEST_BITMASK_SIZE,
@@ -470,11 +471,9 @@ pub struct ExamineEquipEntry {
     pub glamour_id: u32, // +0x04
     /// Crafter content id / signature (0 for non-signed items).
     pub crafter_content_id: u64, // +0x08
-    /// "Has dye" flag: `1` when the item has any applied dye, `0` otherwise. The client gates
-    /// rendering the dyes on this being non-zero, so it MUST be set for dyes to show. Verified by
-    /// capture diffing: an item with materia but no dye still has this at `00 00`, while a dyed
-    /// item has `01 00`.
-    pub has_stain: u16, // +0x10
+    /// High-quality flag: `1` when the item is HQ, `0` otherwise (client calls SetIsHighQuality
+    /// with this). Verified: an item with materia and dye but no HQ state still has this at `00 00`.
+    pub is_hq: u16, // +0x10
     /// Up to 5 melded materia.
     pub materia: [ExamineMateria; 5], // +0x12 (20 bytes)
     /// Primary dye.
@@ -1371,13 +1370,15 @@ pub enum ServerZoneIpcData {
     ExamineCharacterInformation {
         /// Examine kind / entity discriminator (4 = a normal player character).
         examine_kind: u8, // 0x00
-        unk_01: u8,       // 0x01
+        /// Sex (0 = male, 1 = female). Maps to Inspect+0x74.
+        sex: u8, // 0x01
         /// Current class/job (index into the ClassJob sheet). Not derived from the soul crystal.
         class_job_id: u8, // 0x02
         /// Current level.
         level: u8, // 0x03
+        /// Synced (level-capped) level, e.g. inside level-synced content. Maps to Inspect+0x77.
         #[brw(pad_after = 1)] // 0x05 pad
-        unk_04: u8, // 0x04
+        synced_level: u8, // 0x04
         /// Title id (index into the Title sheet). Verified: 0x06.
         title_id: u16, // 0x06
         /// Grand company affiliation (index into the GrandCompany sheet; 1=Maelstrom, 2=Adders,
@@ -1385,10 +1386,19 @@ pub enum ServerZoneIpcData {
         grand_company: u8, // 0x08
         /// Grand company rank. Verified: 0x09.
         gc_rank: u8, // 0x09
-        #[brw(pad_before = 6)] // 0x0A..0x0F opaque
-        /// The examined player's content id.
-        content_id: u64, // 0x10
-        #[brw(pad_before = 26)] // 0x18..0x31 (26 bytes) opaque header block
+        /// Gear visibility flag (visor/headgear/weapon). Verified: 0x0A.
+        gear_visibility_flag: u8, // 0x0A
+        #[brw(pad_before = 5)] // 0x0B..0x0F opaque
+        /// FC crest data (packet 0x10→Inspect+0x230). Not content_id despite earlier assumption.
+        fc_crest_data: u64, // 0x10
+        /// FC crest bitfield (packet 0x18→Inspect+0x238).
+        fc_crest_bitfield: u8, // 0x18
+        #[brw(pad_before = 7)] // 0x19..0x1F pad
+        /// Main-hand weapon model (Id/Type/Variant/Stain0/Stain1). Drives the 3D model weapon.
+        main_weapon_model: WeaponModelId, // 0x20
+        /// Off-hand weapon model. Same encoding.
+        sub_weapon_model: WeaponModelId, // 0x28
+        #[brw(pad_before = 2)] // 0x30..0x31 pad
         /// Home world id (index into the World sheet).
         world_id: u16, // 0x32
         #[brw(pad_before = 20)] // 0x34..0x47 opaque
@@ -1405,13 +1415,22 @@ pub enum ServerZoneIpcData {
         #[br(map = read_string)]
         #[bw(map = write_string)]
         name: String,
-        /// Appearance/name-tail block copied by the client to its inspect struct. 0x2A0.
-        appearance_block: [u8; 32],
+        /// Console online id (PSN Online-ID / Xbox Gamertag), maps to Inspect+0x54. Empty (all
+        /// zero) on non-console platforms such as the CN client. 0x2A0.
+        online_id: [u8; 32],
         /// The examined player's appearance. 0x2C0, 26 bytes.
         customize: CustomizeData,
-        /// Remaining tail: free company name, display block, and the stat/attribute array
-        /// (0x2DA..0x3AF). Not needed for the basic examine window; sent as zeroes.
-        tail: [u8; 214],
+        /// Equipment model ids (Id/Variant/Stain0) for the 3D model dress-up, in order:
+        /// head, body, hands, legs, feet, ears, neck, wrists, left ring, right ring. 0x2DC.
+        /// The 0x50 catalog array only feeds the item/tooltip UI; THIS drives the rendered gear.
+        #[brw(pad_before = 2)] // 0x2DA..0x2DB pad
+        equipment_models: [LegacyEquipmentModelId; 10], // 0x2DC (10x4)
+        /// Second dye per equipment slot (same order as `equipment_models`). 0x304.
+        equipment_model_stains1: [u8; 10], // 0x304
+        /// Facewear (glasses) ids. 0x30E.
+        glasses_ids: [u16; 2], // 0x30E
+        /// Remaining tail (FC name, content key/value block, etc.), sent as zeroes. 0x312..0x3AF.
+        tail: [u8; 158],
     },
     /// Sent in response to `ExamineRequestComments`. 200 bytes: the examined player's actor id
     /// followed by their search comment (empty comment => all zeroes).
@@ -1436,10 +1455,11 @@ pub enum ServerZoneIpcData {
         content_id: u64, // 0x00
         /// Free company id.
         fc_id: u64, // 0x08
-        /// Secondary id (content id / fc id echo, varies by request path).
-        unk_10: u64, // 0x10
-        unk_18: u32, // 0x18
-        unk_1c: u32, // 0x1C
+        fc_crest_data: u64, // 0x10
+        plot_num: u16, // 0x18
+        ward_num: u16, // 0x1A
+        estate_zone: u16, // 0x1C
+        world: u16, // 0x1E
         /// Not filled when the request came in by content id.
         actor_id: ObjectId, // 0x20
         /// FC creation time (time_t, 32-bit). Verified: 0x24.
@@ -1450,10 +1470,12 @@ pub enum ServerZoneIpcData {
         fc_total_members: u16, // 0x2C
         /// Online member count. Verified: 0x2E.
         fc_online_members: u16, // 0x2E
-        unk_30: u16, // 0x30
-        unk_32: u16, // 0x32
-        unk_34: u16, // 0x34
-        unk_36: u16, // 0x36
+        fc_profile_focus: u16, // 0x30
+        fc_profile_seeking: u16, // 0x32
+        fc_profile_active: u8, // 0x34
+        fc_profile_recruitment: u8, // 0x35
+        grand_company: u8, // 0x36
+        unk_37: u8, // 0x37
         /// FC rank/level. Verified: 0x38 == 30 in all captures.
         fc_level: u8, // 0x38
         unk_39: u8, // 0x39

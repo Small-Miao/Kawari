@@ -7,7 +7,8 @@ use crate::{
 };
 use kawari::{
     common::{
-        BasicCharacterData, ObjectId, WORLD_NAME, WeaponModelId, determine_initial_homepoint,
+        BasicCharacterData, EquipDisplayFlag, ObjectId, WORLD_NAME, WeaponModelId,
+        determine_initial_homepoint,
     },
     config::get_config,
     ipc::{
@@ -1071,14 +1072,14 @@ impl WorldDatabase {
                 m.id = item.materia[i];
                 m.grade = item.materia_grades[i] as u16;
             }
-            // The client gates rendering the dyes on this flag, so set it whenever the item has
-            // any applied dye. (Verified: an item with materia but no dye still has this at 0.)
-            let has_stain = item.stains.iter().any(|&s| s != 0) as u16;
+            // HQ flag: the client calls SetIsHighQuality(slot+0x10 != 0). Verified: items with
+            // materia+dye but no HQ state have this at 0. Pass the item's flag byte (bit 0 = HQ).
+            let is_hq = (item.item_flags & 1) as u16;
             *entry = ExamineEquipEntry {
                 catalog_id: item.item_id,
                 glamour_id: item.glamour_id,
                 crafter_content_id: item.crafter_content_id,
-                has_stain,
+                is_hq,
                 materia,
                 stain0: item.stains[0],
                 stain1: item.stains[1],
@@ -1096,24 +1097,54 @@ impl WorldDatabase {
         // from the packet directly, so compute it here from the examined player's gear.
         let item_level = equipped.calculate_item_level(game_data);
 
+        // The 3D model dresses from independent model-id fields (not the 0x50 catalog array): the
+        // main/off weapon models and the 10 equipment model ids + their second dye. Reuse the same
+        // resolution the spawn path uses for on-screen players.
+        let main_weapon_model = inventory.contents.get_main_weapon_id(game_data);
+        let sub_weapon_model = inventory.contents.get_sub_weapon_id(game_data);
+        let equipment_models = inventory.contents.legacy_model_ids(game_data);
+        let equipment_model_stains1 = inventory.contents.second_model_stain_ids();
+
+        // Map the player's live display flags to the examine gear-visibility flag
+        // (InspectGearVisibilityFlag: bit0 VisorClosed, bit1 HeadgearHidden, bit2 WeaponHidden).
+        let display_flags = volatile.display_flags;
+        let mut gear_visibility_flag = 0u8;
+        if display_flags.contains(EquipDisplayFlag::CLOSE_VISOR) {
+            gear_visibility_flag |= 1 << 0;
+        }
+        if display_flags.contains(EquipDisplayFlag::HIDE_HEAD) {
+            gear_visibility_flag |= 1 << 1;
+        }
+        if display_flags.contains(EquipDisplayFlag::HIDE_WEAPON) {
+            gear_visibility_flag |= 1 << 2;
+        }
+
         let config = get_config();
         Some(ServerZoneIpcData::ExamineCharacterInformation {
             examine_kind: 4,
-            unk_01: 0,
+            sex: customize.chara_make.customize.gender as u8,
             class_job_id: classjob.current_class as u8,
             level: level as u8,
-            unk_04: 0,
+            // Synced level: 0 when the player is not level-synced.
+            synced_level: 0,
             title_id: volatile.title as u16,
             grand_company: grand_company.active_company as u8,
             gc_rank,
-            content_id: for_character.content_id as u64,
+            gear_visibility_flag,
+            fc_crest_data: 0,
+            fc_crest_bitfield: 0,
+            main_weapon_model,
+            sub_weapon_model,
             world_id: config.world.world_id,
             item_level,
             equipment,
             name: for_character.name.clone(),
-            appearance_block: [0; 32],
+            online_id: [0; 32],
             customize: customize.chara_make.customize,
-            tail: [0; 214],
+            equipment_models,
+            equipment_model_stains1,
+            glasses_ids: inventory.contents.equipped.glasses,
+            tail: [0; 158],
         })
     }
 
@@ -1176,18 +1207,22 @@ impl WorldDatabase {
         Some(ServerZoneIpcData::FreeCompanyShortInfo {
             content_id: for_character.content_id as u64,
             fc_id: 0,
-            unk_10: 0,
-            unk_18: 0,
-            unk_1c: 0,
+            fc_crest_data: 0,
+            plot_num: 0,
+            ward_num: 0,
+            estate_zone: 0,
+            world: 0,
             actor_id: for_actor_id,
             fc_create_time: 0,
             unk_28: 0,
             fc_total_members: 0,
             fc_online_members: 0,
-            unk_30: 0,
-            unk_32: 0,
-            unk_34: 0,
-            unk_36: 0,
+            fc_profile_focus: 0,
+            fc_profile_seeking: 0,
+            fc_profile_active: 0,
+            fc_profile_recruitment: 0,
+            grand_company: 0,
+            unk_37: 0,
             fc_level: 0,
             unk_39: 0,
             fc_name: [0; 0x16],
