@@ -470,10 +470,11 @@ pub struct ExamineEquipEntry {
     pub glamour_id: u32, // +0x04
     /// Crafter content id / signature (0 for non-signed items).
     pub crafter_content_id: u64, // +0x08
-    /// "Has materia" flag: `1` when the item has any melded materia, `0` otherwise. The client
-    /// gates reading the materia array (and, in practice, the dyes) on this being non-zero, so it
-    /// MUST be set for melds and dyes to render. Verified by capture diffing (01 00 vs 00 00).
-    pub has_materia: u16, // +0x10
+    /// "Has dye" flag: `1` when the item has any applied dye, `0` otherwise. The client gates
+    /// rendering the dyes on this being non-zero, so it MUST be set for dyes to show. Verified by
+    /// capture diffing: an item with materia but no dye still has this at `00 00`, while a dyed
+    /// item has `01 00`.
+    pub has_stain: u16, // +0x10
     /// Up to 5 melded materia.
     pub materia: [ExamineMateria; 5], // +0x12 (20 bytes)
     /// Primary dye.
