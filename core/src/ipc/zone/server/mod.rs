@@ -1377,7 +1377,12 @@ pub enum ServerZoneIpcData {
         unk_04: u8, // 0x04
         /// Title id (index into the Title sheet). Verified: 0x06.
         title_id: u16, // 0x06
-        #[brw(pad_before = 8)] // 0x08..0x0F opaque
+        /// Grand company affiliation (index into the GrandCompany sheet; 1=Maelstrom, 2=Adders,
+        /// 3=Flames, 0=none). Verified: 0x08.
+        grand_company: u8, // 0x08
+        /// Grand company rank. Verified: 0x09.
+        gc_rank: u8, // 0x09
+        #[brw(pad_before = 6)] // 0x0A..0x0F opaque
         /// The examined player's content id.
         content_id: u64, // 0x10
         #[brw(pad_before = 26)] // 0x18..0x31 (26 bytes) opaque header block

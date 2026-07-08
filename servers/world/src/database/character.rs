@@ -1046,6 +1046,18 @@ impl WorldDatabase {
             .select(Customize::as_select())
             .first(&mut self.connection)
             .unwrap();
+        let grand_company = GrandCompany::belonging_to(&for_character)
+            .select(GrandCompany::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+
+        // Rank is 1-indexed by the active company; a player with no grand company has
+        // `active_company == None` (0), so guard against underflowing the ranks array.
+        let gc_rank = if grand_company.active_company != IpcGrandCompany::None {
+            grand_company.company_ranks.0[grand_company.active_company as usize - 1]
+        } else {
+            0
+        };
 
         let equipped = &inventory.contents.equipped;
 
@@ -1089,6 +1101,8 @@ impl WorldDatabase {
             level: level as u8,
             unk_04: 0,
             title_id: volatile.title as u16,
+            grand_company: grand_company.active_company as u8,
+            gc_rank,
             content_id: for_character.content_id as u64,
             world_id: config.world.world_id,
             item_level,
