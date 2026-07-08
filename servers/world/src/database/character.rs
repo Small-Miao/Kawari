@@ -1077,6 +1077,10 @@ impl WorldDatabase {
             .map(|index| classjob.levels.0[index as usize])
             .unwrap_or(0);
 
+        // The examine window shows the average equipped item level; the client displays the value
+        // from the packet directly, so compute it here from the examined player's gear.
+        let item_level = equipped.calculate_item_level(game_data);
+
         let config = get_config();
         Some(ServerZoneIpcData::ExamineCharacterInformation {
             examine_kind: 4,
@@ -1084,9 +1088,10 @@ impl WorldDatabase {
             class_job_id: classjob.current_class as u8,
             level: level as u8,
             unk_04: 0,
+            title_id: volatile.title as u16,
             content_id: for_character.content_id as u64,
             world_id: config.world.world_id,
-            title_id: volatile.title as u16,
+            item_level,
             equipment,
             name: for_character.name.clone(),
             appearance_block: [0; 32],

@@ -1373,16 +1373,20 @@ pub enum ServerZoneIpcData {
         class_job_id: u8, // 0x02
         /// Current level.
         level: u8, // 0x03
-        #[brw(pad_after = 11)] // 0x05..0x0F pad
+        #[brw(pad_after = 1)] // 0x05 pad
         unk_04: u8, // 0x04
+        /// Title id (index into the Title sheet). Verified: 0x06.
+        title_id: u16, // 0x06
+        #[brw(pad_before = 8)] // 0x08..0x0F opaque
         /// The examined player's content id.
         content_id: u64, // 0x10
         #[brw(pad_before = 26)] // 0x18..0x31 (26 bytes) opaque header block
         /// Home world id (index into the World sheet).
         world_id: u16, // 0x32
         #[brw(pad_before = 20)] // 0x34..0x47 opaque
-        /// Title id (index into the Title sheet).
-        title_id: u16, // 0x48
+        /// Total equipped item level (average). Verified: 0x48. The client displays this value
+        /// directly rather than recomputing it from the gear.
+        item_level: u16, // 0x48
         #[brw(pad_before = 6)] // 0x4A..0x4F pad
         /// The 14 equipment slots (main, off, head, body, hands, waist, legs, feet, ears, neck,
         /// right ring, left ring, soul crystal), in EquipSlot order. 0x50..0x27F.
