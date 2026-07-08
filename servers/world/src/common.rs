@@ -249,6 +249,9 @@ pub enum FromServer {
     FurnitureTranslated((bool, u8), u16, Position, f32, bool),
     /// Inform the client that another player in their party has offered them a teleport.
     TeleportOffered(u32, TeleportQuery),
+    /// Ask this connection to build its examine IPC and relay it back.
+    /// Carries the requester's actor id so the response can be routed.
+    ExamineRequest(ObjectId),
 }
 
 impl FromServer {
@@ -317,6 +320,7 @@ impl FromServer {
             Self::FurniturePlaced(..) => "FurniturePlaced",
             Self::FurnitureTranslated(..) => "FurnitureTranslated",
             Self::TeleportOffered(..) => "TeleportOffered",
+            Self::ExamineRequest(..) => "ExamineRequest",
         }
     }
 }
@@ -566,6 +570,13 @@ pub enum ToServer {
     OfferTeleportToParty(Option<u64>, ObjectId, u16, TeleportQuery),
     /// A Variant Dungeon route was chosen.
     VariantVote(ObjectId, u32),
+    /// A player wants to examine another player. Routes the request to the
+    /// target connection so it can build examine data from its live state.
+    /// Fields: (requester_client_id, requester_actor_id, target_actor_id)
+    ExamineRequest(ClientId, ObjectId, ObjectId),
+    /// The examined player has built its examine IPC and wants it delivered to
+    /// the original requester. Fields: (requester_actor_id, target_actor_id, ipc)
+    ExamineResponse(ObjectId, ObjectId, ServerZoneIpcSegment),
 }
 
 impl ToServer {
@@ -651,6 +662,8 @@ impl ToServer {
             Self::TranslateFurniture(..) => "TranslateFurniture",
             Self::OfferTeleportToParty(..) => "OfferTeleportToParty",
             Self::VariantVote(..) => "VariantVote",
+            Self::ExamineRequest(..) => "ExamineRequest",
+            Self::ExamineResponse(..) => "ExamineResponse",
         }
     }
 }

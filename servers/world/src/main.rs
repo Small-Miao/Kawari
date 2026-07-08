@@ -1769,20 +1769,18 @@ async fn process_packet(
                                     .await;
                             }
                             ClientTriggerCommand::ExamineCharacter { target_actor_id } => {
-                                let examine_data = {
-                                    let mut game_data = connection.gamedata.lock();
-                                    let mut database = connection.database.lock();
-                                    database.build_examine_data(target_actor_id, &mut game_data)
-                                };
-                                // `None` => the target isn't a player (NPC/summon/etc.); don't respond.
-                                if let Some(examine_data) = examine_data {
-                                    let ipc = ServerZoneIpcSegment::new(examine_data);
-                                    // The packet's source actor MUST be the examined player, not
-                                    // ourselves: AgentInspect gates rendering the character-info
-                                    // region on the packet's actor id matching the clicked target's
-                                    // GameObjectId. Sending it from our own id leaves that region blank.
-                                    connection.send_ipc_from(target_actor_id, ipc).await;
-                                }
+                                // Route the request to the target's connection so it builds
+                                // examine data from its live player_data (always current) rather
+                                // than re-reading the DB (which may lag behind equip_gearset /
+                                // Config changes that haven't been committed yet).
+                                connection
+                                    .handle
+                                    .send(ToServer::ExamineRequest(
+                                        connection.id,
+                                        connection.player_data.character.actor_id,
+                                        target_actor_id,
+                                    ))
+                                    .await;
                             }
                             ClientTriggerCommand::ToggleNoviceStatus { .. } => {
                                 if connection.player_data.search_info.online_status
@@ -4440,6 +4438,20 @@ async fn process_server_msg(
             }
             FromServer::PacketSegment(ipc, from_actor_id) => {
                 connection.send_ipc_from(from_actor_id, ipc).await;
+            }
+            FromServer::ExamineRequest(requester_actor_id) => {
+                // Another player wants to examine us. Build the IPC from our live player_data
+                // so their examine window reflects our current gear, glamour and display flags.
+                let ipc_data = connection.build_examine_ipc();
+                let ipc = ServerZoneIpcSegment::new(ipc_data);
+                connection
+                    .handle
+                    .send(ToServer::ExamineResponse(
+                        requester_actor_id,
+                        connection.player_data.character.actor_id,
+                        ipc,
+                    ))
+                    .await;
             }
             FromServer::NewTasks(mut tasks) => {
                 connection.queued_tasks.append(&mut tasks);

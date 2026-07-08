@@ -3037,6 +3037,26 @@ pub async fn server_main_loop(
                         DestinationNetwork::ZoneClients,
                     );
                 }
+                ToServer::ExamineRequest(_requester_client_id, requester_actor_id, target_actor_id) => {
+                    // Route the examine request to the target's connection. It will build the IPC
+                    // from its live player_data and send back a ToServer::ExamineResponse.
+                    let mut network = network.lock();
+                    network.send_to_by_actor_id(
+                        target_actor_id,
+                        FromServer::ExamineRequest(requester_actor_id),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
+                ToServer::ExamineResponse(requester_actor_id, target_actor_id, ipc) => {
+                    // Deliver the fully-built examine IPC to the requester, spoofing the source
+                    // actor id as the examined player so AgentInspect renders the window.
+                    let mut network = network.lock();
+                    network.send_to_by_actor_id(
+                        requester_actor_id,
+                        FromServer::PacketSegment(ipc.clone(), target_actor_id),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
                 ToServer::Disconnected(from_id, from_actor_id) => {
                     let mut network = network.lock();
                     network.to_remove.push(from_id);

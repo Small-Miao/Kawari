@@ -3,7 +3,7 @@
 use crate::{
     ToServer, ZoneConnection,
     common::SpawnKind,
-    inventory::{display_flags_to_checksum_flag, gearset_checksum_from_equipped},
+    inventory::{Storage, display_flags_to_checksum_flag, gearset_checksum_from_equipped},
 };
 use kawari::{
     common::{
@@ -13,7 +13,8 @@ use kawari::{
     config::get_config,
     ipc::zone::{
         ActorControl, ActorControlCategory, ActorControlSelf, ActorControlTarget, ActorMove,
-        CommonSpawn, Config, DisplayFlag, ObjectKind, PartyPortraitEntry, PlayerSubKind,
+        CommonSpawn, Config, DisplayFlag, ExamineEquipEntry, ExamineMateria,
+        GrandCompany as IpcGrandCompany, ObjectKind, PartyPortraitEntry, PlayerSubKind,
         PortraitBanner, ServerZoneIpcData, ServerZoneIpcSegment, SpawnObject, SpawnPlayer,
         SpawnTreasure,
     },
@@ -405,5 +406,114 @@ impl ZoneConnection {
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::SpawnTreasure(spawn.clone()));
 
         self.send_ipc_from(spawn.entity_id, ipc).await;
+    }
+
+    /// Builds the [`ServerZoneIpcData::ExamineCharacterInformation`] payload entirely from this
+    /// connection's **live** in-memory [`PlayerData`] so that the examine window always reflects
+    /// the player's current gear, glamour, display flags and title — even when those have been
+    /// mutated since the last DB commit (e.g. after `equip_gearset` or a `Config` packet).
+    ///
+    /// Character appearance (`CustomizeData`) is the one field that is not mirrored in
+    /// `PlayerData`; it is fetched from the DB via `get_chara_make`, which is always current
+    /// because the aesthetician writes it immediately on change.
+    pub fn build_examine_ipc(&self) -> ServerZoneIpcData {
+        let inventory = &self.player_data.inventory;
+        let volatile = &self.player_data.volatile;
+        let classjob = &self.player_data.classjob;
+        let grand_company = &self.player_data.grand_company;
+        let character = &self.player_data.character;
+
+        // Appearance data — always up-to-date in the DB (written by aesthetician immediately).
+        let chara_make = {
+            let mut database = self.database.lock();
+            database.get_chara_make(character.content_id as u64)
+        };
+
+        // GC rank for the currently active company (1-indexed; 0 = no company).
+        let gc_rank = if grand_company.active_company != IpcGrandCompany::None {
+            grand_company.company_ranks.0[grand_company.active_company as usize - 1]
+        } else {
+            0
+        };
+
+        // Build the 14-slot equipment array from the live equipped container.
+        let equipped = &inventory.equipped;
+        let mut equipment: [ExamineEquipEntry; 14] = Default::default();
+        for (slot, entry) in equipment.iter_mut().enumerate() {
+            let item = equipped.get_slot(slot as u16);
+            let mut materia: [ExamineMateria; 5] = Default::default();
+            for (i, m) in materia.iter_mut().enumerate() {
+                m.id = item.materia[i];
+                m.grade = item.materia_grades[i] as u16;
+            }
+            // bit 0 of item_flags = HQ flag; client calls SetIsHighQuality(slot+0x10 != 0).
+            let is_hq = (item.item_flags & 1) as u16;
+            *entry = ExamineEquipEntry {
+                catalog_id: item.item_id,
+                glamour_id: item.glamour_id,
+                crafter_content_id: item.crafter_content_id,
+                is_hq,
+                materia,
+                stain0: item.stains[0],
+                stain1: item.stains[1],
+            };
+        }
+
+        let mut game_data = self.gamedata.lock();
+
+        // Current class level via the EXP-array index (same mapping used by `current_level`).
+        let level = game_data
+            .get_exp_array_index(classjob.current_class as u16)
+            .map(|index| classjob.levels.0[index as usize])
+            .unwrap_or(0);
+
+        // Average item level of equipped gear — client displays this value directly.
+        let item_level = equipped.calculate_item_level(&mut game_data);
+
+        // 3-D model ids from live inventory (identical sources as the spawn path).
+        let main_weapon_model = inventory.get_main_weapon_id(&mut game_data);
+        let sub_weapon_model = inventory.get_sub_weapon_id(&mut game_data);
+        let equipment_models = inventory.legacy_model_ids(&mut game_data);
+        let equipment_model_stains1 = inventory.second_model_stain_ids();
+
+        // InspectGearVisibilityFlag: bit0 VisorClosed, bit1 HeadgearHidden, bit2 WeaponHidden.
+        let display_flags = volatile.display_flags;
+        let mut gear_visibility_flag: u8 = 0;
+        if display_flags.contains(EquipDisplayFlag::CLOSE_VISOR) {
+            gear_visibility_flag |= 1 << 0;
+        }
+        if display_flags.contains(EquipDisplayFlag::HIDE_HEAD) {
+            gear_visibility_flag |= 1 << 1;
+        }
+        if display_flags.contains(EquipDisplayFlag::HIDE_WEAPON) {
+            gear_visibility_flag |= 1 << 2;
+        }
+
+        let config = get_config();
+        ServerZoneIpcData::ExamineCharacterInformation {
+            examine_kind: 4,
+            sex: chara_make.customize.gender as u8,
+            class_job_id: classjob.current_class as u8,
+            level: level as u8,
+            synced_level: 0,
+            title_id: volatile.title as u16,
+            grand_company: grand_company.active_company as u8,
+            gc_rank,
+            gear_visibility_flag,
+            fc_crest_data: 0,
+            fc_crest_bitfield: 0,
+            main_weapon_model,
+            sub_weapon_model,
+            world_id: config.world.world_id,
+            item_level,
+            equipment,
+            name: character.name.clone(),
+            online_id: [0; 32],
+            customize: chara_make.customize,
+            equipment_models,
+            equipment_model_stains1,
+            glasses_ids: inventory.equipped.glasses,
+            tail: [0; 158],
+        }
     }
 }
