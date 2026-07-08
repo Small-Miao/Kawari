@@ -1769,7 +1769,11 @@ async fn process_packet(
                                 // `None` => the target isn't a player (NPC/summon/etc.); don't respond.
                                 if let Some(examine_data) = examine_data {
                                     let ipc = ServerZoneIpcSegment::new(examine_data);
-                                    connection.send_ipc_self(ipc).await;
+                                    // The packet's source actor MUST be the examined player, not
+                                    // ourselves: AgentInspect gates rendering the character-info
+                                    // region on the packet's actor id matching the clicked target's
+                                    // GameObjectId. Sending it from our own id leaves that region blank.
+                                    connection.send_ipc_from(target_actor_id, ipc).await;
                                 }
                             }
                             ClientTriggerCommand::ToggleNoviceStatus { .. } => {
