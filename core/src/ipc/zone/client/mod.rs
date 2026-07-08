@@ -357,6 +357,21 @@ pub enum ClientZoneIpcData {
         content_id: u64,
         unk: [u8; 16], // unsure if this is always empty
     },
+    /// Sent alongside the Examine ClientTrigger to request the examined player's search comment.
+    /// The body begins with the target's actor id; the trailing 4 bytes are uninitialized stack
+    /// garbage and are ignored.
+    ExamineRequestComments {
+        target_actor_id: ObjectId,
+        unk: u32,
+    },
+    /// Sent alongside the Examine ClientTrigger to request the examined player's free company
+    /// info. The target actor id sits at offset 8; the other bytes are padding/stack garbage and
+    /// are ignored.
+    ExamineRequestFCInfo {
+        unk1: u64,
+        target_actor_id: ObjectId,
+        unk2: u32,
+    },
     RequestAdventurerPlate {
         /// The target identifier: a content id when `flag` == 0, or an actor id when
         /// `flag` == 1. Always 8 bytes on the wire regardless of which one it holds.

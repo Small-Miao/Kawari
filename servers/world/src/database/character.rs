@@ -1095,6 +1095,40 @@ impl WorldDatabase {
         })
     }
 
+    /// Builds the examine comments (`ExamineCharacterComments`, opcode 304) response for
+    /// `for_actor_id`, carrying that player's search comment.
+    ///
+    /// Returns `None` when no character row exists for the actor id (non-player target), so the
+    /// handler can skip responding rather than panicking.
+    pub fn build_examine_comments(
+        &mut self,
+        for_actor_id: ObjectId,
+    ) -> Option<ServerZoneIpcData> {
+        use models::*;
+
+        let for_character;
+        {
+            use schema::character::dsl::*;
+
+            // Non-player guard: no matching character row => not a player, don't respond.
+            for_character = character
+                .filter(actor_id.eq(for_actor_id))
+                .select(Character::as_select())
+                .first(&mut self.connection)
+                .ok()?;
+        }
+
+        let search_info = SearchInfo::belonging_to(&for_character)
+            .select(SearchInfo::as_select())
+            .first(&mut self.connection)
+            .unwrap();
+
+        Some(ServerZoneIpcData::ExamineCharacterComments {
+            actor_id: for_actor_id,
+            comment: search_info.comment.clone(),
+        })
+    }
+
     /// Builds the "plate request error" response (not set / not visible / unavailable) carrying
     /// the given LogMessage row id.
     fn adventurer_plate_error(log_message_id: u32) -> ServerZoneIpcSegment {

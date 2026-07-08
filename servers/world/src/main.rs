@@ -3226,6 +3226,22 @@ async fn process_packet(
                         let ipc = ServerZoneIpcSegment::new(search_info);
                         connection.send_ipc_self(ipc).await;
                     }
+                    ClientZoneIpcData::ExamineRequestComments { target_actor_id, .. } => {
+                        let comments = {
+                            let mut database = connection.database.lock();
+                            database.build_examine_comments(*target_actor_id)
+                        };
+                        // `None` => the target isn't a player; don't respond.
+                        if let Some(comments) = comments {
+                            let ipc = ServerZoneIpcSegment::new(comments);
+                            connection.send_ipc_self(ipc).await;
+                        }
+                    }
+                    ClientZoneIpcData::ExamineRequestFCInfo { .. } => {
+                        // TODO: The examined player's free company info response is not yet
+                        // implemented (wire layout unknown, including how players with no free
+                        // company are represented). The Examine window still opens without it.
+                    }
                     ClientZoneIpcData::RequestAdventurerPlate {
                         target_id, flag, ..
                     } => {

@@ -583,6 +583,10 @@ ServerZoneIpcType:
   comment: Sent to show character information in the Examine window.
   opcode: 812
   size: 944
+- name: ExamineCharacterComments
+  comment: Sent in response to ExamineRequestComments; carries the examined player's search comment shown in the Examine window.
+  opcode: 304
+  size: 200
 - name: OtherSearchInfo
   comment: Used when the player requests someone else's search info.
   opcode: 664
@@ -1032,6 +1036,14 @@ ClientZoneIpcType:
   comment: Happens when the client requests search info for any player.
   opcode: 701
   size: 24
+- name: ExamineRequestComments
+  comment: Sent alongside the Examine ClientTrigger to request the examined player's search comment. Body starts with the target actor id.
+  opcode: 182
+  size: 8
+- name: ExamineRequestFCInfo
+  comment: Sent alongside the Examine ClientTrigger to request the examined player's free company info. Target actor id is at offset 8.
+  opcode: 351
+  size: 16
 - name: RequestAdventurerPlate
   comment: Happens when the client requests the adventurer plate for any player.
   opcode: 677

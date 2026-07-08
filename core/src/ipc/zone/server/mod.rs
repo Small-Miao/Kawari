@@ -1401,6 +1401,17 @@ pub enum ServerZoneIpcData {
         /// (0x2DA..0x3AF). Not needed for the basic examine window; sent as zeroes.
         tail: [u8; 214],
     },
+    /// Sent in response to `ExamineRequestComments`. 200 bytes: the examined player's actor id
+    /// followed by their search comment (empty comment => all zeroes).
+    ExamineCharacterComments {
+        actor_id: ObjectId, // 0x00
+        /// The examined player's search comment. Occupies the remaining 196 bytes.
+        #[brw(pad_size_to = 196)]
+        #[br(count = 196)]
+        #[br(map = read_string)]
+        #[bw(map = write_string)]
+        comment: String,
+    },
     OtherSearchInfo {
         /// The requested player's content ID.
         content_id: u64,
