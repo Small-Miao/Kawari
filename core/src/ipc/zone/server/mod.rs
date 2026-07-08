@@ -1416,19 +1416,35 @@ pub enum ServerZoneIpcData {
     /// company info (shown in the Examine window and the context-menu FC info view). Kawari has no
     /// free company system, so the FC fields are always zero, which the client renders as "not in
     /// a free company"; only `content_id` and `actor_id` are populated.
+    // Field layout cross-verified against three retail captures (黑涡团 / 双蛇党, member counts
+    // 155/8/299, creation dates 2019/2025). Kawari has no free company system, so every field is
+    // sent as zero (the client renders "not in a free company"); the named fields document the real
+    // wire layout for when a free company system exists.
     FreeCompanyShortInfo {
         content_id: u64, // 0x00
-        #[brw(pad_before = 24)] // 0x08..0x1F reserved, all zero
+        /// Free company id.
+        fc_id: u64, // 0x08
+        /// Secondary id (content id / fc id echo, varies by request path).
+        unk_10: u64, // 0x10
+        unk_18: u32, // 0x18
+        unk_1c: u32, // 0x1C
         /// Not filled when the request came in by content id.
         actor_id: ObjectId, // 0x20
-        /// FC creation time (time_t, 32-bit).
+        /// FC creation time (time_t, 32-bit). Verified: 0x24.
         fc_create_time: u32, // 0x24
-        #[brw(pad_before = 4)] // 0x28..0x2B
+        /// Constant 0x08049C7 across all captures (crest/marker of some kind).
+        unk_28: u32, // 0x28
+        /// Total member count. Verified: 0x2C.
         fc_total_members: u16, // 0x2C
+        /// Online member count. Verified: 0x2E.
         fc_online_members: u16, // 0x2E
-        #[brw(pad_before = 8)] // 0x30..0x37
+        unk_30: u16, // 0x30
+        unk_32: u16, // 0x32
+        unk_34: u16, // 0x34
+        unk_36: u16, // 0x36
+        /// FC rank/level. Verified: 0x38 == 30 in all captures.
         fc_level: u8, // 0x38
-        fc_alliance_index: u8, // 0x39
+        unk_39: u8, // 0x39
         fc_name: [u8; 0x16],       // 0x3A
         fc_short_name: [u8; 0x07], // 0x50
         fc_owner_name: [u8; 0x20], // 0x57
