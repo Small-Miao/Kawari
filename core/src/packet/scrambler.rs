@@ -226,6 +226,26 @@ pub fn scramble_packet(opcode_name: &str, base_key: u8, opcode_based_key: i32, d
                     unscramble_add::<u16>(data, offset, base_key as u16);
                 }
             }
+            "ExamineCharacterInformation" => {
+                // class_job_id (0x02, u8)
+                unscramble_add::<u8>(data, 0x02, base_key);
+                // level (0x03, u8)
+                unscramble_add::<u8>(data, 0x03, base_key);
+                // world_id (0x32, u16)
+                unscramble_add::<u16>(data, 0x32, base_key as u16);
+                // unknown u64 at 0x38 (Unscrambler: data[72]; purpose unclear but present in wire)
+                unscramble_add::<u64>(data, 0x38, base_key as u64);
+                // name: 32 bytes at 0x280
+                let name_offset = 0x280;
+                for i in 0..CHAR_NAME_MAX_LENGTH {
+                    unscramble_add::<u8>(data, name_offset + i, base_key);
+                }
+                // appearance block: 32 bytes at 0x2A0
+                let appearance_offset = 0x2A0;
+                for i in 0..32_usize {
+                    unscramble_add::<u8>(data, appearance_offset + i, base_key);
+                }
+            }
             _ => {}
         }
     }

@@ -1373,11 +1373,11 @@ pub enum ServerZoneIpcData {
         class_job_id: u8, // 0x02
         /// Current level.
         level: u8, // 0x03
-        #[brw(pad_before = 1, pad_after = 11)] // 0x04 unk04, 0x05..0x0F pad
-        unk_04: u8,
+        #[brw(pad_after = 11)] // 0x05..0x0F pad
+        unk_04: u8, // 0x04
         /// The examined player's content id.
         content_id: u64, // 0x10
-        #[brw(pad_before = 25)] // 0x18..0x31 (26 bytes) opaque header block
+        #[brw(pad_before = 26)] // 0x18..0x31 (26 bytes) opaque header block
         /// Home world id (index into the World sheet).
         world_id: u16, // 0x32
         #[brw(pad_before = 20)] // 0x34..0x47 opaque
