@@ -1069,13 +1069,16 @@ impl WorldDatabase {
             let mut materia: [ExamineMateria; 5] = Default::default();
             for (i, m) in materia.iter_mut().enumerate() {
                 m.id = item.materia[i];
-                m.grade = item.materia_grades[i];
+                m.grade = item.materia_grades[i] as u16;
             }
+            // The client gates reading the materia array (and the dyes) on this flag, so set it
+            // whenever the item has any melded materia.
+            let has_materia = item.materia.iter().any(|&m| m != 0) as u16;
             *entry = ExamineEquipEntry {
                 catalog_id: item.item_id,
                 glamour_id: item.glamour_id,
                 crafter_content_id: item.crafter_content_id,
-                unk_10: 0,
+                has_materia,
                 materia,
                 stain0: item.stains[0],
                 stain1: item.stains[1],

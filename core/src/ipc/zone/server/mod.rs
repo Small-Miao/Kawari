@@ -446,16 +446,15 @@ pub struct PartyPortraitEntry {
     pub stain1: [u8; 12], // +162
 }
 
-/// One melded materia within an examine equipment entry. 4 bytes: u16 id + u8 grade + u8 pad.
-/// Verified against the client examine handler (materia loop at 0x140c15570, 4-byte stride).
+/// One melded materia within an examine equipment entry. 4 bytes: u16 id + u16 grade.
+/// Verified by capture diffing (id and grade are each 2 bytes, e.g. `0E 00 0B 00`).
 #[binrw]
 #[derive(Debug, Clone, Default)]
 pub struct ExamineMateria {
     /// Materia catalog id (index into the Materia sheet). 0 = empty.
     pub id: u16,
-    /// Materia grade (0-based; grade 11 = Materia XII). Only the low byte is used by the client.
-    pub grade: u8,
-    pub pad: u8,
+    /// Materia grade (0-based; grade 11 = Materia XII). 2 bytes on the wire.
+    pub grade: u16,
 }
 
 /// One equipment slot in the examine packet. 40 bytes. Slot order follows the equipment array
@@ -471,7 +470,10 @@ pub struct ExamineEquipEntry {
     pub glamour_id: u32, // +0x04
     /// Crafter content id / signature (0 for non-signed items).
     pub crafter_content_id: u64, // +0x08
-    pub unk_10: u16, // +0x10 (not read by the client)
+    /// "Has materia" flag: `1` when the item has any melded materia, `0` otherwise. The client
+    /// gates reading the materia array (and, in practice, the dyes) on this being non-zero, so it
+    /// MUST be set for melds and dyes to render. Verified by capture diffing (01 00 vs 00 00).
+    pub has_materia: u16, // +0x10
     /// Up to 5 melded materia.
     pub materia: [ExamineMateria; 5], // +0x12 (20 bytes)
     /// Primary dye.
