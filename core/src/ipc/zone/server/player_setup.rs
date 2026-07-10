@@ -241,8 +241,11 @@ pub struct PlayerSetup {
     pub rank_immortal_flames: u8,
     pub beast_reputation_rank: [u8; BEAST_TRIBE_ARRAY_SIZE],
     pub content_roulette_completion: [u8; 10],
-    pub unknown_mask6f7: [u8; 9],
-    pub padding_after_unknown_mask6f7: u8,
+    /// Persistent CPose selections, one index per PoseType category:
+    /// 0=Idle, 1=WeaponDrawn, 2=Sit, 3=GroundSit, 4=Doze, 5=Umbrella, 6=Accessory, 7=reserved.
+    /// The client stores these in `PlayerState.SelectedPoses` and re-applies the matching one
+    /// whenever the player returns to idle, so this is what makes a `/cpose` choice persist.
+    pub selected_poses: [u8; 8],
     pub player_state_flags1: PlayerStateFlags1,
     pub player_state_flags2: PlayerStateFlags2,
     pub player_state_flags3: PlayerStateFlags3,

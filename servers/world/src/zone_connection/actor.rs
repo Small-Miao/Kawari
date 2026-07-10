@@ -168,6 +168,10 @@ impl ZoneConnection {
             online_status: self.get_actual_online_status(),
             common: common.clone(),
             title_id: self.player_data.volatile.title as u16,
+            // The player is always standing (PoseType::Idle) right after (re)spawn, so seed the
+            // rendered pose from the persisted idle selection. Non-idle stances are re-applied by
+            // the client via ReapplyPose using the full SelectedPoses array in PlayerSetup.
+            pose: self.player_data.volatile.poses()[0],
             ..Default::default()
         };
 

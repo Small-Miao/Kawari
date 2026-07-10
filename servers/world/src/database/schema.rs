@@ -69,6 +69,7 @@ diesel::table! {
         is_online -> Bool,
         client_language -> Integer,
         current_mount -> Integer,
+        selected_poses -> BigInt,
     }
 }
 

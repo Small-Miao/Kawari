@@ -940,6 +940,7 @@ async fn send_zone_init_response(connection: &mut ZoneConnection, source: &'stat
         let config = get_config();
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PlayerSetup(PlayerSetup {
             content_id: connection.player_data.character.content_id as u64,
+            selected_poses: connection.player_data.volatile.poses(),
             player_state_flags1,
             player_state_flags2,
             player_state_flags3,
@@ -2308,6 +2309,27 @@ async fn process_packet(
                                             .await;
                                     }
                                 }
+                            }
+                            ClientTriggerCommand::ChangePose { unk1, pose }
+                            | ClientTriggerCommand::ReapplyPose { unk1, pose } => {
+                                // Persist the pose per stance so it survives zone changes and
+                                // relogs. `unk1` is the PoseType category, `pose` the index within
+                                // it. The live spawn update + broadcast to other clients still
+                                // happens on the server side; we only add persistence here.
+                                connection
+                                    .player_data
+                                    .volatile
+                                    .set_pose(unk1 as u8, pose as u8);
+
+                                // Inform the server of our trigger, it will handle sending it to other clients.
+                                connection
+                                    .handle
+                                    .send(ToServer::ClientTrigger(
+                                        connection.id,
+                                        connection.player_data.character.actor_id,
+                                        trigger.clone(),
+                                    ))
+                                    .await;
                             }
                             _ => {
                                 // inform the server of our trigger, it will handle sending it to other clients

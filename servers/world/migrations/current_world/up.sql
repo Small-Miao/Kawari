@@ -164,6 +164,7 @@ CREATE TABLE `volatile`(
 	`is_online` BOOL NOT NULL,
 	`client_language` INTEGER NOT NULL,
 	`current_mount` INTEGER NOT NULL,
+	`selected_poses` BIGINT NOT NULL,
 	FOREIGN KEY (`content_id`) REFERENCES `character`(`content_id`)
 );
 

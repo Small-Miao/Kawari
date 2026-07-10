@@ -153,6 +153,28 @@ pub struct Volatile {
     pub is_online: bool,
     pub client_language: ClientLanguage,
     pub current_mount: i32,
+    /// The 8 persistent CPose selections (one index per PoseType category), packed into an
+    /// i64 as little-endian bytes so byte `i` holds the pose for category `i`. See `Volatile::poses`.
+    pub selected_poses: i64,
+}
+
+impl Volatile {
+    /// Unpacks `selected_poses` into the per-category CPose array expected by
+    /// `PlayerSetup.selected_poses` / `PlayerState.SelectedPoses` (byte `i` = category `i`).
+    pub fn poses(&self) -> [u8; 8] {
+        self.selected_poses.to_le_bytes()
+    }
+
+    /// Sets the pose index for a single PoseType category (`0..8`). Categories outside
+    /// that range are ignored. The client sends the category in `ChangePose`/`ReapplyPose`.
+    pub fn set_pose(&mut self, category: u8, index: u8) {
+        if category >= 8 {
+            return;
+        }
+        let mut bytes = self.selected_poses.to_le_bytes();
+        bytes[category as usize] = index;
+        self.selected_poses = i64::from_le_bytes(bytes);
+    }
 }
 
 #[derive(
