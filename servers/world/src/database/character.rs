@@ -730,6 +730,13 @@ impl WorldDatabase {
                 .unwrap();
         }
 
+        {
+            use schema::glamour::dsl::*;
+            diesel::delete(glamour.filter(content_id.eq(for_content_id as i64)))
+                .execute(&mut self.connection)
+                .unwrap();
+        }
+
         // Since linkshell management is a little more complex than just deleting all rows with this content id, we do it the slightly slower way. We want orphaned linkshells with zero members to auto-disband.
         // TODO: Implement the ToServer protocol for CustomIpcConnection so we can notify the global server about this character's departures from their linkshells
         if let Some(linkshells) = self.find_linkshells(for_content_id as i64) {
