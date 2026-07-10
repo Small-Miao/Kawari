@@ -20,15 +20,6 @@ function onTalk(target, player)
 end
 
 function onReturn(scene, results, player)
-    if scene == 4 then
-        player:play_scene(00005, HIDE_HOTBAR, {})
-        return
-    end
-
-    player:finish_event()
-end
-
-function onYield(scene, id, results, player)
     if scene == 0 then
         -- first param: whether the quest was accepted
         local accepted = results[1] == 1
@@ -49,10 +40,17 @@ function onYield(scene, id, results, player)
         player:start_event(OPENING_EVENT_HANDLER, EVENT_TYPE_NEST, 0)
         player:play_scene(30, HIDE_HOTBAR | NO_DEFAULT_CAMERA, {2})
         return
+    elseif scene == 4 then
+        player:play_scene(00005, HIDE_HOTBAR, {})
+        return
     elseif scene == 5 then
         local completed = results[1] == 1
         player:finish_quest(EVENT_ID)
     end
 
+    player:finish_event()
+end
+
+function onYield(scene, id, results, player)
     player:finish_event()
 end

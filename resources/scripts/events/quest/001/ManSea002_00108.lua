@@ -9,7 +9,11 @@ function onTalk(target, player)
 end
 
 function onReturn(scene, results, player)
-    if scene == 50 then
+    if scene == 0 and results[1] == 1 then
+        -- Play the introductory text if accepted (this has to be played from Momodi)
+        player:play_scene(50, HIDE_HOTBAR, {})
+        return
+    elseif scene == 50 then
         -- Accept the quest, this also matches up with the client-side UI
         player:accept_quest(EVENT_ID)
 
@@ -24,11 +28,5 @@ function onReturn(scene, results, player)
 end
 
 function onYield(scene, id, results, player)
-    if scene == 0 and results[1] == 1 then
-        -- Play the introductory text if accepted (this has to be played from Momodi)
-        player:play_scene(50, HIDE_HOTBAR, {})
-        return
-    end
-
     player:finish_event()
 end
