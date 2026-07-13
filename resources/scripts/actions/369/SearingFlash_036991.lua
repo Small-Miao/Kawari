@@ -1,5 +1,5 @@
--- 灵极脉冲 / Lux Solaris GCD (Solar Bahamut filler)
-POTENCY = 640
+-- 灼热之闪 / Searing Flash (Solar Bahamut)
+POTENCY = 700
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()

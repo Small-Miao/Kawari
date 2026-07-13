@@ -95,7 +95,7 @@ const ACTION_ENKINDLE_BAHAMUT: u32 = 7429;
 const ACTION_ENKINDLE_SOLAR_BAHAMUT: u32 = 36998;
 const LEVEL_SUMMON_SOLAR_BAHAMUT: u8 = 100;
 const ACTION_WYRM_WAVE: u32 = 7428;
-const ACTION_SCARLET_FLAME: u32 = 36993;
+const ACTION_LUXWAVE: u32 = 36993;
 
 const STATUS_FURTHER_RUIN: u16 = 2701;
 const STATUS_SEARING_LIGHT: u16 = 2703;
@@ -2124,7 +2124,7 @@ pub(crate) fn pending_demi_auto_attack(
             potency: SUMMONER_DEMI_BAHAMUT_AUTO_ATTACK_POTENCY,
         }),
         SummonerDemiPhase::SolarBahamut => Some(SummonerDemiAutoAttack {
-            action_id: ACTION_SCARLET_FLAME,
+            action_id: ACTION_LUXWAVE,
             pet_base_id: SUMMONER_DEMI_SOLAR_BAHAMUT_BASE_ID,
             potency: SUMMONER_DEMI_SOLAR_BAHAMUT_AUTO_ATTACK_POTENCY,
         }),

@@ -1,5 +1,5 @@
--- 龙神迸发 / Akh Morn (Bahamut)
-POTENCY = 1300
+-- 灵极脉冲 / Umbral Impulse GCD (Solar Bahamut filler)
+POTENCY = 640
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
