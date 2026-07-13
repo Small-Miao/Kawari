@@ -14,6 +14,7 @@ members = [
     "servers/world",
 
     # Tools
+    "tools/actionaudit",
     "tools/navimesh",
     "tools/run",
 ]
@@ -37,7 +38,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
-# Used to read game data
+# Used to read game data. See the [patch] section at the bottom of this file.
 physis = { git = "https://github.com/redstrate/physis", features = ["glam"], default-features = false }
 
 # Serialization used everywhere
@@ -98,7 +99,7 @@ binrw = { version = "0.15", features = ["std"], default-features = false }
 bstr = { version = "1.12" }
 
 # Reading Excel sheet data
-icarus = { git = "https://github.com/redstrate/Icarus", branch = "ver/2026.04.21.0000.0000", features = ["Warp", "Tribe", "ClassJob", "TerritoryType", "Race", "Aetheryte", "EquipSlotCategory", "Action", "Trait", "WeatherRate", "PlaceName", "GilShopItem", "InstanceContent", "ContentFinderCondition", "BNpcBase", "Mount", "AetherCurrentCompFlgSet", "WarpLogic", "Item", "AetherCurrentCompFlgSet", "CustomTalk", "Opening", "ItemAction", "PreHandler", "SwitchTalkVariation", "HalloweenNpcSelect", "Quest", "TopicSelect", "ParamGrow", "FateShop", "EObj", "GimmickRect", "SpecialShop", "BaseParam", "ContentDirectorManagedSG", "FittingShopCategoryItem", "RecastNavimesh", "AetheryteSystemDefine", "GatheringPoint", "GatheringPointBase", "BNpcCustomize", "Recipe", "CraftAction", "GatheringItem", "OnlineStatus", "ItemLevel", "HousingAethernet", "Emote", "Battalion", "NpcYell", "HousingLandSet", "NpcEquip", "HousingFurniture", "ENpcBase", "IKDRoute"], default-features = false }
+icarus = { git = "https://github.com/redstrate/Icarus", branch = "ver/2026.04.21.0000.0000", features = ["Warp", "Tribe", "ClassJob", "TerritoryType", "Race", "Aetheryte", "EquipSlotCategory", "Action", "Trait", "WeatherRate", "PlaceName", "GilShopItem", "InstanceContent", "ContentFinderCondition", "BNpcBase", "Mount", "AetherCurrentCompFlgSet", "WarpLogic", "Item", "AetherCurrentCompFlgSet", "CustomTalk", "Opening", "ItemAction", "PreHandler", "SwitchTalkVariation", "HalloweenNpcSelect", "Quest", "TopicSelect", "ParamGrow", "FateShop", "EObj", "GimmickRect", "SpecialShop", "BaseParam", "ContentDirectorManagedSG", "FittingShopCategoryItem", "RecastNavimesh", "AetheryteSystemDefine", "GatheringPoint", "GatheringPointBase", "BNpcCustomize", "Recipe", "CraftAction", "GatheringItem", "OnlineStatus", "ItemLevel", "HousingAethernet", "Emote", "Battalion", "NpcYell", "HousingLandSet", "NpcEquip", "HousingFurniture", "ENpcBase", "IKDRoute", "ClassJobActionUI", "ClassJobCategory", "ActionCategory", "ActionIndirection"], default-features = false }
 
 # Used in encryption of lobby packets
 md5 = { version = "0.8", default-features = false }
@@ -120,3 +121,17 @@ glam = { version = "0.33", features = ["std"], default-features = false }
 
 # For Windows ANSI support
 nu-ansi-term = "0.50"
+
+# physis reads every *subrow* sheet 6 bytes early: `read_descriptors` captures
+# `data_offset` before the DataSectionHeader, which — unlike for standard rows —
+# cannot be skipped for subrow sheets, because its `row_count` is needed to walk
+# the subrows. Upstream has not fixed this.
+#
+# It corrupts GilShopItem (a subrow sheet, read by servers/world/src/gamedata.rs)
+# and ClassJobActionUI (read by tools/actionaudit).
+#
+# The patch must live here rather than on the workspace dependency above: icarus
+# also depends on redstrate/physis, and a plain fork URL would put two
+# incompatible physis crates in the graph. Drop this once upstream carries the fix.
+[patch."https://github.com/redstrate/physis"]
+physis = { git = "https://github.com/Yarukon/Physis", rev = "0853b0c9410f12df67da069fec785cefdc94e505" }

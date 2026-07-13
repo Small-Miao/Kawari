@@ -769,6 +769,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kawari-actionaudit"
+version = "7.51.2"
+dependencies = [
+ "icarus",
+ "kawari",
+ "physis",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kawari-admin"
 version = "7.51.2"
 dependencies = [
@@ -1260,7 +1273,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "physis"
 version = "0.7.0"
-source = "git+https://github.com/redstrate/physis#d390a577b6a26cce307f0ac519a26618c2afb72f"
+source = "git+https://github.com/Yarukon/Physis?rev=0853b0c9410f12df67da069fec785cefdc94e505#0853b0c9410f12df67da069fec785cefdc94e505"
 dependencies = [
  "binrw",
  "bitflags",
