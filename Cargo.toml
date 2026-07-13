@@ -99,7 +99,7 @@ binrw = { version = "0.15", features = ["std"], default-features = false }
 bstr = { version = "1.12" }
 
 # Reading Excel sheet data
-icarus = { git = "https://github.com/redstrate/Icarus", branch = "ver/2026.04.21.0000.0000", features = ["Warp", "Tribe", "ClassJob", "TerritoryType", "Race", "Aetheryte", "EquipSlotCategory", "Action", "Trait", "WeatherRate", "PlaceName", "GilShopItem", "InstanceContent", "ContentFinderCondition", "BNpcBase", "Mount", "AetherCurrentCompFlgSet", "WarpLogic", "Item", "AetherCurrentCompFlgSet", "CustomTalk", "Opening", "ItemAction", "PreHandler", "SwitchTalkVariation", "HalloweenNpcSelect", "Quest", "TopicSelect", "ParamGrow", "FateShop", "EObj", "GimmickRect", "SpecialShop", "BaseParam", "ContentDirectorManagedSG", "FittingShopCategoryItem", "RecastNavimesh", "AetheryteSystemDefine", "GatheringPoint", "GatheringPointBase", "BNpcCustomize", "Recipe", "CraftAction", "GatheringItem", "OnlineStatus", "ItemLevel", "HousingAethernet", "Emote", "Battalion", "NpcYell", "HousingLandSet", "NpcEquip", "HousingFurniture", "ENpcBase", "IKDRoute", "ClassJobActionUI", "ClassJobCategory", "ActionCategory", "ActionIndirection"], default-features = false }
+icarus = { git = "https://github.com/redstrate/Icarus", branch = "ver/2026.04.21.0000.0000", features = ["Warp", "Tribe", "ClassJob", "TerritoryType", "Race", "Aetheryte", "EquipSlotCategory", "Action", "Trait", "WeatherRate", "PlaceName", "GilShopItem", "InstanceContent", "ContentFinderCondition", "BNpcBase", "Mount", "AetherCurrentCompFlgSet", "WarpLogic", "Item", "AetherCurrentCompFlgSet", "CustomTalk", "Opening", "ItemAction", "PreHandler", "SwitchTalkVariation", "HalloweenNpcSelect", "Quest", "TopicSelect", "ParamGrow", "FateShop", "EObj", "GimmickRect", "SpecialShop", "BaseParam", "ContentDirectorManagedSG", "FittingShopCategoryItem", "RecastNavimesh", "AetheryteSystemDefine", "GatheringPoint", "GatheringPointBase", "BNpcCustomize", "Recipe", "CraftAction", "GatheringItem", "OnlineStatus", "ItemLevel", "HousingAethernet", "Emote", "Battalion", "NpcYell", "HousingLandSet", "NpcEquip", "HousingFurniture", "ENpcBase", "IKDRoute", "ClassJobActionUI", "ClassJobCategory", "ActionCategory", "ActionIndirection", "ActionTransient"], default-features = false }
 
 # Used in encryption of lobby packets
 md5 = { version = "0.8", default-features = false }
@@ -122,16 +122,21 @@ glam = { version = "0.33", features = ["std"], default-features = false }
 # For Windows ANSI support
 nu-ansi-term = "0.50"
 
-# physis reads every *subrow* sheet 6 bytes early: `read_descriptors` captures
-# `data_offset` before the DataSectionHeader, which — unlike for standard rows —
-# cannot be skipped for subrow sheets, because its `row_count` is needed to walk
-# the subrows. Upstream has not fixed this.
+# A fork of physis carrying two fixes upstream does not have:
 #
-# It corrupts GilShopItem (a subrow sheet, read by servers/world/src/gamedata.rs)
-# and ClassJobActionUI (read by tools/actionaudit).
+#   - Subrow sheets were read 6 bytes early, because `data_offset` is captured
+#     before the DataSectionHeader that — unlike for standard rows — cannot be
+#     skipped for subrow sheets. This corrupts GilShopItem, read by
+#     servers/world/src/gamedata.rs, and ClassJobActionUI, read by
+#     tools/actionaudit.
+#
+#   - Excel string columns hold SeStrings, whose macro chunks are frequently not
+#     valid UTF-8, so any string carrying one decoded to "". Of ActionTransient's
+#     51501 rows only 536 survived. The fork strips the macros and evaluates the
+#     integer expressions that hold values such as an action's potency.
 #
 # The patch must live here rather than on the workspace dependency above: icarus
 # also depends on redstrate/physis, and a plain fork URL would put two
-# incompatible physis crates in the graph. Drop this once upstream carries the fix.
+# incompatible physis crates in the graph. Drop this once upstream carries the fixes.
 [patch."https://github.com/redstrate/physis"]
-physis = { git = "https://github.com/Yarukon/Physis", rev = "0853b0c9410f12df67da069fec785cefdc94e505" }
+physis = { git = "https://github.com/Yarukon/Physis", rev = "9336c467d1e4662e8a2e2b4b5e45a1462d328bfd" }

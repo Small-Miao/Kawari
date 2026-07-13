@@ -27,12 +27,14 @@ use std::path::{Component, Path, PathBuf};
 use icarus::Action::{ActionRow, ActionSheet};
 use icarus::ActionCategory::ActionCategorySheet;
 use icarus::ActionIndirection::ActionIndirectionSheet;
+use icarus::ActionTransient::ActionTransientSheet;
 use icarus::ClassJob::ClassJobSheet;
 use icarus::ClassJobActionUI::ClassJobActionUISheet;
 use icarus::ClassJobCategory::{ClassJobCategoryRow, ClassJobCategorySheet};
 use kawari::config::get_config;
 use physis::{
     Language,
+    exd::EXD,
     resource::{ResourceResolver, SqPackResource},
 };
 use serde::Serialize;
@@ -535,6 +537,240 @@ fn scan_lua_actions(search_dirs: &[String]) -> LuaTree {
 }
 
 // -------------------------------------------------------------------------------------------------
+// SeString: is this description's potency CONDITIONAL?
+// -------------------------------------------------------------------------------------------------
+//
+// physis decodes an EXD string field by *evaluating* its SeString macros under an "every condition is
+// true" policy (`If` -> then-branch, `Switch` -> first case). That is the number this tool wants -- it
+// is the max-level, matching-job value -- but the evaluated `String` has no trace left of whether it
+// came from a literal or from a branch. `Action Transient[25836]` reads `威力：160`; so does a literal.
+//
+// physis exposes no raw-byte accessor, so the only way to answer the question is to re-read the
+// `ActionTransient` EXD pages as raw bytes (`ResourceResolver::read` IS public) and walk the SeString
+// chunk stream looking for an `If`/`Switch` chunk. We do NOT re-implement physis's *evaluator* -- only
+// its chunk framing, which is enough to skip a body wholesale.
+//
+// The framing is self-verifying: for any row WITHOUT an `If`/`Switch`, the literal text this walker
+// produces must equal physis's decoded `Description` byte for byte. `sestring_walk_matches_physis`
+// asserts exactly that over the whole sheet, so a wrong row offset or a wrong length reading cannot
+// pass silently.
+
+/// Start-of-macro marker in a SeString byte stream.
+const SESTRING_START: u8 = 0x02;
+/// End-of-macro marker in a SeString byte stream.
+const SESTRING_END: u8 = 0x03;
+/// The `NewLine` macro, the only presentational macro that carries text of its own.
+const SESTRING_MACRO_NEWLINE: u8 = 0x10;
+/// The `If` macro.
+const SESTRING_MACRO_IF: u8 = 0x08;
+/// The `Switch` macro.
+const SESTRING_MACRO_SWITCH: u8 = 0x09;
+
+/// `ActionTransient` has exactly one column -- a `String` at column offset 0 -- so its fixed-size row
+/// region is a single 4-byte string offset, and the string blob begins 4 bytes into the row data.
+///
+/// `EXH::header.row_size` (which physis uses for this) is `pub(crate)`, so it cannot be read from
+/// here. The constant is not a guess: if it were wrong, every string would be misaligned and
+/// `sestring_walk_matches_physis` would fail on the first row.
+const ACTION_TRANSIENT_ROW_SIZE: usize = 4;
+
+/// Decodes a SeString packed integer starting at `data[*pos]`, advancing `pos` past it.
+///
+/// Literal values are **biased by one** (a byte of `0x01` means zero) so that an encoded integer never
+/// contains a `0x00` byte, which would terminate the string early. `0xF0..=0xFE` introduce a
+/// multi-byte form: the low nibble plus one is a four-bit mask selecting which big-endian bytes of a
+/// `u32` follow.
+///
+/// This mirrors `physis::common_file_operations::read_sestring_packed_int`, which is private.
+fn read_sestring_packed_int(data: &[u8], pos: &mut usize) -> Option<u32> {
+    let marker = *data.get(*pos)?;
+    *pos += 1;
+
+    match marker {
+        0x01..=0xCF => Some(marker as u32 - 1),
+        0xF0..=0xFE => {
+            let mask = marker - 0xF0 + 1;
+            let mut value = 0u32;
+            for shift in [24u32, 16, 8, 0] {
+                if mask & (1 << (shift / 8)) != 0 {
+                    value |= (*data.get(*pos)? as u32) << shift;
+                    *pos += 1;
+                }
+            }
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+/// What a walk of one SeString yields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeStringWalk {
+    /// The literal text, with every macro chunk **dropped** (`NewLine` becomes `\n`). For a string
+    /// with no `If`/`Switch` this equals physis's decoded output; for one with them it is physis's
+    /// output minus the branch it took.
+    literal: String,
+    /// The string contains at least one `If` or `Switch` chunk, at any nesting depth reachable from
+    /// the top level.
+    conditional: bool,
+}
+
+/// Walks a SeString's chunk framing. Returns [`None`] if the stream is malformed, so a framing bug
+/// can never masquerade as "not conditional".
+fn sestring_walk(data: &[u8]) -> Option<SeStringWalk> {
+    let mut literal = Vec::with_capacity(data.len());
+    let mut conditional = false;
+    let mut pos = 0usize;
+
+    while pos < data.len() {
+        let byte = data[pos];
+        if byte != SESTRING_START {
+            // A bare end marker outside of a macro means we lost track of the stream.
+            if byte == SESTRING_END {
+                return None;
+            }
+            literal.push(byte);
+            pos += 1;
+            continue;
+        }
+
+        pos += 1;
+        let kind = *data.get(pos)?;
+        pos += 1;
+
+        let body_len = read_sestring_packed_int(data, &mut pos)? as usize;
+        let body_end = pos.checked_add(body_len)?;
+        if *data.get(body_end)? != SESTRING_END {
+            return None;
+        }
+
+        match kind {
+            SESTRING_MACRO_NEWLINE => literal.push(b'\n'),
+            SESTRING_MACRO_IF | SESTRING_MACRO_SWITCH => conditional = true,
+            _ => {}
+        }
+
+        pos = body_end + 1;
+    }
+
+    Some(SeStringWalk {
+        literal: String::from_utf8_lossy(&literal).into_owned(),
+        conditional,
+    })
+}
+
+/// Re-reads the raw `ActionTransient` EXD pages and returns, per row, the raw SeString bytes of its
+/// `Description`.
+///
+/// This deliberately bypasses icarus/`Sheet`, which hands back an already-evaluated `String`.
+fn read_action_transient_raw(
+    resolver: &mut ResourceResolver,
+    lang: Language,
+) -> Result<HashMap<u32, Vec<u8>>, String> {
+    const SHEET: &str = "actiontransient";
+    /// `EXDF` magic + version/unk (4) + data_offset_size (4) + data_section_size (4) + 16 pad.
+    const EXD_HEADER_SIZE: usize = 0x20;
+    /// `size: u32` + `row_count: u16`.
+    const DATA_SECTION_HEADER_SIZE: usize = 6;
+
+    let exh = resolver
+        .read_excel_sheet_header(SHEET)
+        .map_err(|e| format!("failed to read the ActionTransient sheet header: {e:?}"))?;
+
+    let be32 = |data: &[u8], at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+    };
+
+    let mut raw = HashMap::new();
+    for page in &exh.pages {
+        let path = format!("exd/{}", EXD::calculate_filename(SHEET, lang, page));
+        let data = resolver
+            .read(&path)
+            .map_err(|e| format!("failed to read `{path}`: {e:?}"))?;
+
+        let bad = |what: &str| format!("`{path}` is malformed: {what}");
+
+        if data.get(..4) != Some(b"EXDF") {
+            return Err(bad("not an EXD file"));
+        }
+        let offset_table_size = be32(&data, 8).ok_or_else(|| bad("truncated header"))? as usize;
+
+        for entry in (0..offset_table_size / 8).map(|i| EXD_HEADER_SIZE + i * 8) {
+            let row_id = be32(&data, entry).ok_or_else(|| bad("truncated offset table"))?;
+            let row_at =
+                be32(&data, entry + 4).ok_or_else(|| bad("truncated offset table"))? as usize;
+
+            let size = be32(&data, row_at).ok_or_else(|| bad("truncated data section"))? as usize;
+            let body_at = row_at + DATA_SECTION_HEADER_SIZE;
+            let body = data
+                .get(body_at..body_at + size)
+                .ok_or_else(|| bad("data section runs past the end of the file"))?;
+
+            // The single string column's value is an offset into the string blob, which begins right
+            // after the fixed-size region.
+            let string_at = ACTION_TRANSIENT_ROW_SIZE
+                + be32(body, 0).ok_or_else(|| bad("row is smaller than its fixed region"))?
+                    as usize;
+            let string = body
+                .get(string_at..)
+                .ok_or_else(|| bad("string offset runs past the end of the row"))?;
+            let string = &string[..string.iter().position(|b| *b == 0).unwrap_or(string.len())];
+
+            raw.insert(row_id, string.to_vec());
+        }
+    }
+
+    Ok(raw)
+}
+
+// -------------------------------------------------------------------------------------------------
+// Description parsing
+// -------------------------------------------------------------------------------------------------
+
+/// The potency label, with the **full-width** colon the game data actually uses (U+FF1A, not `:`).
+const POTENCY_LABEL: &str = "威力：";
+/// The **healing** potency label. A heal has no `威力：` at all -- `16230 Physick` reads
+/// `恢复力：400` -- so a tool that only looks for `威力：` reports every heal as having no number.
+const CURE_POTENCY_LABEL: &str = "恢复力：";
+/// The AoE falloff phrase: `对目标之外的敌人威力降低60%`.
+const FALLOFF_PREFIX: &str = "威力降低";
+
+/// Reads the decimal number starting at `text[at..]`. Returns `None` when the label is followed by
+/// prose rather than a number -- which is **normal**, not an error: `ActionTransient[29067]` reads
+/// `威力：防护罩残存量的150%`. Never panics, never guesses.
+fn leading_number(text: &str) -> Option<u32> {
+    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Every number introduced by `label`, in source order. A description may carry several (a combo
+/// bonus, a positional bonus, an under-a-buff value).
+fn parse_labelled_numbers(description: &str, label: &str) -> Vec<u32> {
+    description
+        .match_indices(label)
+        .filter_map(|(at, _)| leading_number(&description[at + label.len()..]))
+        .collect()
+}
+
+/// Every literal damage potency (`威力：<n>`).
+fn parse_potencies(description: &str) -> Vec<u32> {
+    parse_labelled_numbers(description, POTENCY_LABEL)
+}
+
+/// Every literal **healing** potency (`恢复力：<n>`). A heal carries no `威力：` at all, so this is
+/// not an alternative spelling -- it is the only number those actions have.
+fn parse_cure_potencies(description: &str) -> Vec<u32> {
+    parse_labelled_numbers(description, CURE_POTENCY_LABEL)
+}
+
+/// The AoE damage falloff applied to every enemy but the primary target, as a percentage.
+fn parse_aoe_falloff(description: &str) -> Option<u32> {
+    description
+        .match_indices(FALLOFF_PREFIX)
+        .find_map(|(at, _)| leading_number(&description[at + FALLOFF_PREFIX.len()..]))
+}
+
+// -------------------------------------------------------------------------------------------------
 // Game data
 // -------------------------------------------------------------------------------------------------
 
@@ -569,6 +805,11 @@ struct GameData {
     /// Every action id appearing on ANY `ClassJobActionUI` panel. Used to tell a panel-less
     /// replacement (which must be rescued into `expected`) from one that is already covered.
     all_panel_ids: BTreeSet<u32>,
+    /// `ActionTransient.Description`, verbatim (newlines preserved). Empty rows are omitted.
+    descriptions: HashMap<u32, String>,
+    /// Actions whose description contains an `If`/`Switch` chunk, so any potency parsed out of it is
+    /// **one branch**, not a fixed number. See the SeString section above.
+    conditional: BTreeSet<u32>,
 }
 
 fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
@@ -588,6 +829,25 @@ fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
         .map_err(|e| format!("failed to read the ClassJobActionUI sheet: {e:?}"))?;
     let indirection_sheet = ActionIndirectionSheet::read_from(&mut resolver, Language::None)
         .map_err(|e| format!("failed to read the ActionIndirection sheet: {e:?}"))?;
+    let transient_sheet = ActionTransientSheet::read_from(&mut resolver, lang)
+        .map_err(|e| format!("failed to read the ActionTransient sheet: {e:?}"))?;
+
+    let mut descriptions = HashMap::new();
+    for (id, subrows) in &transient_sheet {
+        if let Some((_, row)) = subrows.into_iter().next()
+            && !row.Description.is_empty()
+        {
+            descriptions.insert(id, row.Description);
+        }
+    }
+
+    // The evaluated `Description` above cannot tell a literal potency from a branch of an
+    // `If`/`Switch`, so re-read the same sheet as raw bytes and walk its chunk framing.
+    let conditional: BTreeSet<u32> = read_action_transient_raw(&mut resolver, lang)?
+        .into_iter()
+        .filter(|(_, bytes)| sestring_walk(bytes).is_some_and(|walk| walk.conditional))
+        .map(|(id, _)| id)
+        .collect();
 
     let mut actions = HashMap::new();
     for (id, subrows) in &action_sheet {
@@ -682,6 +942,8 @@ fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
         replaces,
         indirection,
         all_panel_ids,
+        descriptions,
+        conditional,
     };
     check_schema_canary(&gd)?;
     Ok(gd)
@@ -781,7 +1043,93 @@ fn check_schema_canary(gd: &GameData) -> Result<(), String> {
         ));
     }
 
+    // ActionTransient loaded, in the right language, and SeString-DECODED. A description is a
+    // SeString: without physis's decoder the raw macro bytes leak in and the potency label is either
+    // mangled or absent entirely. `Necrotize` is a plain literal.
+    let necrotize = gd
+        .descriptions
+        .get(&36990)
+        .map(String::as_str)
+        .unwrap_or("");
+    if !necrotize.contains("威力：500") {
+        return Err(fail(
+            "ActionTransient[36990] (Necrotize)",
+            "a Description containing `威力：500`".into(),
+            format!("{necrotize:?}"),
+        ));
+    }
+
+    // ..and that the decoder EVALUATES conditionals rather than dropping them. Mountain Buster's
+    // potency lives inside an `If`, so a decoder that merely strips macros yields `威力：` with
+    // nothing after it. This is the one canary that distinguishes "decoded" from "evaluated".
+    let mountain_buster = gd
+        .descriptions
+        .get(&25836)
+        .map(String::as_str)
+        .unwrap_or("");
+    if !mountain_buster.contains("威力：160") {
+        return Err(fail(
+            "ActionTransient[25836] (Mountain Buster)",
+            "a Description containing `威力：160` (an evaluated `If` branch)".into(),
+            format!("{mountain_buster:?}"),
+        ));
+    }
+    if !gd.conditional.contains(&25836) || gd.conditional.contains(&36990) {
+        return Err(fail(
+            "ActionTransient conditional detection",
+            "25836 (Mountain Buster) conditional, 36990 (Necrotize) literal".into(),
+            format!(
+                "25836 conditional = {}, 36990 conditional = {}",
+                gd.conditional.contains(&25836),
+                gd.conditional.contains(&36990)
+            ),
+        ));
+    }
+
     Ok(())
+}
+
+/// The `CastType` values whose meaning is **proven** from the game's own description text, which is
+/// the only ground truth available offline. See `PLAN.md` §4.10 for the evidence table; every label
+/// here is pinned by the `cast_type_labels_match_their_evidence` test.
+///
+/// A value that cannot be proven is reported as `unknown(N)`. It is **not** guessed at: a wrong
+/// geometry label is worse than an admitted gap, because it would be copied into a Lua script.
+fn cast_type_label(cast_type: u8) -> String {
+    match cast_type {
+        // "对目标发动无属性魔法攻击" -- no area language anywhere in the 630 actions carrying it.
+        1 => "single target".to_string(),
+        // "对目标`及其周围`的敌人发动范围魔法攻击", radius = EffectRange. When `Range == 0` the
+        // target is the caster ("自身`和周围`队员"), so this is "centred on the target", not "on the
+        // enemy" -- the geometry is the same either way.
+        2 => "circle centred on the target (radius = effect_range)".to_string(),
+        // "向目标所在方向发出`扇形`范围物理攻击" -- all 21.
+        3 => "cone from the caster (length = effect_range)".to_string(),
+        // "向目标所在方向发出`直线`范围物理攻击" -- all 27. XAxisModifier is its width.
+        4 => "line from the caster (length = effect_range, width = x_axis_modifier)".to_string(),
+        // The area is PLACED, never centred on a target: "在`自身脚下`生成黑魔纹" (3573, TargetArea =
+        // false) or "在`指定地点`设置地星" (7439, TargetArea = true). Do not call this
+        // "centred on the caster" -- half of the twelve are ground-targeted.
+        7 => "circle placed at a point (the caster's feet, or the ground target when target_area)"
+            .to_string(),
+        other => {
+            warn_unknown_cast_type(other);
+            format!("unknown({other})")
+        }
+    }
+}
+
+/// `warn!` at most once per unproven `CastType`, however many actions carry it.
+fn warn_unknown_cast_type(cast_type: u8) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SEEN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+    if !SEEN[cast_type as usize].swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Action CastType {cast_type} has no meaning proven from the description text; \
+             reporting it as `unknown({cast_type})` rather than guessing at its geometry."
+        );
+    }
 }
 
 impl GameData {
@@ -1231,6 +1579,44 @@ struct ActionEntry {
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_by: Option<u32>,
+
+    // --- ActionTransient.Description, and what can be parsed out of it ---------------------------
+    /// The localized description, **verbatim**, newlines and all. The parsed fields below are a
+    /// convenience; they never replace this.
+    description: Option<String>,
+    /// The first literal potency in the description, if it is a number at all.
+    potency: Option<u32>,
+    /// Every literal potency, in source order (combo bonus, positional bonus, ...).
+    all_potencies: Vec<u32>,
+    /// The description's potency came out of an `If`/`Switch`, so it is the **matching-job,
+    /// max-level** branch rather than a fixed number.
+    potency_is_conditional: bool,
+    /// The first literal **healing** potency (`恢复力：<n>`). A heal has no `威力：` at all, so
+    /// without this a heal looks like an action with no number.
+    cure_potency: Option<u32>,
+    /// Every literal healing potency, in source order (an initial cure plus its regen, ...).
+    all_cure_potencies: Vec<u32>,
+    /// As [`ActionEntry::potency_is_conditional`], for the healing potency.
+    ///
+    /// The `If`/`Switch` detection is **per row**, not per label -- it says "this description
+    /// contains a conditional", not "this particular number is one. So a row carrying both a damage
+    /// and a healing potency marks *both* flags. That is deliberately conservative: it can over-warn,
+    /// never under-warn.
+    cure_potency_is_conditional: bool,
+    /// `对目标之外的敌人威力降低60%` -> `60`.
+    aoe_falloff_pct: Option<u32>,
+
+    // --- Action sheet geometry / timing -----------------------------------------------------------
+    cast_type: u8,
+    cast_type_label: String,
+    effect_range: u8,
+    range: i8,
+    x_axis_modifier: u8,
+    target_area: bool,
+    cast_ms: u32,
+    recast_ms: u32,
+    max_charges: u8,
+    combo_action: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1318,6 +1704,17 @@ impl Context<'_> {
             None => self.gd.level_of(id) <= level,
         });
 
+        let description = self.gd.descriptions.get(&id).cloned();
+        let all_potencies = description
+            .as_deref()
+            .map(parse_potencies)
+            .unwrap_or_default();
+        let all_cure_potencies = description
+            .as_deref()
+            .map(parse_cure_potencies)
+            .unwrap_or_default();
+        let conditional = self.gd.conditional.contains(&id);
+
         ActionEntry {
             id,
             name_en,
@@ -1342,6 +1739,28 @@ impl Context<'_> {
             lua_path: self.lua.by_id.get(&id).cloned(),
             reason: None,
             superseded_by: None,
+
+            potency: all_potencies.first().copied(),
+            potency_is_conditional: !all_potencies.is_empty() && conditional,
+            cure_potency: all_cure_potencies.first().copied(),
+            cure_potency_is_conditional: !all_cure_potencies.is_empty() && conditional,
+            aoe_falloff_pct: description.as_deref().and_then(parse_aoe_falloff),
+            all_potencies,
+            all_cure_potencies,
+            description,
+
+            cast_type: action.map(|a| a.CastType).unwrap_or(0),
+            cast_type_label: cast_type_label(action.map(|a| a.CastType).unwrap_or(0)),
+            effect_range: action.map(|a| a.EffectRange).unwrap_or(0),
+            range: action.map(|a| a.Range).unwrap_or(0),
+            x_axis_modifier: action.map(|a| a.XAxisModifier).unwrap_or(0),
+            target_area: action.map(|a| a.TargetArea).unwrap_or(false),
+            cast_ms: action.map(|a| a.Cast100ms as u32 * 100).unwrap_or(0),
+            recast_ms: action.map(|a| a.Recast100ms as u32 * 100).unwrap_or(0),
+            max_charges: action.map(|a| a.MaxCharges).unwrap_or(0),
+            combo_action: action
+                .map(|a| a.ActionCombo as u32)
+                .filter(|combo| *combo != 0),
         }
     }
 }
@@ -1515,6 +1934,94 @@ fn describe(entry: &ActionEntry) -> String {
     )
 }
 
+/// The one-line combat summary printed under a missing action, above its description.
+///
+/// Only the facts that are actually present are listed -- a buff has no potency and no radius, and
+/// padding the line with `potency: none, aoe: none` would bury the actions that do.
+fn describe_combat(entry: &ActionEntry) -> String {
+    let mut facts = Vec::new();
+
+    match (entry.potency, entry.all_potencies.len()) {
+        (Some(potency), 1) => facts.push(format!(
+            "potency {potency}{}",
+            if entry.potency_is_conditional {
+                "*"
+            } else {
+                ""
+            }
+        )),
+        (Some(_), _) => facts.push(format!(
+            "potency {:?}{}",
+            entry.all_potencies,
+            if entry.potency_is_conditional {
+                "*"
+            } else {
+                ""
+            }
+        )),
+        // A `威力：` label that parsed to nothing is prose, not a number (`威力：防护罩残存量的150%`).
+        // Say so, rather than silently reporting no potency at all.
+        _ if entry
+            .description
+            .as_deref()
+            .is_some_and(|d| d.contains(POTENCY_LABEL)) =>
+        {
+            facts.push("potency (not a number -- see the description)".to_string())
+        }
+        _ => {}
+    }
+
+    match (entry.cure_potency, entry.all_cure_potencies.len()) {
+        (Some(cure), 1) => facts.push(format!(
+            "cure {cure}{}",
+            if entry.cure_potency_is_conditional {
+                "*"
+            } else {
+                ""
+            }
+        )),
+        (Some(_), _) => facts.push(format!(
+            "cure {:?}{}",
+            entry.all_cure_potencies,
+            if entry.cure_potency_is_conditional {
+                "*"
+            } else {
+                ""
+            }
+        )),
+        _ => {}
+    }
+
+    facts.push(format!("{} ({})", entry.cast_type_label, entry.cast_type));
+    if entry.effect_range > 0 {
+        facts.push(format!("radius {}y", entry.effect_range));
+    }
+    if entry.x_axis_modifier > 0 {
+        facts.push(format!("width {}y", entry.x_axis_modifier));
+    }
+    if entry.range > 0 {
+        facts.push(format!("range {}y", entry.range));
+    }
+    if entry.target_area {
+        facts.push("ground-targeted".to_string());
+    }
+    if let Some(falloff) = entry.aoe_falloff_pct {
+        facts.push(format!("aoe falloff -{falloff}%"));
+    }
+    if entry.cast_ms > 0 {
+        facts.push(format!("cast {}s", entry.cast_ms as f32 / 1000.0));
+    }
+    facts.push(format!("recast {}s", entry.recast_ms as f32 / 1000.0));
+    if entry.max_charges > 1 {
+        facts.push(format!("{} charges", entry.max_charges));
+    }
+    if let Some(combo) = entry.combo_action {
+        facts.push(format!("combo from {combo}"));
+    }
+
+    format!("  - {}\n", facts.join(" | "))
+}
+
 fn render_job_markdown(report: &JobReport, gd: &GameData) -> String {
     let mut md = String::new();
     let meta = &report.meta;
@@ -1573,8 +2080,29 @@ fn render_job_markdown(report: &JobReport, gd: &GameData) -> String {
     }
 
     md.push_str(&format!("\n## Missing ({})\n\n", report.missing.len()));
+    if report
+        .missing
+        .iter()
+        .any(|e| e.potency_is_conditional || e.cure_potency_is_conditional)
+    {
+        md.push_str(
+            "> A potency marked `*` is **conditional** in the game data (an `If`/`Switch` on job or \
+             level). The number shown is the branch taken by a **matching-job, max-level** \
+             character.\n\n",
+        );
+    }
     for entry in &report.missing {
         md.push_str(&format!("- [ ] {}\n", describe(entry)));
+        md.push_str(&describe_combat(entry));
+        // The description is emitted as an indented code block, not inline: it is multi-line and
+        // arbitrary game text, so anything markdown-significant in it (`|`, `*`, `#`, ...) must not
+        // be able to escape into the surrounding document.
+        if let Some(description) = &entry.description {
+            for line in description.lines() {
+                md.push_str(&format!("      {line}\n"));
+            }
+            md.push('\n');
+        }
     }
 
     md.push_str(&format!(
@@ -2100,6 +2628,123 @@ mod tests {
             goto_repo_root();
             scan_lua_actions(&["resources/scripts".to_string()])
         })
+    }
+
+    // --- Description parsing (no game data needed) -----------------------------------------------
+
+    #[test]
+    fn parses_potencies() {
+        // The colon is FULL-WIDTH (U+FF1A) and is usually preceded by an ideographic space (U+3000).
+        assert_eq!(
+            parse_potencies("对目标发动无属性魔法攻击　威力：240"),
+            vec![240]
+        );
+        // A description may carry several -- here a base value and a combo bonus.
+        assert_eq!(
+            parse_potencies("威力：150\n连击成功时威力：380"),
+            vec![150, 380]
+        );
+        assert_eq!(
+            parse_potencies("一定时间内，提高自身的暴击率"),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn a_prose_potency_is_none_not_a_panic() {
+        // ActionTransient[29067]. `威力：` is NOT always followed by a digit, and a description that
+        // says so is perfectly valid data -- not a parse failure to be guessed around.
+        assert_eq!(
+            parse_potencies("威力：防护罩残存量的150%"),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn a_potency_range_takes_the_lower_bound() {
+        // `16496 绝峰箭` reads `威力：140～700` -- the number the label introduces is 140.
+        assert_eq!(
+            parse_potencies("直线范围物理攻击　威力：140～700"),
+            vec![140]
+        );
+    }
+
+    #[test]
+    fn parses_cure_potencies() {
+        // A heal carries NO `威力：` -- only `恢复力：`. 16230 Physick.
+        assert_eq!(
+            parse_cure_potencies("恢复目标的体力　恢复力：400"),
+            vec![400]
+        );
+        assert_eq!(
+            parse_potencies("恢复目标的体力　恢复力：400"),
+            Vec::<u32>::new()
+        );
+        // 25830 Rekindle: an initial cure plus a regen.
+        assert_eq!(
+            parse_cure_potencies("恢复力：400\n恢复力：200　持续时间：15秒"),
+            vec![400, 200]
+        );
+        assert_eq!(parse_cure_potencies("威力：240"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn parses_aoe_falloff() {
+        assert_eq!(
+            parse_aoe_falloff("攻击复数敌人时，对目标之外的敌人威力降低60%"),
+            Some(60)
+        );
+        assert_eq!(parse_aoe_falloff("对目标发动攻击　威力：240"), None);
+    }
+
+    // --- SeString chunk framing (hardcoded bytes; no game data needed) ----------------------------
+
+    #[test]
+    fn packed_ints_are_biased_by_one() {
+        // A byte of 0x01 means ZERO. Reading it as a plain byte is the mistake that makes every
+        // chunk length off by one, and it only diverges visibly in the multi-byte form.
+        assert_eq!(read_sestring_packed_int(&[0x01], &mut 0), Some(0));
+        assert_eq!(read_sestring_packed_int(&[0x0A], &mut 0), Some(9));
+        // 0xF2 => mask 0b0011 => the low two bytes of a u32 follow, big-endian.
+        assert_eq!(
+            read_sestring_packed_int(&[0xF2, 0x01, 0x2C], &mut 0),
+            Some(300)
+        );
+        assert_eq!(read_sestring_packed_int(&[0x00], &mut 0), None);
+    }
+
+    #[test]
+    fn walks_plain_text() {
+        let walk = sestring_walk("威力：240".as_bytes()).unwrap();
+        assert_eq!(walk.literal, "威力：240");
+        assert!(!walk.conditional);
+    }
+
+    #[test]
+    fn walks_a_newline_macro() {
+        // 02 10 01 03 -- NewLine, an empty body.
+        let walk = sestring_walk(b"a\x02\x10\x01\x03b").unwrap();
+        assert_eq!(walk.literal, "a\nb");
+        assert!(!walk.conditional);
+    }
+
+    #[test]
+    fn detects_an_if_chunk() {
+        // 02 08 <len> <body> 03 -- an `If` with a three-byte body. The body is skipped wholesale,
+        // so its contents do not have to be understood to know the string is conditional.
+        let walk = sestring_walk(b"p\x02\x08\x04\xE9\x02\x03\x03").unwrap();
+        assert!(walk.conditional);
+        // The branch text is physis's job; the walker only reports the literal around it.
+        assert_eq!(walk.literal, "p");
+    }
+
+    #[test]
+    fn rejects_a_malformed_sestring() {
+        // A chunk whose length does not land on the 0x03 terminator. Returning `None` here is what
+        // stops a framing bug from quietly reporting "not conditional".
+        assert_eq!(sestring_walk(b"\x02\x08\x09\x01\x03"), None);
+        // A bare end marker outside any chunk.
+        assert_eq!(sestring_walk(b"a\x03b"), None);
     }
 
     // --- CLI + output guard ----------------------------------------------------------------------
@@ -2931,5 +3576,336 @@ mod tests {
                 .all(|id| gd.actions.get(id).unwrap().ClassJob == 36),
             "every uncovered action must be BLU"
         );
+    }
+
+    // --- ActionTransient: descriptions, potencies, conditionals -----------------------------------
+
+    /// The one test that makes `potency_is_conditional` trustworthy.
+    ///
+    /// The conditional flag is derived from a **second, independent** read of `ActionTransient` --
+    /// this crate walks the raw EXD bytes itself, because physis hands back an already-evaluated
+    /// `String` with no trace of the `If`/`Switch` it came from. If that raw reader were misaligned
+    /// by so much as one byte, or its packed-length reading were wrong, the flag would be garbage.
+    ///
+    /// So: for every row **without** an `If`/`Switch`, the literal text this crate's walker produces
+    /// must equal physis's decoded `Description` **exactly**. Nothing else has to be assumed.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn sestring_walk_matches_physis() {
+        goto_repo_root();
+        let config = get_config();
+        let mut resolver = ResourceResolver::new();
+        resolver.add_source(SqPackResource::from_existing(
+            &config.filesystem.game_path.clone(),
+        ));
+        let raw = read_action_transient_raw(&mut resolver, config.world.language())
+            .expect("failed to re-read ActionTransient as raw bytes");
+
+        let gd = game();
+        assert_eq!(raw.len(), 51501, "every ActionTransient row must be read");
+
+        let mut compared = 0usize;
+        let mut conditional = 0usize;
+        for (id, bytes) in &raw {
+            let walk = sestring_walk(bytes)
+                .unwrap_or_else(|| panic!("ActionTransient[{id}] is not a well-formed SeString"));
+
+            if walk.conditional {
+                conditional += 1;
+                continue;
+            }
+
+            let physis = gd.descriptions.get(id).map(String::as_str).unwrap_or("");
+            assert_eq!(
+                walk.literal, physis,
+                "ActionTransient[{id}]: this crate's raw walk disagrees with physis's decode"
+            );
+            compared += 1;
+        }
+
+        assert_eq!(conditional, gd.conditional.len());
+        assert_eq!(compared + conditional, 51501);
+        // A sanity floor: if the raw reader silently produced empty strings everywhere, the equality
+        // above would hold vacuously.
+        assert_eq!(
+            gd.descriptions.len(),
+            3207,
+            "non-empty descriptions on this install"
+        );
+    }
+
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn descriptions_are_sestring_decoded_and_evaluated() {
+        let gd = game();
+
+        // A literal potency: proves the sheet is loaded, in the right language, and SeString-decoded.
+        assert!(gd.descriptions[&36990].contains("威力：500"));
+        assert!(!gd.conditional.contains(&36990));
+
+        // A potency that lives inside an `If`: proves the decoder EVALUATES conditionals rather than
+        // merely stripping them (a stripping decoder yields `威力：` followed by nothing).
+        assert!(gd.descriptions[&25836].contains("威力：160"));
+        assert!(gd.conditional.contains(&25836));
+    }
+
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn a_prose_potency_stays_none() {
+        // The description is preserved verbatim; only the *parsed* number is absent.
+        let gd = game();
+        let description = &gd.descriptions[&29067];
+        assert!(description.contains("威力：防护罩残存量的150%"));
+        assert_eq!(parse_potencies(description), Vec::<u32>::new());
+    }
+
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn parses_the_aoe_falloff_off_a_real_description() {
+        let gd = game();
+        // 7449 Akh Morn: "攻击复数敌人时，对目标之外的敌人威力降低50%".
+        assert_eq!(parse_aoe_falloff(&gd.descriptions[&7449]), Some(50));
+        // 25806 Summon Titan words it differently -- "对`第一个`之外的敌人" rather than "对`目标`之外"
+        // -- so the parser must key off `威力降低`, not off the whole sentence.
+        assert_eq!(parse_aoe_falloff(&gd.descriptions[&25806]), Some(50));
+        // 16515 Brand of Purgatory is an AoE with NO falloff. `None` here is a fact about the
+        // action, not a parse failure.
+        assert!(gd.descriptions[&16515].contains("范围魔法攻击"));
+        assert_eq!(parse_aoe_falloff(&gd.descriptions[&16515]), None);
+    }
+
+    // --- CastType --------------------------------------------------------------------------------
+
+    /// Every labelled `CastType` is pinned to the actions whose **description text** proves it. See
+    /// `PLAN.md` §4.10. If a patch renumbers `CastType`, this fails rather than the tool quietly
+    /// emitting the wrong geometry.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn cast_type_labels_match_their_evidence() {
+        let gd = game();
+        let cast_type = |id: u32| gd.actions[&id].CastType;
+
+        // 1 -- single target. "对目标发动无属性魔法攻击".
+        assert_eq!(cast_type(163), 1, "163 毁灭 / Ruin");
+        assert_eq!(cast_type(25799), 1, "25799 守护之光 / Radiant Aegis");
+
+        // 2 -- circle centred on the target. "对目标`及其周围`的敌人".
+        assert_eq!(cast_type(16511), 2, "16511 迸裂 / Outburst");
+        assert_eq!(cast_type(25836), 2, "25836 山崩 / Mountain Buster");
+        assert_eq!(gd.actions[&16511].EffectRange, 5, "the radius");
+
+        // 3 -- cone. "向目标所在方向发出`扇形`范围物理攻击".
+        assert_eq!(cast_type(106), 3, "106 连珠箭 / Quick Nock");
+        assert_eq!(cast_type(2870), 3, "2870 散射 / Shadowbite-line");
+
+        // 4 -- line. "向目标所在方向发出`直线`范围物理攻击". XAxisModifier is the width.
+        assert_eq!(cast_type(86), 4, "86 死天枪 / Doom Spike");
+        assert_eq!(cast_type(25784), 4, "25784 爆破箭 / Blast Arrow");
+        assert_eq!(gd.actions[&86].XAxisModifier, 4, "the width");
+
+        // 7 -- an area PLACED at a point, NOT centred on a target. Both halves are load-bearing:
+        // 16014 puts it at the caster's feet ("`原地`起舞"), 7439 at a ground target
+        // ("在`指定地点`设置地星"). Calling CastType 7 "centred on the caster" would be wrong for the
+        // ground-targeted half, and "centred on the target" wrong for both.
+        assert_eq!(cast_type(16014), 7, "16014 即兴表演 / Improvisation");
+        assert!(
+            !gd.actions[&16014].TargetArea,
+            "placed at the caster's feet"
+        );
+        assert_eq!(cast_type(7439), 7, "7439 地星 / Earthly Star");
+        assert!(gd.actions[&7439].TargetArea, "placed at a ground target");
+    }
+
+    /// The full `CastType` histogram over every real player action in the game. It is a golden, so a
+    /// value that shows up in a future patch cannot slip through as a silent `unknown(N)`.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn cast_type_histogram_is_pinned() {
+        let gd = game();
+        let mut histogram: BTreeMap<u8, usize> = BTreeMap::new();
+        for action in gd.actions.values() {
+            if is_real_player_skill(action) && !action.IsPvP {
+                *histogram.entry(action.CastType).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            histogram,
+            BTreeMap::from([(1, 497), (2, 225), (3, 32), (4, 34), (7, 11), (10, 1)]),
+            "the CastType values carried by real player actions"
+        );
+
+        // Everything the tool labels is proven; everything else says so out loud.
+        for cast_type in histogram.keys() {
+            let label = cast_type_label(*cast_type);
+            assert_eq!(
+                label.starts_with("unknown("),
+                !matches!(cast_type, 1..=4 | 7),
+                "CastType {cast_type} -> `{label}`"
+            );
+        }
+    }
+
+    // --- The SMN golden, extended with the combat fields ------------------------------------------
+
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn smn_missing_entries_carry_their_combat_data() {
+        goto_repo_root();
+        let gd = game();
+        let ctx = Context {
+            gd,
+            lua: lua_tree(),
+            names_en: None,
+            level: Some(100),
+            game_path: String::new(),
+            names_en_path: None,
+            orphan_ids: BTreeSet::new(),
+        };
+        let report = build_report(&ctx, SMN);
+        assert_eq!(report.counts.missing, 22, "the golden must not move");
+
+        let by_id = |id: u32| {
+            report
+                .missing
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("{id} must be missing"))
+        };
+
+        // A LITERAL potency on a target-centred circle.
+        let brand_of_purgatory = by_id(16515);
+        assert_eq!(brand_of_purgatory.potency, Some(240));
+        assert!(!brand_of_purgatory.potency_is_conditional);
+        assert_eq!(brand_of_purgatory.cast_type, 2);
+        assert_eq!(brand_of_purgatory.effect_range, 8);
+        assert_eq!(brand_of_purgatory.range, 25);
+        assert_eq!(brand_of_purgatory.recast_ms, 2500);
+        // It is an AoE, and it has NO falloff. `None` is a fact, not a parse failure.
+        assert_eq!(brand_of_purgatory.aoe_falloff_pct, None);
+        // The description survives verbatim, newlines and all.
+        assert!(
+            brand_of_purgatory
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("威力：240") && d.contains('\n'))
+        );
+
+        // A CONDITIONAL potency: `16514 Fountain of Fire` guards 580 behind an `If`.
+        let fountain_of_fire = by_id(16514);
+        assert_eq!(fountain_of_fire.potency, Some(580));
+        assert!(fountain_of_fire.potency_is_conditional);
+
+        // A falloff that is present.
+        assert_eq!(by_id(7449).aoe_falloff_pct, Some(50), "7449 Akh Morn");
+
+        // The three heals. They carry NO `威力：` at all -- only `恢复力：`. Without `cure_potency`
+        // they would look like actions with no number, which is exactly what this bucket is for.
+        for (id, cure) in [(16230u32, 400u32), (16517, 100), (25830, 400)] {
+            let heal = by_id(id);
+            assert_eq!(heal.cure_potency, Some(cure), "{id} cure potency");
+            assert_eq!(heal.potency, None, "{id} has no damage potency");
+            assert!(
+                heal.description
+                    .as_deref()
+                    .is_some_and(|d| !d.contains(POTENCY_LABEL)),
+                "{id} carries no `威力：` label at all"
+            );
+        }
+        // 16517 Everlasting Flight is a regen: one cure number, and a duration that is NOT one.
+        assert_eq!(by_id(16517).all_cure_potencies, vec![100]);
+
+        // The split of the 22, pinned. It is the answer to "is a missing number a parse failure or
+        // an action that simply has none?" -- and it is the latter, every time.
+        let count = |f: fn(&&ActionEntry) -> bool| report.missing.iter().filter(f).count();
+        let literal = count(|e| e.potency.is_some() && !e.potency_is_conditional);
+        let conditional = count(|e| e.potency_is_conditional);
+        let cure = count(|e| e.potency.is_none() && e.cure_potency.is_some());
+        let no_number = count(|e| e.potency.is_none() && e.cure_potency.is_none());
+        assert_eq!((literal, conditional, cure, no_number), (10, 5, 3, 4));
+
+        // The 4 that genuinely carry no number: a raise, a buff, a summon, a crowd-control.
+        let numberless: BTreeSet<u32> = report
+            .missing
+            .iter()
+            .filter(|e| e.potency.is_none() && e.cure_potency.is_none())
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(numberless, BTreeSet::from([173, 3581, 25831, 25880]));
+
+        // ..and not one of them is a parse failure: none carries EITHER label.
+        for id in &numberless {
+            let description = by_id(*id).description.as_deref().unwrap_or("");
+            assert!(
+                !description.contains(POTENCY_LABEL) && !description.contains(CURE_POTENCY_LABEL),
+                "{id} has a potency label that failed to parse -- that would be a real bug"
+            );
+        }
+    }
+
+    /// The game-wide `恢复力：` sweep, mirroring what was done for `威力：`. Pinned so that a patch
+    /// introducing a *prose* healing potency (the `29067` failure mode, but for heals) shows up as a
+    /// failing test rather than as a silently-dropped number.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn cure_potency_labels_are_all_numeric() {
+        let gd = game();
+
+        let labelled: Vec<(&u32, &String)> = gd
+            .descriptions
+            .iter()
+            .filter(|(_, d)| d.contains(CURE_POTENCY_LABEL))
+            .collect();
+        // Every occurrence of the label, not just every row carrying one.
+        let occurrences: usize = labelled
+            .iter()
+            .map(|(_, d)| d.matches(CURE_POTENCY_LABEL).count())
+            .sum();
+        let parsed: usize = labelled
+            .iter()
+            .map(|(_, d)| parse_cure_potencies(d).len())
+            .sum();
+
+        assert_eq!(labelled.len(), 278, "rows carrying a `恢复力：` label");
+        assert_eq!(occurrences, 323, "`恢复力：` occurrences");
+
+        // 321 of the 323 are plain numbers. The other TWO are PROSE -- the `29067` failure mode, but
+        // for heals -- and they are both in ONE row:
+        //
+        //   ActionTransient[20940]  体力恢复力：最大体力的40%
+        //                           能量恢复力：最大能量的30%
+        //
+        // `None` there is correct, not a parse failure. This assertion exists so that a patch adding
+        // a NEW prose heal is caught rather than silently dropping its number.
+        assert_eq!(
+            parsed, 321,
+            "`恢复力：` occurrences that are a plain number"
+        );
+
+        let prose: BTreeSet<u32> = labelled
+            .iter()
+            .filter(|(_, d)| d.matches(CURE_POTENCY_LABEL).count() != parse_cure_potencies(d).len())
+            .map(|(id, _)| **id)
+            .collect();
+        assert_eq!(prose, BTreeSet::from([20940]));
+        assert_eq!(
+            parse_cure_potencies(gd.descriptions[&20940].as_str()),
+            Vec::<u32>::new()
+        );
+    }
+
+    /// Descriptions are arbitrary game text dropped into a markdown document. Verified over all
+    /// 965 descriptions on this install: not one contains a `|`, a backtick, or any other
+    /// markdown-significant character -- and the renderer indents them into a code block anyway, so
+    /// even a future patch that introduces one cannot break the table above it.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn no_description_can_break_the_markdown() {
+        let gd = game();
+        for (id, description) in &gd.descriptions {
+            assert!(
+                !description.contains('|'),
+                "ActionTransient[{id}] contains a `|`; the Missing block must keep indenting it"
+            );
+        }
     }
 }
