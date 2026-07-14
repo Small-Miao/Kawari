@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use icarus::Action::ActionSheet;
@@ -32,7 +32,7 @@ use icarus::IKDRoute::IKDRouteSheet;
 use icarus::InstanceContent::InstanceContentSheet;
 use icarus::Item::ItemSheet;
 use icarus::ItemAction::ItemActionSheet;
-use icarus::ItemLevel::ItemLevelSheet;
+use icarus::ItemLevel::{ItemLevelRow, ItemLevelSheet};
 use icarus::Mount::MountSheet;
 use icarus::NpcEquip::NpcEquipSheet;
 use icarus::NpcYell::NpcYellSheet;
@@ -52,7 +52,7 @@ use icarus::WarpLogic::WarpLogicSheet;
 use icarus::WeatherRate::WeatherRateSheet;
 use icarus::{Tribe::TribeSheet, Warp::WarpSheet};
 use kawari::ipc::zone::{CommonSpawn, DamageElement, PlotSize};
-use physis::equipment::EquipSlotCategory;
+use physis::equipment::{EquipSlot, EquipSlotCategory};
 use physis::race::{Gender, Race, Tribe};
 use physis::resource::{Resource, ResourceResolver, SqPackResource, UnpackedResource};
 use physis::savedata::chardat::CustomizeData;
@@ -202,6 +202,220 @@ impl Modifiers {
         };
 
         (value as f32 * (modifier as f32 / 100.0)).floor() as u32
+    }
+}
+
+/// Which `BaseParam` `<Slot>Percent` column governs an equipment slot's share of an item level's
+/// stat budget. Note the weapon slots are told apart by the item's EquipSlotCategory rather than
+/// by which slot it sits in, since a one- and a two-handed weapon both occupy the main hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapSlot {
+    OneHandWeapon,
+    TwoHandWeapon,
+    OffHand,
+    Head,
+    Chest,
+    Hands,
+    Waist,
+    Legs,
+    Feet,
+    Earring,
+    Necklace,
+    Bracelet,
+    Ring,
+}
+
+impl CapSlot {
+    const ALL: [CapSlot; 13] = [
+        CapSlot::OneHandWeapon,
+        CapSlot::TwoHandWeapon,
+        CapSlot::OffHand,
+        CapSlot::Head,
+        CapSlot::Chest,
+        CapSlot::Hands,
+        CapSlot::Waist,
+        CapSlot::Legs,
+        CapSlot::Feet,
+        CapSlot::Earring,
+        CapSlot::Necklace,
+        CapSlot::Bracelet,
+        CapSlot::Ring,
+    ];
+
+    /// Resolves the budget slot for an equipped item. `equip_slot` is where the item actually
+    /// sits, and `equip_slot_category` is its EquipSlotCategory row id — the only thing that
+    /// distinguishes a two-handed weapon (13) from a one-handed one (1). Returns `None` for slots
+    /// that have no stat budget at all (the soul crystal).
+    pub fn resolve(equip_slot: EquipSlot, equip_slot_category: u8) -> Option<CapSlot> {
+        const TWO_HANDED: u8 = 13;
+
+        Some(match equip_slot {
+            EquipSlot::MainHand => {
+                // Every real main hand item carries a category, so 0 means the item was never
+                // resolved against the sheet (see `prepare_equipped`) rather than that it is
+                // one-handed. Falling through to the one-handed budget would then quietly
+                // under-cap a two-hander — 100‰ where it should be 140‰ — so make it loud in
+                // debug builds instead of silently picking the more common branch.
+                debug_assert!(
+                    equip_slot_category != 0,
+                    "main hand item has an unresolved EquipSlotCategory; its item level caps would use the one-handed budget"
+                );
+
+                if equip_slot_category == TWO_HANDED {
+                    CapSlot::TwoHandWeapon
+                } else {
+                    CapSlot::OneHandWeapon
+                }
+            }
+            EquipSlot::OffHand => CapSlot::OffHand,
+            EquipSlot::Head => CapSlot::Head,
+            EquipSlot::Body => CapSlot::Chest,
+            EquipSlot::Hands => CapSlot::Hands,
+            EquipSlot::Waist => CapSlot::Waist,
+            EquipSlot::Legs => CapSlot::Legs,
+            EquipSlot::Feet => CapSlot::Feet,
+            EquipSlot::Ears => CapSlot::Earring,
+            EquipSlot::Neck => CapSlot::Necklace,
+            EquipSlot::Wrists => CapSlot::Bracelet,
+            EquipSlot::RightRing | EquipSlot::LeftRing => CapSlot::Ring,
+            EquipSlot::SoulCrystal => return None,
+        })
+    }
+
+    /// This slot's per-mille share of the item level's budget for a BaseParam.
+    fn percent_of(self, base_param: &BaseParamRow) -> u16 {
+        match self {
+            CapSlot::OneHandWeapon => base_param.OneHandWeaponPercent,
+            CapSlot::TwoHandWeapon => base_param.TwoHandWeaponPercent,
+            CapSlot::OffHand => base_param.OffHandPercent,
+            CapSlot::Head => base_param.HeadPercent,
+            CapSlot::Chest => base_param.ChestPercent,
+            CapSlot::Hands => base_param.HandsPercent,
+            CapSlot::Waist => base_param.WaistPercent,
+            CapSlot::Legs => base_param.LegsPercent,
+            CapSlot::Feet => base_param.FeetPercent,
+            CapSlot::Earring => base_param.EarringPercent,
+            CapSlot::Necklace => base_param.NecklacePercent,
+            CapSlot::Bracelet => base_param.BraceletPercent,
+            CapSlot::Ring => base_param.RingPercent,
+        }
+    }
+}
+
+/// The BaseParams that item level sync caps, and where each one's budget lives on an `ItemLevel`
+/// row. Anything absent here is left alone by the clamp.
+fn item_level_budget(row: &ItemLevelRow, base_param_id: u8) -> Option<u16> {
+    Some(match base_param_id {
+        1 => row.Strength,
+        2 => row.Dexterity,
+        3 => row.Vitality,
+        4 => row.Intelligence,
+        5 => row.Mind,
+        6 => row.Piety,
+        12 => row.PhysicalDamage,
+        13 => row.MagicalDamage,
+        19 => row.Tenacity,
+        21 => row.Defense,
+        22 => row.DirectHitRate,
+        24 => row.MagicDefense,
+        27 => row.CriticalHit,
+        44 => row.Determination,
+        45 => row.SkillSpeed,
+        46 => row.SpellSpeed,
+        _ => return None,
+    })
+}
+
+const SYNCED_BASE_PARAMS: [u8; 16] = [1, 2, 3, 4, 5, 6, 12, 13, 19, 21, 22, 24, 27, 44, 45, 46];
+
+/// A slot's cap for one BaseParam: its per-mille share (`percent`) of the item level's `budget`.
+///
+/// Rounds to nearest rather than truncating. That is measured, not assumed: against a cap table
+/// sampled from the game, rounding reproduced all 12 sampled values while truncating matched only
+/// 3. The two differ on a majority of real inputs — e.g. a two-handed weapon's Dexterity at il-133
+/// is `391 * 140 / 1000 = 54.74`, which rounds to 55 but truncates to 54 — so this is a live
+/// behavioural choice, and `test_cap_for_rounds_to_nearest` pins it.
+pub fn cap_for(budget: u16, percent: u16) -> u16 {
+    (budget as f64 * percent as f64 / 1000.0).round() as u16
+}
+
+/// The most a single equipment slot may contribute to a BaseParam once its gear is synced down to
+/// an item level:
+///
+/// ```text
+/// cap = round(ItemLevel[sync][param] * BaseParam[param].<Slot>Percent / 1000)
+/// ```
+///
+/// Note this caps each stat independently at the il-N maximum for its slot; it is neither a
+/// proportional rescale of the item nor a substitution of the il-N baseline.
+///
+/// Resolved from game data once per stat recalculation so that the clamp itself
+/// (`BaseParameters::calculate_stat_across_all_items`) runs on plain data and stays unit-testable
+/// without a `GameData`.
+///
+/// Fidelity: the corroboration is partial, and does not extend to the formula as a whole. It
+/// covers the substats (Piety, Tenacity, Direct Hit, Critical Hit, Determination, Skill Speed,
+/// Spell Speed), where an independently measured cap table matches what this formula produces, and
+/// weapon damage, which the client is known to clamp against `ItemLevel[sync].PhysicalDamage`
+/// (BaseParam 12 is 1000‰ on both weapon slots, so the formula reduces to exactly that). Note that
+/// the measured substat table is an empirical table of caps, not a reading of the `<Slot>Percent`
+/// columns — no known reference implementation derives caps from those columns, so it is the
+/// formula's *output* that is corroborated here, and only for those params.
+///
+/// Applying it to the main stats and to defense/magic defense is inferred by analogy and is NOT
+/// independently confirmed; reference implementations are known to rescale those by an item level
+/// ratio instead, which is a different model. Treat the main stat and defense caps as our best
+/// inference rather than established behaviour.
+///
+/// Not a fidelity concern, despite looking like one: BaseParam 21/24 budget nothing for the weapon
+/// slots, so this clamp is a no-op there. That is consistent with the Item sheet, where no weapon
+/// or shield carries DefensePhys at all — and with BaseParam 21's nonzero percents summing to
+/// exactly 1000‰ across the five armour slots, leaving no budget for an off-hand by construction.
+#[derive(Debug, Default, Clone)]
+pub struct ItemLevelCaps {
+    caps: HashMap<(CapSlot, u8), u16>,
+}
+
+impl ItemLevelCaps {
+    /// Builds the whole table for `item_level` from the ItemLevel and BaseParam sheets.
+    pub fn new(game_data: &mut GameData, item_level: u16) -> Self {
+        let mut caps = Self::default();
+
+        let Some(item_level_row) = game_data.item_level_sheet.row(item_level as u32) else {
+            // An empty table clamps nothing, which silently hands back un-synced stats. Continue
+            // rather than panic, but say so: the numbers that follow are wrong, not merely absent.
+            tracing::warn!(
+                "No ItemLevel row for item level {item_level}, so gear cannot be synced down to it. Stats will be reported as if unsynced."
+            );
+            return caps;
+        };
+
+        for base_param_id in SYNCED_BASE_PARAMS {
+            let Some(budget) = item_level_budget(&item_level_row, base_param_id) else {
+                continue;
+            };
+            let Some(base_param) = game_data.get_base_param(base_param_id as u16) else {
+                continue;
+            };
+
+            for slot in CapSlot::ALL {
+                let percent = slot.percent_of(&base_param);
+                caps.set(slot, base_param_id, cap_for(budget, percent));
+            }
+        }
+
+        caps
+    }
+
+    /// Records a single cap. Used by `new`, and lets a caller build a table from plain values
+    /// without touching game data.
+    pub fn set(&mut self, slot: CapSlot, base_param_id: u8, cap: u16) {
+        self.caps.insert((slot, base_param_id), cap);
+    }
+
+    /// The cap for `base_param_id` in `slot`, or `None` if that param isn't item level synced.
+    pub fn get(&self, slot: CapSlot, base_param_id: u8) -> Option<u16> {
+        self.caps.get(&(slot, base_param_id)).copied()
     }
 }
 
@@ -1421,20 +1635,6 @@ impl GameData {
         Some(content_finder_row.ClassJobLevelSync).filter(|x| *x != 0)
     }
 
-    /// Returns the attributes for a given item level;
-    pub fn get_item_level_attributes(&mut self, item_level: u16) -> [u16; 6] {
-        let row = self.item_level_sheet.row(item_level as u32).unwrap();
-
-        [
-            row.Strength,
-            row.Dexterity,
-            row.Vitality,
-            row.Intelligence,
-            row.Mind,
-            row.Piety,
-        ]
-    }
-
     pub fn get_action_cooldown_group(&mut self, id: u32) -> u8 {
         let row = self.action_sheet.row(id).unwrap();
 
@@ -1798,5 +1998,48 @@ impl Resource for SqPackResourceSpy {
 
     fn exists(&mut self, path: &str) -> bool {
         self.sqpack_resource.exists(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins rounding-to-nearest against truncation. Every expectation below is a real
+    /// `(ItemLevel[il][param], BaseParam[param].<Slot>Percent)` pair read from the sheets, and the
+    /// first four are cases where the two policies disagree — 54.74, 39.1, 52.785 and 26.197 all
+    /// truncate one lower than they round. Swapping `.round()` for `.floor()` in `cap_for` has to
+    /// fail here.
+    #[test]
+    fn test_cap_for_rounds_to_nearest() {
+        // il-133 Dexterity (budget 391) across a two-hander, a one-hander, chest and an earring.
+        assert_eq!(cap_for(391, 140), 55); // 54.74 — truncating gives 54
+        assert_eq!(cap_for(391, 100), 39); // 39.1
+        assert_eq!(cap_for(391, 135), 53); // 52.785 — truncating gives 52
+        assert_eq!(cap_for(391, 67), 26); // 26.197
+
+        // il-133 Vitality (417) on a two-hander, and Critical Hit (370) on a head piece.
+        assert_eq!(cap_for(417, 140), 58); // 58.38
+        assert_eq!(cap_for(370, 85), 31); // 31.45
+
+        // il-133 Defense (877) on a head piece and on chest.
+        assert_eq!(cap_for(877, 176), 154); // 154.352
+        assert_eq!(cap_for(877, 236), 207); // 206.972 — truncating gives 206
+    }
+
+    /// A 0‰ share caps to 0 (no contribution allowed), which is distinct from the param having no
+    /// budget at all — that is `ItemLevelCaps::get` returning `None`.
+    #[test]
+    fn test_cap_for_zero_percent_is_zero() {
+        assert_eq!(cap_for(877, 0), 0);
+        assert_eq!(cap_for(0, 140), 0);
+    }
+
+    /// BaseParam 12 is 1000‰ on both weapon slots, so weapon damage caps at the item level's
+    /// PhysicalDamage outright.
+    #[test]
+    fn test_cap_for_full_share_is_the_whole_budget() {
+        assert_eq!(cap_for(65, 1000), 65);
+        assert_eq!(cap_for(139, 1000), 139);
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::{
     GameData, ToServer, ZoneConnection,
-    gamedata::{Attributes, Modifiers},
+    gamedata::{Attributes, CapSlot, ItemLevelCaps, Modifiers},
     inventory::{EquippedStorage, Storage},
     zone_connection::effective_level,
 };
@@ -15,6 +15,7 @@ use kawari::{
     },
 };
 use mlua::{UserData, UserDataMethods};
+use physis::equipment::EquipSlot;
 
 #[derive(Clone, Copy)]
 struct LevelModifier {
@@ -22,6 +23,13 @@ struct LevelModifier {
     sub: u16,
     div: u16,
 }
+
+/// BaseParam ids for the item stats that live in their own Item sheet columns rather than in an
+/// item's BaseParam array, and so have no id of their own to hand to the item level clamp.
+const BASE_PARAM_PHYSICAL_DAMAGE: u8 = 12;
+const BASE_PARAM_MAGICAL_DAMAGE: u8 = 13;
+const BASE_PARAM_DEFENSE: u8 = 21;
+const BASE_PARAM_MAGIC_DEFENSE: u8 = 24;
 
 const LEVEL_MODIFIERS: [LevelModifier; 101] = [
     LevelModifier {
@@ -1145,32 +1153,50 @@ impl BaseParameters {
     }
 
     /// Iterates over the given equipped items and calculates defense, along with any stat bonuses.
+    ///
+    /// When `item_level_caps` is given the gear is synced down: every stat a slot grants — the
+    /// BaseParams the item carries, plus defense and weapon damage, which live in their own Item
+    /// columns rather than in the BaseParam array — is capped at the most that slot could grant at
+    /// the synced item level. Each stat is capped independently against its own BaseParam's
+    /// budget, so an item may keep some stats untouched while others are cut.
     pub fn calculate_stat_across_all_items(
         &mut self,
         equipped: &EquippedStorage,
-        item_level_attributes: Option<&[u16]>,
+        item_level_caps: Option<&ItemLevelCaps>,
     ) {
         for i in 0..equipped.max_slots() {
             let slot = equipped.get_slot(i as u16);
-            if slot.quantity > 0 {
-                self.defense += slot.defense as u32;
-                self.magic_defense += slot.magic_defense as u32;
-                // Weapon base damage drives calc_physical/magical_damage; only the equipped
-                // weapon carries a non-zero value, so summing across slots is fine.
-                self.physical_damage += slot.weapon_damage_phys as u32;
-                self.magic_damage += slot.weapon_damage_mag as u32;
+            if slot.quantity == 0 {
+                continue;
+            }
 
-                for (i, param_id) in slot.base_param_ids.iter().enumerate() {
-                    if *param_id != 0 {
-                        // Make sure to cap attributes when ilvl syncing:
-                        let value = if let Some(item_level_attributes) = item_level_attributes {
-                            let attribute_cap = item_level_attributes[i];
-                            (slot.base_param_values[i].min(attribute_cap as i16)) as u32 // TODO: is there ever negative values?
-                        } else {
-                            slot.base_param_values[i] as u32 // TODO: is there ever negative values?
-                        };
-                        *self.get_mut(*param_id) += value;
-                    }
+            let cap_slot = EquipSlot::from_repr(i as u16)
+                .and_then(|equip_slot| CapSlot::resolve(equip_slot, slot.equip_slot_category));
+
+            // Caps this item's contribution to a BaseParam, if we're syncing down and that param
+            // has a budget at the synced item level.
+            let sync = |base_param_id: u8, value: u32| -> u32 {
+                let (Some(caps), Some(cap_slot)) = (item_level_caps, cap_slot) else {
+                    return value;
+                };
+                match caps.get(cap_slot, base_param_id) {
+                    Some(cap) => value.min(cap as u32),
+                    None => value,
+                }
+            };
+
+            self.defense += sync(BASE_PARAM_DEFENSE, slot.defense as u32);
+            self.magic_defense += sync(BASE_PARAM_MAGIC_DEFENSE, slot.magic_defense as u32);
+            // Weapon base damage drives calc_physical/magical_damage; only the equipped
+            // weapon carries a non-zero value, so summing across slots is fine.
+            self.physical_damage +=
+                sync(BASE_PARAM_PHYSICAL_DAMAGE, slot.weapon_damage_phys as u32);
+            self.magic_damage += sync(BASE_PARAM_MAGICAL_DAMAGE, slot.weapon_damage_mag as u32);
+
+            for (i, param_id) in slot.base_param_ids.iter().enumerate() {
+                if *param_id != 0 {
+                    let value = slot.base_param_values[i] as u32; // TODO: is there ever negative values?
+                    *self.get_mut(*param_id) += sync(*param_id, value);
                 }
             }
         }
@@ -1279,8 +1305,8 @@ impl ZoneConnection {
             }
         }
 
-        let item_level_attributes =
-            game_data.get_item_level_attributes(item_level_sync.unwrap_or_default());
+        let item_level_caps =
+            item_level_sync.map(|item_level| ItemLevelCaps::new(&mut game_data, item_level));
 
         let param_grow = game_data
             .get_param_grow(level as u32)
@@ -1296,11 +1322,7 @@ impl ZoneConnection {
         );
         base_parameters.calculate_stat_across_all_items(
             &self.player_data.inventory.equipped,
-            if item_level_sync.is_some() {
-                Some(&item_level_attributes)
-            } else {
-                None
-            },
+            item_level_caps.as_ref(),
         );
         base_parameters.calculate_potencies(level as u32, &param_grow, Some(&modifiers));
 
@@ -1572,5 +1594,241 @@ impl ZoneConnection {
         let exp = exp + (exp * (bonus_percent as f32 / 100.0).round() as i32);
 
         (bonus_percent, exp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gamedata::cap_for;
+    use crate::inventory::Item;
+
+    /// A gear piece carrying the four BaseParams a physical DPS cares about. `equip_slot_category`
+    /// is the item's EquipSlotCategory row id.
+    fn gear(
+        equip_slot_category: u8,
+        dexterity: i16,
+        vitality: i16,
+        critical_hit: i16,
+        determination: i16,
+    ) -> Item {
+        Item {
+            quantity: 1,
+            item_id: 1,
+            equip_slot_category,
+            base_param_ids: [2, 3, 27, 44, 0, 0],
+            base_param_values: [dexterity, vitality, critical_hit, determination, 0, 0],
+            ..Default::default()
+        }
+    }
+
+    /// The il-133 cap table — what a level 54 sync clamps to, per `ParamGrow[54].ItemLevelSync`.
+    ///
+    /// Built the way `ItemLevelCaps::new` builds the real thing: each param's `ItemLevel[133]`
+    /// budget crossed with every slot's `BaseParam[param].<Slot>Percent` share, run through the
+    /// same `cap_for`. Both inputs are read from the sheets, and the caps are derived here rather
+    /// than written out, so this fixture exercises the formula instead of restating its results as
+    /// constants that could drift from it.
+    ///
+    /// Every slot gets an entry for every param modelled, including the 0‰ ones — those cap to 0,
+    /// which is what the builder stores and is distinct from the `None` ("no budget, leave alone")
+    /// that an unmodelled param returns. Only the params the test gear carries are modelled; the
+    /// rest of `SYNCED_BASE_PARAMS` is inert here because no fixture item has those stats.
+    fn il133_caps() -> ItemLevelCaps {
+        // `BaseParam[param].<Slot>Percent`, per-mille. The main stats and substats share one
+        // profile; weapon damage is weapon-only and defense is armour-only.
+        let stat: [(CapSlot, u16); 13] = [
+            (CapSlot::OneHandWeapon, 100),
+            (CapSlot::TwoHandWeapon, 140),
+            (CapSlot::OffHand, 40),
+            (CapSlot::Head, 85),
+            (CapSlot::Chest, 135),
+            (CapSlot::Hands, 85),
+            (CapSlot::Waist, 0),
+            (CapSlot::Legs, 135),
+            (CapSlot::Feet, 85),
+            (CapSlot::Earring, 67),
+            (CapSlot::Necklace, 67),
+            (CapSlot::Bracelet, 67),
+            (CapSlot::Ring, 67),
+        ];
+        let damage: [(CapSlot, u16); 13] = [
+            (CapSlot::OneHandWeapon, 1000),
+            (CapSlot::TwoHandWeapon, 1000),
+            (CapSlot::OffHand, 0),
+            (CapSlot::Head, 0),
+            (CapSlot::Chest, 0),
+            (CapSlot::Hands, 0),
+            (CapSlot::Waist, 0),
+            (CapSlot::Legs, 0),
+            (CapSlot::Feet, 0),
+            (CapSlot::Earring, 0),
+            (CapSlot::Necklace, 0),
+            (CapSlot::Bracelet, 0),
+            (CapSlot::Ring, 0),
+        ];
+        let defense: [(CapSlot, u16); 13] = [
+            (CapSlot::OneHandWeapon, 0),
+            (CapSlot::TwoHandWeapon, 0),
+            (CapSlot::OffHand, 0),
+            (CapSlot::Head, 176),
+            (CapSlot::Chest, 236),
+            (CapSlot::Hands, 176),
+            (CapSlot::Waist, 0),
+            (CapSlot::Legs, 236),
+            (CapSlot::Feet, 176),
+            (CapSlot::Earring, 0),
+            (CapSlot::Necklace, 0),
+            (CapSlot::Bracelet, 0),
+            (CapSlot::Ring, 0),
+        ];
+
+        // `(BaseParam id, ItemLevel[133] budget, percent profile)`.
+        let params = [
+            (2u8, 391u16, &stat), // Dexterity
+            (3, 417, &stat),      // Vitality
+            (27, 370, &stat),     // Critical Hit
+            (44, 370, &stat),     // Determination
+            (12, 65, &damage),    // Physical Damage
+            (21, 877, &defense),  // Defense
+            (24, 877, &defense),  // Magic Defense
+        ];
+
+        let mut caps = ItemLevelCaps::default();
+        for (base_param_id, budget, percents) in params {
+            for (slot, percent) in percents {
+                caps.set(*slot, base_param_id, cap_for(budget, *percent));
+            }
+        }
+
+        caps
+    }
+
+    /// A full il-700 Bard set. Every value is the most that slot may carry at il-700, i.e.
+    /// `round(ItemLevel[700][param] * BaseParam[param].<Slot>Percent / 1000)`, with
+    /// `ItemLevel[700]` = Dexterity 3714, Vitality 3798, CriticalHit 2576, Determination 2576,
+    /// PhysicalDamage 139, Defense 6116, MagicDefense 6116.
+    fn il700_bard_set() -> EquippedStorage {
+        EquippedStorage {
+            main_hand: il700_bow(),
+            head: Item {
+                defense: 1076,
+                magic_defense: 1076,
+                ..gear(3, 316, 323, 219, 219)
+            },
+            body: Item {
+                defense: 1443,
+                magic_defense: 1443,
+                ..gear(4, 501, 513, 348, 348)
+            },
+            hands: Item {
+                defense: 1076,
+                magic_defense: 1076,
+                ..gear(5, 316, 323, 219, 219)
+            },
+            legs: Item {
+                defense: 1443,
+                magic_defense: 1443,
+                ..gear(7, 501, 513, 348, 348)
+            },
+            feet: Item {
+                defense: 1076,
+                magic_defense: 1076,
+                ..gear(8, 316, 323, 219, 219)
+            },
+            ears: gear(9, 249, 254, 173, 173),
+            neck: gear(10, 249, 254, 173, 173),
+            wrists: gear(11, 249, 254, 173, 173),
+            right_ring: gear(12, 249, 254, 173, 173),
+            left_ring: gear(12, 249, 254, 173, 173),
+            ..Default::default()
+        }
+    }
+
+    /// An il-700 bow: a two-handed weapon, EquipSlotCategory 13.
+    fn il700_bow() -> Item {
+        Item {
+            weapon_damage_phys: 139,
+            ..gear(13, 520, 532, 361, 361)
+        }
+    }
+
+    #[test]
+    fn test_unsynced_gear_is_not_capped() {
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&il700_bard_set(), None);
+
+        assert_eq!(base_parameters.dexterity, 3715);
+        assert_eq!(base_parameters.vitality, 3797);
+        assert_eq!(base_parameters.critical_hit, 2579);
+        assert_eq!(base_parameters.determination, 2579);
+        assert_eq!(base_parameters.physical_damage, 139);
+        assert_eq!(base_parameters.defense, 6114);
+        assert_eq!(base_parameters.magic_defense, 6114);
+    }
+
+    /// Syncing to level 54 clamps gear to il-133 (`ParamGrow[54].ItemLevelSync`). Each stat is
+    /// capped independently at what its slot could carry at il-133 — see `ItemLevelCaps`:
+    ///
+    /// | param | ItemLevel[133] | 2H (140‰) | head/hands/feet (85‰) | chest/legs (135‰) | accessory (67‰) |
+    /// |---|---|---|---|---|---|
+    /// | Dexterity (2)      | 391 | 55 | 33 | 53 | 26 |
+    /// | Vitality (3)       | 417 | 58 | 35 | 56 | 28 |
+    /// | Critical Hit (27)  | 370 | 52 | 31 | 50 | 25 |
+    /// | Determination (44) | 370 | 52 | 31 | 50 | 25 |
+    ///
+    /// Summed over the 11 filled slots that gives 390 / 415 / 370 / 370. Defense (21) and magic
+    /// defense (24) budget 877 at 176‰ (head/hands/feet) and 236‰ (chest/legs) — 154 and 207,
+    /// summing to 876 — and nothing on a weapon. Physical damage (12) budgets `ItemLevel[133]`'s
+    /// 65 outright, since BaseParam[12] is 1000‰ on the weapon slots.
+    #[test]
+    fn test_synced_gear_is_capped_per_stat_and_slot() {
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&il700_bard_set(), Some(&il133_caps()));
+
+        assert_eq!(base_parameters.dexterity, 390);
+        assert_eq!(base_parameters.vitality, 415);
+        assert_eq!(base_parameters.critical_hit, 370);
+        assert_eq!(base_parameters.determination, 370);
+        assert_eq!(base_parameters.physical_damage, 65);
+        assert_eq!(base_parameters.defense, 876);
+        assert_eq!(base_parameters.magic_defense, 876);
+    }
+
+    /// Weapon damage lives in its own Item column, not in the BaseParam array, so it has to be
+    /// clamped explicitly — it drives every damage calculation and is the single biggest lever on
+    /// a synced player's DPS.
+    #[test]
+    fn test_synced_weapon_damage_is_capped() {
+        let equipped = EquippedStorage {
+            main_hand: il700_bow(),
+            ..Default::default()
+        };
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&equipped, Some(&il133_caps()));
+
+        assert_eq!(base_parameters.physical_damage, 65);
+    }
+
+    /// A one- and a two-handed weapon both sit in the main hand but draw on different budgets
+    /// (100‰ vs 140‰), so the cap has to key off the item's EquipSlotCategory rather than the slot
+    /// it occupies or whether an off-hand happens to be equipped.
+    #[test]
+    fn test_synced_one_handed_weapon_uses_its_own_budget() {
+        let one_handed = EquippedStorage {
+            // EquipSlotCategory 1: a one-handed weapon, with no off-hand equipped.
+            main_hand: gear(1, 520, 532, 361, 361),
+            ..Default::default()
+        };
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&one_handed, Some(&il133_caps()));
+
+        // round(391 * 100 / 1000) = 39, not the two-handed round(391 * 140 / 1000) = 55.
+        assert_eq!(base_parameters.dexterity, 39);
+        assert_eq!(base_parameters.vitality, 42);
+        assert_eq!(base_parameters.critical_hit, 37);
+        assert_eq!(base_parameters.determination, 37);
     }
 }

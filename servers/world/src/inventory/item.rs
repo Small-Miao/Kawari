@@ -35,6 +35,10 @@ pub struct Item {
     pub stack_size: u32,
     #[serde(skip)]
     pub price_low: u32,
+    /// This item's EquipSlotCategory row id (0 if it isn't equippable). Needed to tell a
+    /// two-handed weapon (13) from a one-handed one (1), which the equipped slot alone can't.
+    #[serde(skip)]
+    pub equip_slot_category: u8,
     #[serde(skip)]
     pub base_param_ids: [u8; 6],
     #[serde(skip)]
@@ -58,6 +62,7 @@ impl Item {
             item_level: item_info.item_level,
             stack_size: item_info.stack_size,
             price_low: item_info.price_low,
+            equip_slot_category: item_info.equip_category.clone() as u8,
             base_param_ids: item_info.base_param_ids,
             base_param_values: item_info.base_param_values,
             defense: item_info.defense,
