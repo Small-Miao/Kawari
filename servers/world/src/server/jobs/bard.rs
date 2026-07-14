@@ -93,7 +93,9 @@ const SONG_FLAG_CODA_MASK: u8 =
     SONG_FLAG_MAGES_BALLAD_CODA | SONG_FLAG_ARMYS_PAEON_CODA | SONG_FLAG_WANDERERS_MINUET_CODA;
 
 const LEVEL_RADIANT_FINALE_CODA: u8 = 90;
-const LEVEL_REPERTOIRE_SOUL_VOICE: u8 = 80;
+/// Soul Voice gauge unlock level (Trait 287 / Apex Arrow action 16496, ClassJobLevel=80).
+/// Gates every path that accumulates or emits the gauge.
+const LEVEL_SOUL_VOICE_UNLOCK: u8 = 80;
 const LEVEL_EMPYREAL_ARROW_REPERTOIRE: u8 = 68;
 
 // ==================== Duration Constants ====================
@@ -310,6 +312,15 @@ fn coda_count(song_flags: u8) -> u8 {
     (song_flags & SONG_FLAG_CODA_MASK).count_ones() as u8
 }
 
+/// Add to the Soul Voice gauge, gated on the level-80 unlock. Below it the client hides the
+/// gauge widget and level-gates Apex Arrow, so the server must not accumulate the value.
+fn add_soul_voice(brd: &mut BardState, level: u8, amount: u8) {
+    if level < LEVEL_SOUL_VOICE_UNLOCK {
+        return;
+    }
+    brd.soul_voice = (brd.soul_voice + amount).min(MAX_SOUL_VOICE);
+}
+
 fn start_song(brd: &mut BardState, song: BardSong, level: u8) {
     let now = Instant::now();
     brd.current_song = song;
@@ -321,7 +332,7 @@ fn start_song(brd: &mut BardState, song: BardSong, level: u8) {
     if level >= LEVEL_RADIANT_FINALE_CODA {
         brd.song_flags |= song_coda_flags(song);
     }
-    brd.soul_voice = (brd.soul_voice + 20).min(MAX_SOUL_VOICE);
+    add_soul_voice(brd, level, 20);
 }
 
 fn take_due_repertoire_tick(brd: &mut BardState) -> bool {
@@ -384,7 +395,7 @@ fn grant_repertoire(brd: &mut BardState, level: u8) -> BardRepertoireProc {
         BardSong::None => None,
     };
 
-    if level >= LEVEL_REPERTOIRE_SOUL_VOICE {
+    if level >= LEVEL_SOUL_VOICE_UNLOCK {
         brd.soul_voice = brd
             .soul_voice
             .saturating_add(REPERTOIRE_SOUL_VOICE_GAIN)
@@ -674,7 +685,7 @@ pub(crate) fn update_bard_state_after_action(
             if combat_state.bard.stormbite_expires_at.is_some() {
                 combat_state.bard.stormbite_expires_at = Some(Instant::now() + DOT_DURATION);
             }
-            combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 10).min(MAX_SOUL_VOICE);
+            add_soul_voice(&mut combat_state.bard, level, 10);
         }
 
         // Apex Arrow consumes Soul Voice
@@ -696,7 +707,7 @@ pub(crate) fn update_bard_state_after_action(
 
         // GCD weaponskills add Soul Voice and can grant Hawk Eye.
         ACTION_HEAVY_SHOT => {
-            combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 5).min(MAX_SOUL_VOICE);
+            add_soul_voice(&mut combat_state.bard, level, 5);
             action_update.status_timer_refreshed |= maybe_proc_hawk_eye(
                 status_effects,
                 &mut combat_state.bard,
@@ -705,7 +716,7 @@ pub(crate) fn update_bard_state_after_action(
             );
         }
         ACTION_BURST_SHOT => {
-            combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 5).min(MAX_SOUL_VOICE);
+            add_soul_voice(&mut combat_state.bard, level, 5);
             action_update.status_timer_refreshed |= maybe_proc_hawk_eye(
                 status_effects,
                 &mut combat_state.bard,
@@ -737,7 +748,7 @@ pub(crate) fn update_bard_state_after_action(
                 remove_hawk_eye_status(status_effects, &mut combat_state.bard);
         }
         ACTION_REFULGENT_ARROW => {
-            combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 10).min(MAX_SOUL_VOICE);
+            add_soul_voice(&mut combat_state.bard, level, 10);
             action_update.status_timer_refreshed |=
                 remove_hawk_eye_status(status_effects, &mut combat_state.bard);
             combat_state.bard.resonant_arrow_ready = false;
@@ -745,7 +756,7 @@ pub(crate) fn update_bard_state_after_action(
                 remove_status_if_present(status_effects, STATUS_RESONANT_ARROW_READY);
         }
         ACTION_SHADOWBITE => {
-            combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 10).min(MAX_SOUL_VOICE);
+            add_soul_voice(&mut combat_state.bard, level, 10);
             action_update.status_timer_refreshed |=
                 remove_hawk_eye_status(status_effects, &mut combat_state.bard);
             action_update.status_timer_refreshed |=
@@ -828,12 +839,18 @@ pub(crate) fn update_bard_state_after_action(
 /// The ActorGauge packet carries the 8-byte class-specific tail of the client's BardGauge:
 /// bytes 0-1 SongTimer | bytes 2-3 unused | byte 4 Repertoire | byte 5 SoulVoice |
 /// byte 6 RadiantFinaleCoda | byte 7 SongFlags.
-pub(crate) fn build_bard_gauge_data(combat_state: &PlayerCombatState, _level: u8) -> u64 {
+pub(crate) fn build_bard_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
     let mut brd = combat_state.bard.clone();
     refresh_bard_runtime_state(&mut brd);
 
     let song_remaining = brd.song_remaining_ms();
-    let soul_voice = brd.soul_voice;
+    // Mask the gauge below the level-80 unlock so a carried-over (e.g. level-100, synced-down)
+    // value is not emitted while the client hides the widget and level-gates Apex Arrow.
+    let soul_voice = if level >= LEVEL_SOUL_VOICE_UNLOCK {
+        brd.soul_voice
+    } else {
+        0
+    };
     let repertoire = match brd.current_song {
         BardSong::ArmysPaeon if brd.has_song_active() => brd.repertoire.min(ARMYS_REPERTOIRE_MAX),
         BardSong::WanderersMinuet if brd.has_song_active() => {
@@ -1170,5 +1187,43 @@ mod tests {
         update_bard_state_after_action(ACTION_STRAIGHT_SHOT, &mut actor, ObjectId::default());
         assert_eq!(bard_of(&actor).hawk_eye_stacks, 0);
         assert!(status_effects_of(&actor).get(STATUS_HAWK_EYE).is_none());
+    }
+
+    /// Fix A: below the level-80 Soul Voice unlock, weaponskills must not accumulate the gauge.
+    #[test]
+    fn heavy_shot_grants_no_soul_voice_below_unlock() {
+        let mut actor = make_player_actor();
+        actor.get_common_spawn_mut().level = 54;
+        update_bard_state_after_action(ACTION_HEAVY_SHOT, &mut actor, ObjectId::default());
+        assert_eq!(bard_of(&actor).soul_voice, 0);
+    }
+
+    /// Fix A: at/above the unlock, Heavy Shot grants the usual +5.
+    #[test]
+    fn heavy_shot_grants_soul_voice_at_unlock() {
+        let mut actor = make_player_actor();
+        actor.get_common_spawn_mut().level = 80;
+        update_bard_state_after_action(ACTION_HEAVY_SHOT, &mut actor, ObjectId::default());
+        assert_eq!(bard_of(&actor).soul_voice, 5);
+    }
+
+    /// Fix B: a carried-over full gauge is masked to 0 in the serialized packet below the unlock.
+    #[test]
+    fn gauge_masks_soul_voice_below_unlock() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.soul_voice = 100;
+        let data = build_bard_gauge_data(&combat_state, 54);
+        let soul_voice_byte = (data >> 40) as u8;
+        assert_eq!(soul_voice_byte, 0);
+    }
+
+    /// Fix B: at/above the unlock, the real gauge value is emitted unchanged.
+    #[test]
+    fn gauge_emits_soul_voice_at_unlock() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.soul_voice = 100;
+        let data = build_bard_gauge_data(&combat_state, 80);
+        let soul_voice_byte = (data >> 40) as u8;
+        assert_eq!(soul_voice_byte, 100);
     }
 }
