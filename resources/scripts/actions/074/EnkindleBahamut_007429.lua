@@ -1,5 +1,5 @@
--- 灼热之闪 / Lux Solaris... Crimson Strike line — Umbral Impulse (Solar Bahamut)
-POTENCY = 700
+-- 龙神迸发 / Enkindle Bahamut (Bahamut)
+POTENCY = 1300
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()

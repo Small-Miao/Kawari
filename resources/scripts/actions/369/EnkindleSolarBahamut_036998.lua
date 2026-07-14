@@ -1,4 +1,4 @@
--- 烈日龙神迸发 / Umbral Flare (Solar Bahamut)
+-- 烈日龙神迸发 / Enkindle Solar Bahamut (Solar Bahamut)
 POTENCY = 1500
 
 function doAction(player, in_combo)

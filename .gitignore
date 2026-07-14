@@ -23,6 +23,7 @@ docs/book
 /navimesh
 *.db-journal
 **/.diesel_lock
+/actionaudit-out
 perf.data*
 *.dll
 *.pdb
