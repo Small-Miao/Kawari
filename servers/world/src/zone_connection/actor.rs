@@ -4,6 +4,7 @@ use crate::{
     ToServer, ZoneConnection,
     common::SpawnKind,
     inventory::{Storage, display_flags_to_checksum_flag, gearset_checksum_from_equipped},
+    zone_connection::effective_level,
 };
 use kawari::{
     common::{
@@ -224,7 +225,7 @@ impl ZoneConnection {
             max_health_points: base_parameters.hp,
             resource_points: base_parameters.mp as u16,
             max_resource_points: base_parameters.mp as u16,
-            level: self.current_level(&game_data) as u8,
+            level: effective_level(self.synced_level, self.current_level(&game_data) as u8),
             object_kind: ObjectKind::Player(PlayerSubKind::Player),
             look,
             display_flags,

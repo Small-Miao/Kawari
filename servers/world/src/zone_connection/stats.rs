@@ -4,6 +4,7 @@ use crate::{
     GameData, ToServer, ZoneConnection,
     gamedata::{Attributes, Modifiers},
     inventory::{EquippedStorage, Storage},
+    zone_connection::effective_level,
 };
 use icarus::ParamGrow::ParamGrowRow;
 use kawari::{
@@ -1398,7 +1399,7 @@ impl ZoneConnection {
         self.handle
             .send(ToServer::SetNewStatValues(
                 self.player_data.character.actor_id,
-                current_level as u8,
+                effective_level(self.synced_level, current_level as u8),
                 self.player_data.classjob.current_class as u8,
                 base_parameters,
             ))

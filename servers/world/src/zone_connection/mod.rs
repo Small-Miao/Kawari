@@ -58,6 +58,14 @@ pub use stats::{BaseParameters, DamageRollModifiers};
 mod unlock;
 mod zone;
 
+/// The level the player's actions, gating, morphs, gauges, and combat display should use.
+/// In level-synced content this is the synced (capped) level; otherwise the true EXP-array level.
+/// Progression (XP / level-up / persistence) is unaffected: those read `classjob.levels` directly,
+/// never `common_spawn.level`.
+pub(crate) fn effective_level(synced_level: Option<u8>, true_level: u8) -> u8 {
+    synced_level.unwrap_or(true_level)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TeleportQuery {
     pub aetheryte_id: u16,
@@ -507,5 +515,25 @@ impl ZoneConnection {
             let mut db = self.database.lock();
             db.commit_grand_companies(&self.player_data);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_level;
+
+    #[test]
+    fn effective_level_uses_true_level_when_not_synced() {
+        assert_eq!(effective_level(None, 90), 90);
+    }
+
+    #[test]
+    fn effective_level_uses_synced_level_when_synced() {
+        assert_eq!(effective_level(Some(50), 90), 50);
+    }
+
+    #[test]
+    fn effective_level_synced_equal_to_true_is_stable() {
+        assert_eq!(effective_level(Some(50), 50), 50);
     }
 }
