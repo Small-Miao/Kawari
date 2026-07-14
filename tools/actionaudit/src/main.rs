@@ -978,21 +978,40 @@ fn parse_aoe_falloff(description: &str) -> Option<u32> {
 /// values -- a single constant is rendered the same as any other fixed potency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PotencyLadder {
-    /// The human-readable label of the number this ladder describes (`"potency"`, ...).
-    label: &'static str,
+    /// The human-readable label of the number this ladder describes (`"potency"`, `"combo potency"`,
+    /// or a buff-state label taken verbatim from the game text, e.g. `安魂祈祷状态中威力`).
+    label: String,
     /// `(min_level, potency)` breakpoints, ascending, starting at level 0.
     steps: Vec<(u32, u32)>,
 }
 
-/// The potency labels whose conditional values become ladders, paired with their rendered name.
+/// The label phrase introducing a potency value: the slice of `preceding` after the LAST newline or
+/// ideographic space (`　`, U+3000), when it ends with a potency/cure label. [`None`] otherwise.
 ///
-/// Ordered most-specific first: [`COMBO_POTENCY_LABEL`] ends with [`POTENCY_LABEL`], so a value
-/// introduced by the combo label must match it before the bare potency label steals it.
-const LADDER_LABELS: [(&str, &str); 3] = [
-    (COMBO_POTENCY_LABEL, "combo potency"),
-    (CURE_POTENCY_LABEL, "cure potency"),
-    (POTENCY_LABEL, "potency"),
-];
+/// A buff-state potency like `神圣魔法效果提高中威力：` is a full phrase ending in [`POTENCY_LABEL`];
+/// the bare `威力：` and combo `连击中威力：` are just its shortest forms.
+fn potency_label_phrase(preceding: &str) -> Option<&str> {
+    let trimmed = preceding.trim_end();
+    let cut = trimmed
+        .char_indices()
+        .filter(|(_, c)| *c == '\n' || *c == '\u{3000}')
+        .map(|(i, c)| i + c.len_utf8())
+        .max()
+        .unwrap_or(0);
+    let phrase = &trimmed[cut..];
+    (phrase.ends_with(POTENCY_LABEL) || phrase.ends_with(CURE_POTENCY_LABEL)).then_some(phrase)
+}
+
+/// The rendered name for a potency label phrase. The three canonical labels get English names; any
+/// other buff-state phrase is used verbatim minus its trailing full-width colon.
+fn potency_ladder_label(phrase: &str) -> String {
+    match phrase {
+        POTENCY_LABEL => "potency".to_string(),
+        COMBO_POTENCY_LABEL => "combo potency".to_string(),
+        CURE_POTENCY_LABEL => "cure potency".to_string(),
+        other => other.strip_suffix('：').unwrap_or(other).to_string(),
+    }
+}
 
 /// The value of a (well-formed, level-0-anchored) ladder at `level`.
 fn ladder_value_at(steps: &[(u32, u32)], level: u32) -> u32 {
@@ -1171,50 +1190,99 @@ struct ResolvedLadders {
     cure_conditional: bool,
 }
 
-/// Walks the token stream, pairing each conditional value with the most-specific potency label that
-/// immediately precedes it, and resolves it for `job`.
+/// Resolves every conditional potency in `tokens` for `job`, descending through visibility-gate
+/// `If`s so buff-state potencies nested inside a branch are found, not just the top-level ones.
 fn resolve_potency_ladders(tokens: &[SeToken], job: u32) -> ResolvedLadders {
-    let mut ladders = Vec::new();
-    let mut potency_conditional = false;
-    let mut cure_conditional = false;
-    let mut preceding = String::new();
+    let mut resolved = ResolvedLadders {
+        ladders: Vec::new(),
+        potency_conditional: false,
+        cure_conditional: false,
+    };
+    collect_potency_ladders(tokens, job, &mut resolved);
+    resolved
+}
 
+/// Walks one token stream. A `Cond` whose preceding text ends with a potency label is that label's
+/// VALUE (evaluated, not descended); any other `Cond` is a STRUCTURAL node whose branches are
+/// descended in search of labels deeper in the tree. Each nested `Text` is walked with a fresh
+/// `preceding`, so a label never leaks across a `Text` boundary.
+fn collect_potency_ladders(tokens: &[SeToken], job: u32, out: &mut ResolvedLadders) {
+    let mut preceding = String::new();
     for token in tokens {
         match token {
             SeToken::Literal(run) => preceding.push_str(run),
             SeToken::Cond(expr) => {
-                if let Some((label, display)) = LADDER_LABELS
-                    .iter()
-                    .find(|(label, _)| preceding.trim_end().ends_with(label))
-                {
-                    let resolved = match eval_potency_ladder(expr, job) {
-                        Some(steps) if steps.len() >= 2 => LabelPotency::Ladder(steps),
-                        Some(_) => LabelPotency::Constant,
-                        None => LabelPotency::Undecodable,
-                    };
-                    let conditional = !matches!(resolved, LabelPotency::Constant);
-                    if *label == POTENCY_LABEL {
-                        potency_conditional |= conditional;
-                    } else if *label == CURE_POTENCY_LABEL {
-                        cure_conditional |= conditional;
+                match potency_label_phrase(&preceding) {
+                    // The value of a labelled potency: evaluate it, do not descend (a value has no
+                    // nested labels of its own).
+                    Some(phrase) => {
+                        let resolved = match eval_potency_ladder(expr, job) {
+                            Some(steps) if steps.len() >= 2 => LabelPotency::Ladder(steps),
+                            Some(_) => LabelPotency::Constant,
+                            None => LabelPotency::Undecodable,
+                        };
+                        let conditional = !matches!(resolved, LabelPotency::Constant);
+                        if phrase.ends_with(POTENCY_LABEL) {
+                            out.potency_conditional |= conditional;
+                        } else if phrase.ends_with(CURE_POTENCY_LABEL) {
+                            out.cure_conditional |= conditional;
+                        }
+                        if let LabelPotency::Ladder(steps) = resolved {
+                            // Always push: two distinct components (e.g. a direct-hit and a DoT) can
+                            // legitimately share a `(label, steps)`. De-duplication is scoped to a
+                            // single `If`'s both-branch descent in `descend_potency_structure`.
+                            out.ladders.push(PotencyLadder {
+                                label: potency_ladder_label(phrase),
+                                steps,
+                            });
+                        }
                     }
-                    if let LabelPotency::Ladder(steps) = resolved {
-                        ladders.push(PotencyLadder {
-                            label: display,
-                            steps,
-                        });
-                    }
+                    // A structural node (a visibility gate): descend to the labels it wraps.
+                    None => descend_potency_structure(expr, job, out),
                 }
                 // A conditional ends the current literal run; text after it is a fresh run.
                 preceding.clear();
             }
         }
     }
+}
 
-    ResolvedLadders {
-        ladders,
-        potency_conditional,
-        cure_conditional,
+/// Descends a structural (non-value) expression. A job-decidable `If` follows only its taken branch;
+/// a level or otherwise-undecidable `If` follows BOTH. A nested `Text` restarts the token walk.
+///
+/// When both branches are followed, an exact-duplicate ladder the `else` branch contributes is
+/// dropped if the `then` branch already contributed it -- a symmetric visibility gate would otherwise
+/// emit the same ladder twice. The de-duplication is scoped to *this* `If`'s two branch ranges, so
+/// distinct components elsewhere that happen to share a `(label, steps)` are untouched. Because each
+/// nested `If` reconciles its own ranges first, this composes correctly bottom-up.
+fn descend_potency_structure(expr: &Expr, job: u32, out: &mut ResolvedLadders) {
+    match expr {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => match eval_job_condition(cond, job) {
+            Some(true) => descend_potency_structure(then_branch, job, out),
+            Some(false) => descend_potency_structure(else_branch, job, out),
+            None => {
+                let before = out.ladders.len();
+                descend_potency_structure(then_branch, job, out);
+                let mid = out.ladders.len();
+                descend_potency_structure(else_branch, job, out);
+
+                let then_ladders = out.ladders[before..mid].to_vec();
+                let else_ladders = out.ladders.split_off(mid);
+                for ladder in else_ladders {
+                    if !then_ladders.contains(&ladder) {
+                        out.ladders.push(ladder);
+                    }
+                }
+            }
+        },
+        Expr::Text(tokens) => collect_potency_ladders(tokens, job, out),
+        // A bare integer, a comparison, a parameter, a `Switch`, or an unresolvable node carries no
+        // further labelled potency.
+        _ => {}
     }
 }
 
@@ -3276,6 +3344,42 @@ mod tests {
     const FAST_BLADE_RAW: &str = "E5AFB9E79BAEE6A087E58F91E58AA8E789A9E79086E694BBE587BBE38080024804F201F803024904F201F903E5A881E58A9BEFBC9A0249020103024802010302083FE4E94514FF2202081EE0E9495FF0DCFF16020812E4E94514FF0B020807E0E94955C99703970303FF16020812E4E94514FF0B020807E0E94955C99703970303";
 
     #[test]
+    fn potency_label_phrase_slices_after_the_last_separator() {
+        // The bare label, and the same label preceded by prose + an ideographic space.
+        assert_eq!(potency_label_phrase("威力："), Some("威力："));
+        assert_eq!(
+            potency_label_phrase("对目标发动无属性魔法攻击\u{3000}威力："),
+            Some("威力：")
+        );
+        // A buff-state label after a newline is returned whole.
+        assert_eq!(
+            potency_label_phrase("\n安魂祈祷状态中威力："),
+            Some("安魂祈祷状态中威力：")
+        );
+        // The later of a newline and an ideographic space wins.
+        assert_eq!(
+            potency_label_phrase("\n连击条件：暴乱剑\u{3000}连击中威力："),
+            Some("连击中威力：")
+        );
+        // A cure label, and text that is not a potency label at all.
+        assert_eq!(potency_label_phrase("恢复力："), Some("恢复力："));
+        assert_eq!(potency_label_phrase("发动条件：不死鸟附体状态中"), None);
+        assert_eq!(potency_label_phrase("威力降低"), None);
+    }
+
+    #[test]
+    fn potency_ladder_label_names_the_known_ones_and_passes_others_through() {
+        assert_eq!(potency_ladder_label("威力："), "potency");
+        assert_eq!(potency_ladder_label("连击中威力："), "combo potency");
+        assert_eq!(potency_ladder_label("恢复力："), "cure potency");
+        // A buff-state phrase keeps its game text, minus the trailing full-width colon.
+        assert_eq!(
+            potency_ladder_label("神圣魔法效果提高中威力："),
+            "神圣魔法效果提高中威力"
+        );
+    }
+
+    #[test]
     fn format_ladder_tiers_renders_ranges() {
         assert_eq!(
             format_ladder_tiers(&[(0, 150), (94, 160)]),
@@ -3318,6 +3422,55 @@ mod tests {
         // ..and the underlying evaluator reports the Switch as undecodable rather than collapsing it
         // to its first case (which would have dropped the `*`).
         assert_eq!(eval_potency_ladder(&Expr::Switch, 27), None);
+    }
+
+    #[test]
+    fn dedup_is_local_to_one_visibility_gates_branches() {
+        let cmp = |index: u32, threshold: u32| {
+            Box::new(Expr::Cmp {
+                op: SESTRING_CMP_GE,
+                lhs: Box::new(Expr::Param {
+                    kind: SESTRING_PARAM_GNUM,
+                    index,
+                }),
+                rhs: Box::new(Expr::Int(threshold)),
+            })
+        };
+        // A `威力：`-labelled value that resolves to the ladder [(0, 65), (94, 85)].
+        let value = || Expr::If {
+            cond: cmp(GNUM_LEVEL, 94),
+            then_branch: Box::new(Expr::Int(85)),
+            else_branch: Box::new(Expr::Int(65)),
+        };
+        let labelled_branch = || {
+            Expr::Text(vec![
+                SeToken::Literal(POTENCY_LABEL.to_string()),
+                SeToken::Cond(value()),
+            ])
+        };
+
+        // A symmetric visibility gate: `If(level>=64, <label+value>, <same label+value>)`. The
+        // both-branch descent must collapse the identical branches to ONE ladder -- the case the
+        // local guard exists for.
+        let gate = Expr::If {
+            cond: cmp(GNUM_LEVEL, 64),
+            then_branch: Box::new(labelled_branch()),
+            else_branch: Box::new(labelled_branch()),
+        };
+        let symmetric = resolve_potency_ladders(&[SeToken::Cond(gate)], 24);
+        assert_eq!(symmetric.ladders.len(), 1, "symmetric branches collapse");
+        assert_eq!(symmetric.ladders[0].steps, vec![(0, 65), (94, 85)]);
+
+        // But two DISTINCT top-level components with the same ladder are both kept -- proving the
+        // dedup does not reach across the whole collection.
+        let two_components = vec![
+            SeToken::Literal(POTENCY_LABEL.to_string()),
+            SeToken::Cond(value()),
+            SeToken::Literal(format!("\n{POTENCY_LABEL}")),
+            SeToken::Cond(value()),
+        ];
+        let distinct = resolve_potency_ladders(&two_components, 24);
+        assert_eq!(distinct.ladders.len(), 2, "distinct components both kept");
     }
 
     #[test]
@@ -4367,6 +4520,96 @@ mod tests {
             "Second Wind must be a flat constant for a non-owning job"
         );
         assert!(!outsider.cure_conditional, "..and so must drop its `*`");
+
+        // A COMBO bonus alongside the base: 3539 Royal Authority (PLD). Both ladders are top-level.
+        assert_eq!(
+            ladder(3539, 19, "potency"),
+            Some(vec![(0, 100), (84, 140), (94, 200)])
+        );
+        assert_eq!(
+            ladder(3539, 19, "combo potency"),
+            Some(vec![(0, 360), (84, 400), (94, 460)])
+        );
+    }
+
+    /// Buff-state potencies nested inside a visibility-gate `If` (a job/level guard whose branch wraps
+    /// the label in a `Text`). The top-level walk alone misses these; the recursive collect finds them
+    /// and labels each verbatim from the game text.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn nested_buff_state_potencies_are_found() {
+        let gd = game();
+        let ladders = |id: u32, job: u32| -> Vec<(String, Vec<(u32, u32)>)> {
+            let bytes = gd.transient_raw.get(&id).unwrap();
+            let tokens = sestring_tokenize(bytes).unwrap();
+            resolve_potency_ladders(&tokens, job)
+                .ladders
+                .into_iter()
+                .map(|l| (l.label, l.steps))
+                .collect()
+        };
+
+        // 7384 Holy Spirit (PLD): base plus TWO buff-state potencies, each gated behind a
+        // `if(job==PLD, if(level>=N, <label><value>, ), )` visibility `If`.
+        assert_eq!(
+            ladders(7384, 19),
+            vec![
+                ("potency".to_string(), vec![(0, 300), (84, 350), (94, 400)]),
+                (
+                    "神圣魔法效果提高中威力".to_string(),
+                    vec![(0, 400), (84, 450), (94, 500)]
+                ),
+                (
+                    "安魂祈祷状态中威力".to_string(),
+                    vec![(0, 600), (84, 650), (94, 700)]
+                ),
+            ]
+        );
+
+        // 25748 Blade of Faith (PLD): the base ladder keeps its values, and the second ladder -- a
+        // top-level `安魂祈祷状态中威力` that used to render as a generic "potency" -- is now labelled.
+        assert_eq!(
+            ladders(25748, 19),
+            vec![
+                ("potency".to_string(), vec![(0, 220), (94, 260)]),
+                ("安魂祈祷状态中威力".to_string(), vec![(0, 720), (94, 760)]),
+            ]
+        );
+    }
+
+    /// Two distinct components that coincidentally share a `(label, steps)` must BOTH render -- the
+    /// dedup is scoped to a single visibility gate's two branches, not the whole collection.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn distinct_components_sharing_a_shape_are_kept_separate() {
+        let gd = game();
+        let steps = |id: u32, job: u32| -> Vec<(String, Vec<(u32, u32)>)> {
+            let bytes = gd.transient_raw.get(&id).unwrap();
+            let tokens = sestring_tokenize(bytes).unwrap();
+            resolve_potency_ladders(&tokens, job)
+                .ladders
+                .into_iter()
+                .map(|l| (l.label, l.steps))
+                .collect()
+        };
+
+        // 16532 Dia (WHM): a direct-hit `威力` and a DoT `威力`, both 65/85. Two separate components
+        // with an identical ladder -- they must NOT collapse into one.
+        assert_eq!(
+            steps(16532, 24),
+            vec![
+                ("potency".to_string(), vec![(0, 65), (94, 85)]),
+                ("potency".to_string(), vec![(0, 65), (94, 85)]),
+            ]
+        );
+        // 3595 Aspected Benefic (AST): a heal `恢复力` and a regen-HoT `恢复力`, both 200/250.
+        assert_eq!(
+            steps(3595, 33),
+            vec![
+                ("cure potency".to_string(), vec![(0, 200), (85, 250)]),
+                ("cure potency".to_string(), vec![(0, 200), (85, 250)]),
+            ]
+        );
     }
 
     /// The token-stream guard, mirroring [`sestring_walk_matches_physis`]: for every row with no
@@ -4555,7 +4798,7 @@ mod tests {
         assert_eq!(
             fountain_of_fire.potency_ladders,
             vec![PotencyLadder {
-                label: "potency",
+                label: "potency".to_string(),
                 steps: vec![(0, 540), (94, 580)]
             }]
         );
