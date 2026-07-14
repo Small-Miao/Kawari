@@ -1236,16 +1236,33 @@ impl UserData for BaseParameters {
     }
 }
 
+/// The two level fields Kawari puts in the client's `UpdateClassInfo`, returned as
+/// `(current_level, class_level)`.
+///
+/// `current_level` populates the client's `PlayerState.CurrentLevel`, which its level-sync display
+/// (item-level-sync panel, crit%/GCD/DH) reads — so under sync it must be the EFFECTIVE (synced)
+/// level, matching retail. `class_level` feeds the client's `ClassJobLevels[]` EXP/progression
+/// array and must stay the TRUE level or the level/EXP bar corrupts.
+fn class_info_levels(synced_level: Option<u8>, true_level: u16) -> (u16, u16) {
+    (
+        effective_level(synced_level, true_level as u8) as u16,
+        true_level,
+    )
+}
+
 impl ZoneConnection {
     pub async fn update_class_info(&mut self) {
         let ipc;
         {
             let game_data = self.gamedata.lock();
 
+            let true_level = self.current_level(&game_data);
+            let (current_level, class_level) = class_info_levels(self.synced_level, true_level);
+
             ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateClassInfo(UpdateClassInfo {
                 class_id: self.player_data.classjob.current_class as u8,
-                class_level: self.current_level(&game_data),
-                current_level: self.current_level(&game_data),
+                class_level,
+                current_level,
                 synced_level: self.synced_level.unwrap_or_default() as u16,
                 current_exp: self.current_exp(&game_data),
                 ..Default::default()
@@ -2042,5 +2059,22 @@ mod tests {
         assert_eq!(base_parameters.vitality, 42);
         assert_eq!(base_parameters.critical_hit, 37);
         assert_eq!(base_parameters.determination, 37);
+    }
+
+    #[test]
+    fn class_info_current_level_is_synced_but_class_level_stays_true() {
+        // Under sync the client's `current_level` (→ PlayerState.CurrentLevel, drives the
+        // level-sync display) must be the synced level, while `class_level` (→ ClassJobLevels[]
+        // EXP/progression) must remain the true level.
+        let (current_level, class_level) = class_info_levels(Some(54), 100);
+        assert_eq!(current_level, 54);
+        assert_eq!(class_level, 100);
+    }
+
+    #[test]
+    fn class_info_levels_are_true_level_when_not_synced() {
+        let (current_level, class_level) = class_info_levels(None, 100);
+        assert_eq!(current_level, 100);
+        assert_eq!(class_level, 100);
     }
 }
