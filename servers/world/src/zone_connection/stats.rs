@@ -837,29 +837,45 @@ impl BaseParameters {
             _ => 100,
         };
 
-        // Akh Morning data can't be extrapolated from game sheets, and it's missing a significant amount of entries from 50-70, so let's try making a decent approximation with the BaseSpeed, HpModifier and LevelModifier columns.
+        // `ParamGrow` has no MAIN column: its `BaseSpeed` is the SUB constant and its
+        // `LevelModifier` is DIV, which is why `BaseSpeed` is the right base for the speed
+        // substats and tenacity but not for anything that scales off MAIN. The MAIN values come
+        // from `LEVEL_MODIFIERS` instead.
+        let level_modifier = level_modifier_for(level);
+        let main = u32::from(level_modifier.main);
+        let sub = u32::from(level_modifier.sub);
+
         self.strength = modifiers
-            .apply_to(1, param_grow.BaseSpeed as u32)
+            .apply_to(1, main)
             .saturating_add_signed(attributes.strength as i32);
         self.dexterity = modifiers
-            .apply_to(2, param_grow.BaseSpeed as u32)
+            .apply_to(2, main)
             .saturating_add_signed(attributes.dexterity as i32);
         self.vitality = modifiers
-            .apply_to(3, param_grow.BaseSpeed as u32)
+            .apply_to(3, main)
             .saturating_add_signed(attributes.vitality as i32);
         self.intelligence = modifiers
-            .apply_to(4, param_grow.BaseSpeed as u32)
+            .apply_to(4, main)
             .saturating_add_signed(attributes.intelligence as i32);
         self.mind = modifiers
-            .apply_to(5, param_grow.BaseSpeed as u32)
+            .apply_to(5, main)
             .saturating_add_signed(attributes.mind as i32);
         self.piety = modifiers
-            .apply_to(6, param_grow.BaseSpeed as u32)
+            .apply_to(6, main)
             .saturating_add_signed(attributes.piety as i32);
 
         self.spell_speed = param_grow.BaseSpeed as u32;
         self.tenacity = param_grow.BaseSpeed as u32;
         self.skill_speed = self.tenacity;
+
+        // Crit and direct hit baseline on SUB, determination on MAIN — the same split the damage
+        // maths below already assumes, and retail's own. Without these the stats are pure gear
+        // sums that sit under their baseline, so `positive_scaled_bonus` returns 0 and the gear's
+        // contribution is silently discarded.
+        self.critical_hit = sub;
+        self.direct_hit_rate = sub;
+        self.determination = main;
+
         self.haste = 100; // Controls cast times
 
         // This is fixed and isn't modified by any items in retail, so it's safe to be set here.
@@ -869,7 +885,7 @@ impl BaseParameters {
     // This should be called after item stat calculations.
     pub fn calculate_potencies(
         &mut self,
-        _level: u32,
+        level: u32,
         param_grow: &ParamGrowRow,
         modifiers: Option<&Modifiers>,
     ) {
@@ -901,7 +917,9 @@ impl BaseParameters {
         };
 
         let hp_mod = param_grow.HpModifier as f32;
-        let base_vit = (param_grow.BaseSpeed as f32) * classjob_vit_mod; // TODO: Tribe adjustments, if we care about such a minimal change?
+        // Must stay the same constant `calculate_based_on_level` seeds vitality from, or the two
+        // stop cancelling and HP shifts by the difference. That is MAIN, not `BaseSpeed`/SUB.
+        let base_vit = f32::from(level_modifier_for(level).main) * classjob_vit_mod; // TODO: Tribe adjustments, if we care about such a minimal change?
         let lv_mod = param_grow.LevelModifier as f32;
 
         self.hp = (100.0
@@ -1809,6 +1827,200 @@ mod tests {
         base_parameters.calculate_stat_across_all_items(&equipped, Some(&il133_caps()));
 
         assert_eq!(base_parameters.physical_damage, 65);
+    }
+
+    /// Bard, the job the gear fixtures above are built for.
+    const BARD: u8 = 23;
+
+    /// Bard's `ClassJob` modifiers. Only the ones the maths below reads are meaningful.
+    fn bard_modifiers() -> Modifiers {
+        Modifiers {
+            hp: 105,
+            mp: 100,
+            strength: 90,
+            vitality: 100,
+            dexterity: 115,
+            intelligence: 85,
+            mind: 80,
+            piety: 100,
+        }
+    }
+
+    /// A character with no tribe/race adjustments, so the level bases stand alone.
+    fn no_attributes() -> Attributes {
+        Attributes {
+            strength: 0,
+            dexterity: 0,
+            vitality: 0,
+            intelligence: 0,
+            mind: 0,
+            piety: 0,
+        }
+    }
+
+    /// A synthetic `ParamGrow` row. Only `BaseSpeed`, `LevelModifier`, `HpModifier` and
+    /// `MpModifier` are read by the stat maths; the rest of the sheet's 15 columns are inert here.
+    ///
+    /// Note the sheet has **no MAIN column** — `BaseSpeed` is the SUB constant and `LevelModifier`
+    /// is DIV, which is why the MAIN values these tests pin come from `LEVEL_MODIFIERS` instead.
+    fn param_grow(base_speed: i32, level_modifier: i32, hp_modifier: u16) -> ParamGrowRow {
+        ParamGrowRow {
+            BaseSpeed: base_speed,
+            LevelModifier: level_modifier,
+            HpModifier: hp_modifier,
+            MpModifier: 10000,
+            ExpToNext: 0,
+            HuntingLogExpReward: 0,
+            MonsterNoteSeals: 0,
+            ScaledQuestXP: 0,
+            ItemLevelSync: 0,
+            ProperDungeon: 0,
+            ProperGuildOrder: 0,
+            CraftingLevel: 0,
+            AdditionalActions: 0,
+            ApplyAction: 0,
+            QuestExpModifier: 0,
+        }
+    }
+
+    /// `ParamGrow[54]` — the level a `ClassJobLevelSync = 54` duty syncs to. MAIN 209 < SUB 346.
+    fn param_grow_54() -> ParamGrowRow {
+        param_grow(346, 444, 1386)
+    }
+
+    /// `ParamGrow[100]` — MAIN 440 > SUB 420, i.e. the crossover against level 54.
+    fn param_grow_100() -> ParamGrowRow {
+        param_grow(420, 2780, 4205)
+    }
+
+    /// Crit, direct hit and determination each need a level base, exactly as the damage maths
+    /// already assumes: `expected_crit_rate` and `direct_hit_rate_bonus` baseline them on SUB,
+    /// while `determination_factor` baselines on **MAIN**.
+    ///
+    /// That asymmetry is retail's, not a typo — `CalcCritRate`/`CalcDh` break points start at each
+    /// stat's SUB floor (420 at level 100) while `CalcDet` starts at MAIN (440). Without these
+    /// bases the stats are pure gear sums, and `positive_scaled_bonus` returns 0 below the
+    /// baseline, so crit silently pins to its 5.0% floor and direct hit to 0% — which is exactly
+    /// what makes the defect look like correct behaviour.
+    #[test]
+    fn test_level_bases_seed_crit_direct_hit_and_determination() {
+        for (level, param_grow, sub, main) in [
+            (54u32, param_grow_54(), 346u32, 209u32),
+            (100, param_grow_100(), 420, 440),
+        ] {
+            let mut base_parameters = BaseParameters::default();
+            base_parameters.calculate_based_on_level(
+                &no_attributes(),
+                level,
+                BARD,
+                &param_grow,
+                &bard_modifiers(),
+            );
+
+            let level_modifier = level_modifier_for(level);
+            assert_eq!(u32::from(level_modifier.sub), sub, "level {level} sub");
+            assert_eq!(u32::from(level_modifier.main), main, "level {level} main");
+
+            assert_eq!(
+                base_parameters.critical_hit, sub,
+                "level {level} critical hit baselines on sub"
+            );
+            assert_eq!(
+                base_parameters.direct_hit_rate, sub,
+                "level {level} direct hit baselines on sub"
+            );
+            // Determination is the odd one out. Do not "tidy" this into sub.
+            assert_eq!(
+                base_parameters.determination, main,
+                "level {level} determination baselines on MAIN, not sub"
+            );
+        }
+    }
+
+    /// The main stats seed from MAIN, which `ParamGrow` does not carry at all — `BaseSpeed` is SUB.
+    ///
+    /// Levels 54 and 100 are pinned together because MAIN and SUB **cross over** between them
+    /// (209 < 346 at 54, 440 > 420 at 100), so no single swap of one constant for the other can
+    /// satisfy both. The speed substats and tenacity genuinely do want `BaseSpeed`; that is what
+    /// the column is named after, and it is asserted here so the two never get conflated again.
+    #[test]
+    fn test_main_stats_seed_from_main_not_base_speed() {
+        for (level, param_grow) in [(54u32, param_grow_54()), (100, param_grow_100())] {
+            let modifiers = bard_modifiers();
+            let mut base_parameters = BaseParameters::default();
+            base_parameters.calculate_based_on_level(
+                &no_attributes(),
+                level,
+                BARD,
+                &param_grow,
+                &modifiers,
+            );
+
+            let level_modifier = level_modifier_for(level);
+            assert_ne!(
+                level_modifier.main, level_modifier.sub,
+                "level {level} must tell main and sub apart for this test to bite"
+            );
+            assert_eq!(
+                u32::from(level_modifier.sub),
+                param_grow.BaseSpeed as u32,
+                "level {level}: BaseSpeed is the SUB constant"
+            );
+
+            let main = u32::from(level_modifier.main);
+            let sub = u32::from(level_modifier.sub);
+
+            // Vitality's modifier is 100, so its base is MAIN outright.
+            assert_eq!(base_parameters.vitality, main, "level {level} vitality");
+
+            assert_eq!(
+                base_parameters.dexterity,
+                modifiers.apply_to(2, main),
+                "level {level} dexterity seeds from main"
+            );
+            assert_ne!(
+                base_parameters.dexterity,
+                modifiers.apply_to(2, sub),
+                "level {level} dexterity must not seed from BaseSpeed/sub"
+            );
+
+            // The speed substats and tenacity keep BaseSpeed — that is what it is the base of.
+            assert_eq!(
+                base_parameters.skill_speed, sub,
+                "level {level} skill speed"
+            );
+            assert_eq!(
+                base_parameters.spell_speed, sub,
+                "level {level} spell speed"
+            );
+            assert_eq!(base_parameters.tenacity, sub, "level {level} tenacity");
+        }
+    }
+
+    /// HP must not move when the main-stat base does. `calculate_potencies` subtracts a base
+    /// vitality from the vitality total, and `calculate_based_on_level` seeds that same total, so
+    /// the two have to draw on the same constant — at level 54 `(346 + 414) - 346` and
+    /// `(209 + 414) - 209` are both 414. Letting only one of them move breaks HP by the difference.
+    #[test]
+    fn test_hp_is_unaffected_by_the_main_stat_base() {
+        let param_grow = param_grow_54();
+        let modifiers = bard_modifiers();
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_based_on_level(
+            &no_attributes(),
+            54,
+            BARD,
+            &param_grow,
+            &modifiers,
+        );
+
+        // Stand in for il-133-clamped gear rather than re-deriving the gear sum here.
+        base_parameters.vitality += 414;
+        base_parameters.calculate_potencies(54, &param_grow, Some(&modifiers));
+
+        // 100 + 1386 + (414 * 4.44) * 1.05
+        assert_eq!(base_parameters.hp, 3416);
     }
 
     /// A one- and a two-handed weapon both sit in the main hand but draw on different budgets
