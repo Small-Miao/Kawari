@@ -659,6 +659,199 @@ fn sestring_walk(data: &[u8]) -> Option<SeStringWalk> {
     })
 }
 
+// -------------------------------------------------------------------------------------------------
+// SeString expression trees (the `If`/`Switch` bodies physis evaluates away)
+// -------------------------------------------------------------------------------------------------
+
+/// One element of an ordered SeString walk: either a run of literal text (with presentational macros
+/// dropped and `NewLine` rendered as `\n`, exactly as [`sestring_walk`]) or a conditional value whose
+/// full branch structure has been preserved rather than evaluated to a single number.
+#[derive(Debug, Clone)]
+enum SeToken {
+    Literal(String),
+    Cond(Expr),
+}
+
+/// A SeString expression, retaining every branch that physis's max-level evaluation discards.
+///
+/// This mirrors `physis::common_file_operations::read_sestring_expression`, but where physis collapses
+/// comparisons, parameter lookups, and non-taken branches to `Unresolvable`, this keeps them so that
+/// the tree can be partially evaluated for a specific job while leaving level free.
+#[derive(Debug, Clone)]
+enum Expr {
+    /// A literal integer.
+    Int(u32),
+    /// A parameter lookup (`gnum`, `lnum`, ...). `kind` is the marker byte (`0xE8..=0xEB`); `index`
+    /// is the parameter index when it is a plain integer, else [`u32::MAX`] (never a real index).
+    Param { kind: u8, index: u32 },
+    /// A binary comparison. `op` is the marker byte (`0xE0..=0xE5`).
+    Cmp {
+        op: u8,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    /// `If(cond, then, else)`.
+    If {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
+    /// `Switch`. Its cases branch on runtime state we do not have, so it is carried only as a marker
+    /// that the value is conditional; the evaluator treats it as undecodable rather than guessing.
+    Switch,
+    /// A length-prefixed nested SeString (`0xFF`), which may itself contain macros.
+    Text(Vec<SeToken>),
+    /// Anything not modelled (a nullary expression, a malformed operand, ...). Forces the evaluator
+    /// to fall back rather than guess.
+    Unresolvable,
+}
+
+/// Comparison marker bytes.
+const SESTRING_CMP_GE: u8 = 0xE0;
+const SESTRING_CMP_NE: u8 = 0xE5;
+/// Parameter-lookup marker bytes.
+const SESTRING_PARAM_LO: u8 = 0xE8;
+const SESTRING_PARAM_HI: u8 = 0xEB;
+/// The `gnum` (global number) parameter marker.
+const SESTRING_PARAM_GNUM: u8 = 0xE9;
+/// A nested-SeString expression.
+const SESTRING_EXPR_TEXT: u8 = 0xFF;
+/// The `gnum` indices observed in potency conditions: the character's ClassJob and Level.
+const GNUM_CLASSJOB: u32 = 68;
+const GNUM_LEVEL: u32 = 72;
+
+/// Decodes a single SeString expression starting at `data[*pos]`, advancing `pos` past it.
+///
+/// Returns [`None`] on a malformed or unknown expression, exactly where physis's
+/// `read_sestring_expression` returns `None`, so a body this cannot parse is one physis could not
+/// evaluate either.
+fn parse_sestring_expression(data: &[u8], pos: &mut usize) -> Option<Expr> {
+    let marker = *data.get(*pos)?;
+    match marker {
+        0x01..=0xCF | 0xF0..=0xFE => read_sestring_packed_int(data, pos).map(Expr::Int),
+        0xD0..=0xDF => {
+            *pos += 1;
+            Some(Expr::Unresolvable)
+        }
+        SESTRING_CMP_GE..=SESTRING_CMP_NE => {
+            *pos += 1;
+            let lhs = Box::new(parse_sestring_expression(data, pos)?);
+            let rhs = Box::new(parse_sestring_expression(data, pos)?);
+            Some(Expr::Cmp {
+                op: marker,
+                lhs,
+                rhs,
+            })
+        }
+        SESTRING_PARAM_LO..=SESTRING_PARAM_HI => {
+            *pos += 1;
+            let index = match parse_sestring_expression(data, pos)? {
+                Expr::Int(value) => value,
+                _ => u32::MAX,
+            };
+            Some(Expr::Param {
+                kind: marker,
+                index,
+            })
+        }
+        SESTRING_EXPR_TEXT => {
+            *pos += 1;
+            let len = read_sestring_packed_int(data, pos)? as usize;
+            let end = pos.checked_add(len)?;
+            let nested = data.get(*pos..end)?;
+            let tokens = sestring_tokenize(nested)?;
+            *pos = end;
+            Some(Expr::Text(tokens))
+        }
+        _ => None,
+    }
+}
+
+/// Reads the expressions of an `If`/`Switch` body spanning `data[start..end]` and folds them into an
+/// [`Expr`]. Mirrors physis: an `If` takes `[cond, then, else]`, a `Switch` its first case.
+fn parse_conditional_macro(kind: u8, data: &[u8], start: usize, end: usize) -> Option<Expr> {
+    let mut pos = start;
+    let mut exprs = Vec::new();
+    while pos < end {
+        exprs.push(parse_sestring_expression(data, &mut pos)?);
+    }
+    if pos != end {
+        return None;
+    }
+    match kind {
+        SESTRING_MACRO_IF if exprs.len() >= 3 => {
+            let mut it = exprs.into_iter();
+            Some(Expr::If {
+                cond: Box::new(it.next().unwrap()),
+                then_branch: Box::new(it.next().unwrap()),
+                else_branch: Box::new(it.next().unwrap()),
+            })
+        }
+        SESTRING_MACRO_SWITCH if exprs.len() >= 2 => Some(Expr::Switch),
+        _ => Some(Expr::Unresolvable),
+    }
+}
+
+/// Walks a SeString into an ordered [`SeToken`] stream, parsing every `If`/`Switch` body into an
+/// [`Expr`] tree rather than evaluating it.
+///
+/// The concatenation of the [`SeToken::Literal`] runs equals [`sestring_walk`]'s `literal` (and thus
+/// physis's decoded text for a row with no conditionals). Returns [`None`] on a malformed stream --
+/// including an `If`/`Switch` body physis itself could not parse -- so callers fall back rather than
+/// emit a partial tree.
+fn sestring_tokenize(data: &[u8]) -> Option<Vec<SeToken>> {
+    fn flush(literal: &mut Vec<u8>, tokens: &mut Vec<SeToken>) {
+        if !literal.is_empty() {
+            tokens.push(SeToken::Literal(
+                String::from_utf8_lossy(literal).into_owned(),
+            ));
+            literal.clear();
+        }
+    }
+
+    let mut tokens = Vec::new();
+    let mut literal = Vec::with_capacity(data.len());
+    let mut pos = 0usize;
+
+    while pos < data.len() {
+        let byte = data[pos];
+        if byte != SESTRING_START {
+            if byte == SESTRING_END {
+                return None;
+            }
+            literal.push(byte);
+            pos += 1;
+            continue;
+        }
+
+        pos += 1;
+        let kind = *data.get(pos)?;
+        pos += 1;
+
+        let body_len = read_sestring_packed_int(data, &mut pos)? as usize;
+        let body_start = pos;
+        let body_end = pos.checked_add(body_len)?;
+        if *data.get(body_end)? != SESTRING_END {
+            return None;
+        }
+
+        match kind {
+            SESTRING_MACRO_NEWLINE => literal.push(b'\n'),
+            SESTRING_MACRO_IF | SESTRING_MACRO_SWITCH => {
+                let expr = parse_conditional_macro(kind, data, body_start, body_end)?;
+                flush(&mut literal, &mut tokens);
+                tokens.push(SeToken::Cond(expr));
+            }
+            _ => {}
+        }
+
+        pos = body_end + 1;
+    }
+
+    flush(&mut literal, &mut tokens);
+    Some(tokens)
+}
+
 /// Re-reads the raw `ActionTransient` EXD pages and returns, per row, the raw SeString bytes of its
 /// `Description`.
 ///
@@ -732,6 +925,9 @@ const POTENCY_LABEL: &str = "威力：";
 /// The **healing** potency label. A heal has no `威力：` at all -- `16230 Physick` reads
 /// `恢复力：400` -- so a tool that only looks for `威力：` reports every heal as having no number.
 const CURE_POTENCY_LABEL: &str = "恢复力：";
+/// The combo-bonus potency label. It **ends with** `威力：`, so when associating a conditional value
+/// with the label that introduces it, this must be tested before [`POTENCY_LABEL`].
+const COMBO_POTENCY_LABEL: &str = "连击中威力：";
 /// The AoE falloff phrase: `对目标之外的敌人威力降低60%`.
 const FALLOFF_PREFIX: &str = "威力降低";
 
@@ -768,6 +964,258 @@ fn parse_aoe_falloff(description: &str) -> Option<u32> {
     description
         .match_indices(FALLOFF_PREFIX)
         .find_map(|(at, _)| leading_number(&description[at + FALLOFF_PREFIX.len()..]))
+}
+
+// -------------------------------------------------------------------------------------------------
+// Per-level potency ladders
+// -------------------------------------------------------------------------------------------------
+
+/// A conditional potency resolved for one job into a piecewise-constant ladder over character level.
+///
+/// `steps` is sorted ascending by `min_level` and starts at `min_level == 0`; the value applies from
+/// `min_level` up to (but excluding) the next entry's `min_level`. `[(0, 150), (94, 160)]` means "150
+/// below level 94, 160 from 94 on". A ladder is only produced when it has at least two distinct
+/// values -- a single constant is rendered the same as any other fixed potency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PotencyLadder {
+    /// The human-readable label of the number this ladder describes (`"potency"`, ...).
+    label: &'static str,
+    /// `(min_level, potency)` breakpoints, ascending, starting at level 0.
+    steps: Vec<(u32, u32)>,
+}
+
+/// The potency labels whose conditional values become ladders, paired with their rendered name.
+///
+/// Ordered most-specific first: [`COMBO_POTENCY_LABEL`] ends with [`POTENCY_LABEL`], so a value
+/// introduced by the combo label must match it before the bare potency label steals it.
+const LADDER_LABELS: [(&str, &str); 3] = [
+    (COMBO_POTENCY_LABEL, "combo potency"),
+    (CURE_POTENCY_LABEL, "cure potency"),
+    (POTENCY_LABEL, "potency"),
+];
+
+/// The value of a (well-formed, level-0-anchored) ladder at `level`.
+fn ladder_value_at(steps: &[(u32, u32)], level: u32) -> u32 {
+    let mut value = steps.first().map(|(_, p)| *p).unwrap_or(0);
+    for (min_level, potency) in steps {
+        if *min_level <= level {
+            value = *potency;
+        }
+    }
+    value
+}
+
+/// Sorts by level and drops steps that repeat the previous value or share a level with it, yielding a
+/// minimal ascending ladder.
+fn collapse_ladder(mut steps: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    steps.sort_by_key(|(min_level, _)| *min_level);
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(steps.len());
+    for (min_level, potency) in steps {
+        match out.last_mut() {
+            Some((_, last_potency)) if *last_potency == potency => {}
+            Some((last_level, last_potency)) if *last_level == min_level => *last_potency = potency,
+            _ => out.push((min_level, potency)),
+        }
+    }
+    out
+}
+
+/// True when `cond`, given a job bound to `gnum68`, is decidable without knowing the level. Returns
+/// the branch it selects. [`None`] means "not a job-only condition" (a level condition, a mix, or a
+/// shape not modelled).
+fn eval_job_condition(cond: &Expr, job: u32) -> Option<bool> {
+    let Expr::Cmp { op, lhs, rhs } = cond else {
+        return None;
+    };
+    let is_classjob = |e: &Expr| matches!(e, Expr::Param { kind, index } if *kind == SESTRING_PARAM_GNUM && *index == GNUM_CLASSJOB);
+    let (job_value, other) = match (lhs.as_ref(), rhs.as_ref()) {
+        (p, Expr::Int(v)) if is_classjob(p) => (job, *v),
+        (Expr::Int(v), p) if is_classjob(p) => (*v, job),
+        _ => return None,
+    };
+    Some(apply_comparison(*op, job_value, other))
+}
+
+/// For a level condition `gnum72 <op> L`, the level boundary `B` and whether the then-branch covers
+/// the high side `[B, ..)` (as opposed to the low side `[0, B)`). [`None`] for anything else.
+fn eval_level_split(cond: &Expr) -> Option<(u32, bool)> {
+    let Expr::Cmp { op, lhs, rhs } = cond else {
+        return None;
+    };
+    let is_level = |e: &Expr| matches!(e, Expr::Param { kind, index } if *kind == SESTRING_PARAM_GNUM && *index == GNUM_LEVEL);
+    // Normalise to `level <op> L`, flipping the operator if the level is on the right.
+    let (op, threshold) = match (lhs.as_ref(), rhs.as_ref()) {
+        (p, Expr::Int(v)) if is_level(p) => (*op, *v),
+        (Expr::Int(v), p) if is_level(p) => (flip_comparison(*op), *v),
+        _ => return None,
+    };
+    match op {
+        SESTRING_CMP_GE => Some((threshold, true)), // >=: then covers [L, ..)
+        0xE1 => Some((threshold.saturating_add(1), true)), // >: then covers [L+1, ..)
+        0xE3 => Some((threshold, false)),           // <: then covers [0, L)
+        0xE2 => Some((threshold.saturating_add(1), false)), // <=: then covers [0, L+1)
+        _ => None,                                  // ==/!= is not a clean ladder
+    }
+}
+
+/// Applies a comparison marker byte to two integers.
+fn apply_comparison(op: u8, lhs: u32, rhs: u32) -> bool {
+    match op {
+        SESTRING_CMP_GE => lhs >= rhs,
+        0xE1 => lhs > rhs,
+        0xE2 => lhs <= rhs,
+        0xE3 => lhs < rhs,
+        0xE4 => lhs == rhs,
+        SESTRING_CMP_NE => lhs != rhs,
+        _ => false,
+    }
+}
+
+/// The comparison that holds for `b <op> a` when `a <op> b` was written -- i.e. swapping the operands.
+fn flip_comparison(op: u8) -> u8 {
+    match op {
+        SESTRING_CMP_GE => 0xE2, // >=  ->  <=
+        0xE1 => 0xE3,            // >   ->  <
+        0xE2 => SESTRING_CMP_GE, // <=  ->  >=
+        0xE3 => 0xE1,            // <   ->  >
+        other => other,          // ==, != are symmetric
+    }
+}
+
+/// Partially evaluates a potency expression for a bound job, leaving level free, into a ladder.
+///
+/// [`None`] on any shape not modelled (an unknown parameter, a non-integer terminal, a condition that
+/// is neither job- nor level-decidable). The caller then falls back to physis's evaluated number: a
+/// wrong ladder is worse than none.
+fn eval_potency_ladder(expr: &Expr, job: u32) -> Option<Vec<(u32, u32)>> {
+    match expr {
+        Expr::Int(value) => Some(vec![(0, *value)]),
+        Expr::Text(tokens) => eval_tokens_ladder(tokens, job),
+        // A `Switch` selects on runtime state we do not have; collapsing it to its first case could
+        // silently drop the `*` on a genuinely conditional potency. Treat it as undecodable so the
+        // caller keeps physis's number and its marker (there are none in current data, but this is
+        // the conservative policy).
+        Expr::Switch => None,
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            if let Some(taken) = eval_job_condition(cond, job) {
+                let branch = if taken { then_branch } else { else_branch };
+                return eval_potency_ladder(branch, job);
+            }
+            let (boundary, then_is_high) = eval_level_split(cond)?;
+            let (low, high) = if then_is_high {
+                (else_branch, then_branch)
+            } else {
+                (then_branch, else_branch)
+            };
+            let low = eval_potency_ladder(low, job)?;
+            let high = eval_potency_ladder(high, job)?;
+
+            let mut steps: Vec<(u32, u32)> =
+                low.into_iter().filter(|(lvl, _)| *lvl < boundary).collect();
+            steps.push((boundary, ladder_value_at(&high, boundary)));
+            steps.extend(high.into_iter().filter(|(lvl, _)| *lvl > boundary));
+            Some(collapse_ladder(steps))
+        }
+        Expr::Param { .. } | Expr::Cmp { .. } | Expr::Unresolvable => None,
+    }
+}
+
+/// A conditional value can be a bare integer, a nested `If`, or a nested string wrapping either. A
+/// nested string that is just literal digits (a constant branch rendered as text) resolves to that
+/// constant.
+fn eval_tokens_ladder(tokens: &[SeToken], job: u32) -> Option<Vec<(u32, u32)>> {
+    let mut nested: Option<&Expr> = None;
+    let mut text = String::new();
+    for token in tokens {
+        match token {
+            SeToken::Literal(run) => text.push_str(run),
+            SeToken::Cond(expr) => {
+                if nested.is_some() {
+                    return None;
+                }
+                nested = Some(expr);
+            }
+        }
+    }
+    if let Some(expr) = nested {
+        // A value branch must not mix a macro with visible text.
+        if text.trim().is_empty() {
+            return eval_potency_ladder(expr, job);
+        }
+        return None;
+    }
+    match text.trim().parse::<u32>() {
+        Ok(value) => Some(vec![(0, value)]),
+        Err(_) => None,
+    }
+}
+
+/// Whether a label's conditional value renders as a ladder, a single constant, or could not be
+/// decoded (in which case the caller keeps physis's number and its `*` marker).
+enum LabelPotency {
+    Ladder(Vec<(u32, u32)>),
+    Constant,
+    Undecodable,
+}
+
+/// Resolves every conditional potency in `tokens` for `job`, returning its ladders (those that vary)
+/// and, for the plain and healing potency labels, whether their value stays conditional (a ladder or
+/// an undecodable branch) -- which is what drives the `*` marker.
+struct ResolvedLadders {
+    ladders: Vec<PotencyLadder>,
+    potency_conditional: bool,
+    cure_conditional: bool,
+}
+
+/// Walks the token stream, pairing each conditional value with the most-specific potency label that
+/// immediately precedes it, and resolves it for `job`.
+fn resolve_potency_ladders(tokens: &[SeToken], job: u32) -> ResolvedLadders {
+    let mut ladders = Vec::new();
+    let mut potency_conditional = false;
+    let mut cure_conditional = false;
+    let mut preceding = String::new();
+
+    for token in tokens {
+        match token {
+            SeToken::Literal(run) => preceding.push_str(run),
+            SeToken::Cond(expr) => {
+                if let Some((label, display)) = LADDER_LABELS
+                    .iter()
+                    .find(|(label, _)| preceding.trim_end().ends_with(label))
+                {
+                    let resolved = match eval_potency_ladder(expr, job) {
+                        Some(steps) if steps.len() >= 2 => LabelPotency::Ladder(steps),
+                        Some(_) => LabelPotency::Constant,
+                        None => LabelPotency::Undecodable,
+                    };
+                    let conditional = !matches!(resolved, LabelPotency::Constant);
+                    if *label == POTENCY_LABEL {
+                        potency_conditional |= conditional;
+                    } else if *label == CURE_POTENCY_LABEL {
+                        cure_conditional |= conditional;
+                    }
+                    if let LabelPotency::Ladder(steps) = resolved {
+                        ladders.push(PotencyLadder {
+                            label: display,
+                            steps,
+                        });
+                    }
+                }
+                // A conditional ends the current literal run; text after it is a fresh run.
+                preceding.clear();
+            }
+        }
+    }
+
+    ResolvedLadders {
+        ladders,
+        potency_conditional,
+        cure_conditional,
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -810,6 +1258,9 @@ struct GameData {
     /// Actions whose description contains an `If`/`Switch` chunk, so any potency parsed out of it is
     /// **one branch**, not a fixed number. See the SeString section above.
     conditional: BTreeSet<u32>,
+    /// The raw `ActionTransient.Description` SeString bytes, kept so a conditional potency can be
+    /// re-parsed into an expression tree and evaluated per job (see [`resolve_potency_ladders`]).
+    transient_raw: HashMap<u32, Vec<u8>>,
 }
 
 fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
@@ -842,11 +1293,13 @@ fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
     }
 
     // The evaluated `Description` above cannot tell a literal potency from a branch of an
-    // `If`/`Switch`, so re-read the same sheet as raw bytes and walk its chunk framing.
-    let conditional: BTreeSet<u32> = read_action_transient_raw(&mut resolver, lang)?
-        .into_iter()
+    // `If`/`Switch`, so re-read the same sheet as raw bytes and walk its chunk framing. The bytes are
+    // kept (not just the conditional flag) so a conditional potency can be evaluated per job.
+    let transient_raw = read_action_transient_raw(&mut resolver, lang)?;
+    let conditional: BTreeSet<u32> = transient_raw
+        .iter()
         .filter(|(_, bytes)| sestring_walk(bytes).is_some_and(|walk| walk.conditional))
-        .map(|(id, _)| id)
+        .map(|(id, _)| *id)
         .collect();
 
     let mut actions = HashMap::new();
@@ -944,6 +1397,7 @@ fn load_game_data(game_path: &str, lang: Language) -> Result<GameData, String> {
         all_panel_ids,
         descriptions,
         conditional,
+        transient_raw,
     };
     check_schema_canary(&gd)?;
     Ok(gd)
@@ -1588,21 +2042,20 @@ struct ActionEntry {
     potency: Option<u32>,
     /// Every literal potency, in source order (combo bonus, positional bonus, ...).
     all_potencies: Vec<u32>,
-    /// The description's potency came out of an `If`/`Switch`, so it is the **matching-job,
-    /// max-level** branch rather than a fixed number.
+    /// The `威力：` potency is conditional **for this job** -- it varies by level (a ladder) or its
+    /// branch could not be decoded. Resolved per label and per job, so a purely job-gated number that
+    /// is a fixed constant for the audited job is *not* flagged (unlike the coarse per-row detection).
     potency_is_conditional: bool,
     /// The first literal **healing** potency (`恢复力：<n>`). A heal has no `威力：` at all, so
     /// without this a heal looks like an action with no number.
     cure_potency: Option<u32>,
     /// Every literal healing potency, in source order (an initial cure plus its regen, ...).
     all_cure_potencies: Vec<u32>,
-    /// As [`ActionEntry::potency_is_conditional`], for the healing potency.
-    ///
-    /// The `If`/`Switch` detection is **per row**, not per label -- it says "this description
-    /// contains a conditional", not "this particular number is one. So a row carrying both a damage
-    /// and a healing potency marks *both* flags. That is deliberately conservative: it can over-warn,
-    /// never under-warn.
+    /// As [`ActionEntry::potency_is_conditional`], for the `恢复力：` healing potency.
     cure_potency_is_conditional: bool,
+    /// Conditional potencies resolved into per-level ladders for this job, one per label that varies
+    /// (`威力：`, `恢复力：`, `连击中威力：`). Empty when nothing varies -- the common case.
+    potency_ladders: Vec<PotencyLadder>,
     /// `对目标之外的敌人威力降低60%` -> `60`.
     aoe_falloff_pct: Option<u32>,
 
@@ -1714,6 +2167,27 @@ impl Context<'_> {
             .map(parse_cure_potencies)
             .unwrap_or_default();
         let conditional = self.gd.conditional.contains(&id);
+        // A conditional potency is resolved into per-level ladders for the audited job. When the row
+        // has no conditional, or the job is unbound (orphans), or the tree cannot be decoded, fall
+        // back to the coarse per-row flag so the `*` marker is kept rather than silently dropped.
+        let resolved = conditional
+            .then(|| {
+                let job_id = job?.0;
+                let tokens = sestring_tokenize(self.gd.transient_raw.get(&id)?)?;
+                Some(resolve_potency_ladders(&tokens, job_id))
+            })
+            .flatten();
+        let potency_is_conditional = match &resolved {
+            Some(resolved) => resolved.potency_conditional,
+            None => conditional && !all_potencies.is_empty(),
+        };
+        let cure_potency_is_conditional = match &resolved {
+            Some(resolved) => resolved.cure_conditional,
+            None => conditional && !all_cure_potencies.is_empty(),
+        };
+        let potency_ladders = resolved
+            .map(|resolved| resolved.ladders)
+            .unwrap_or_default();
 
         ActionEntry {
             id,
@@ -1741,9 +2215,10 @@ impl Context<'_> {
             superseded_by: None,
 
             potency: all_potencies.first().copied(),
-            potency_is_conditional: !all_potencies.is_empty() && conditional,
+            potency_is_conditional,
             cure_potency: all_cure_potencies.first().copied(),
-            cure_potency_is_conditional: !all_cure_potencies.is_empty() && conditional,
+            cure_potency_is_conditional,
+            potency_ladders,
             aoe_falloff_pct: description.as_deref().and_then(parse_aoe_falloff),
             all_potencies,
             all_cure_potencies,
@@ -2022,6 +2497,43 @@ fn describe_combat(entry: &ActionEntry) -> String {
     format!("  - {}\n", facts.join(" | "))
 }
 
+/// Renders a ladder's tiers, e.g. `150 (Lv1-93), 160 (Lv94+)`. Level 0 displays as `Lv1`, and the
+/// last tier is open-ended (`Lv94+`).
+fn format_ladder_tiers(steps: &[(u32, u32)]) -> String {
+    steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (min_level, potency))| {
+            let start = (*min_level).max(1);
+            match steps.get(i + 1) {
+                Some((next, _)) => {
+                    let end = next.saturating_sub(1);
+                    // Skip a tier whose range is empty -- the level-0-only low tier of a
+                    // `[(0, x), (1, y)]` split would otherwise print a backwards `Lv1-0`, and its
+                    // potency is never reached at a playable level anyway.
+                    (start <= end).then(|| format!("{potency} (Lv{start}-{end})"))
+                }
+                None => Some(format!("{potency} (Lv{start}+)")),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One indented sub-line per conditional potency that varies by level for this job, spelling out the
+/// full ladder so the value is not lost to physis's max-level evaluation. Empty when nothing varies.
+fn describe_potency_ladders(entry: &ActionEntry, job_abbrev: &str) -> String {
+    let mut out = String::new();
+    for ladder in &entry.potency_ladders {
+        out.push_str(&format!(
+            "    - {} by level ({job_abbrev}): {}\n",
+            ladder.label,
+            format_ladder_tiers(&ladder.steps)
+        ));
+    }
+    out
+}
+
 fn render_job_markdown(report: &JobReport, gd: &GameData) -> String {
     let mut md = String::new();
     let meta = &report.meta;
@@ -2088,12 +2600,14 @@ fn render_job_markdown(report: &JobReport, gd: &GameData) -> String {
         md.push_str(
             "> A potency marked `*` is **conditional** in the game data (an `If`/`Switch` on job or \
              level). The number shown is the branch taken by a **matching-job, max-level** \
-             character.\n\n",
+             character; a `by level` sub-line below it spells out every tier when the value varies \
+             with level for this job.\n\n",
         );
     }
     for entry in &report.missing {
         md.push_str(&format!("- [ ] {}\n", describe(entry)));
         md.push_str(&describe_combat(entry));
+        md.push_str(&describe_potency_ladders(entry, &meta.job_abbrev));
         // The description is emitted as an indented code block, not inline: it is multi-line and
         // arbitrary game text, so anything markdown-significant in it (`|`, `*`, `#`, ...) must not
         // be able to escape into the surrounding document.
@@ -2745,6 +3259,147 @@ mod tests {
         assert_eq!(sestring_walk(b"\x02\x08\x09\x01\x03"), None);
         // A bare end marker outside any chunk.
         assert_eq!(sestring_walk(b"a\x03b"), None);
+    }
+
+    // --- Per-level potency ladders (hardcoded bytes; no game data needed) --------------------------
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// `ActionTransient[9]` (Fast Blade), lifted verbatim from physis's own `SESTRING_FIXTURES` so
+    /// there is no transcription error. physis evaluates this to `威力：220` (max level); the tree
+    /// underneath encodes `If(job==PLD, If(level>=94, 220, If(level>=84, 200, 150)), 150)`.
+    const FAST_BLADE_RAW: &str = "E5AFB9E79BAEE6A087E58F91E58AA8E789A9E79086E694BBE587BBE38080024804F201F803024904F201F903E5A881E58A9BEFBC9A0249020103024802010302083FE4E94514FF2202081EE0E9495FF0DCFF16020812E4E94514FF0B020807E0E94955C99703970303FF16020812E4E94514FF0B020807E0E94955C99703970303";
+
+    #[test]
+    fn format_ladder_tiers_renders_ranges() {
+        assert_eq!(
+            format_ladder_tiers(&[(0, 150), (94, 160)]),
+            "150 (Lv1-93), 160 (Lv94+)"
+        );
+        assert_eq!(
+            format_ladder_tiers(&[(0, 150), (84, 200), (94, 220)]),
+            "150 (Lv1-83), 200 (Lv84-93), 220 (Lv94+)"
+        );
+        assert_eq!(format_ladder_tiers(&[(0, 300)]), "300 (Lv1+)");
+    }
+
+    #[test]
+    fn format_ladder_tiers_drops_an_empty_low_tier() {
+        // A split at level 1 makes the `(0, x)` tier cover only the unreachable level 0. It must not
+        // render as a backwards `Lv1-0` range -- the low tier is dropped entirely.
+        let rendered = format_ladder_tiers(&[(0, 150), (1, 600)]);
+        assert_eq!(rendered, "600 (Lv1+)");
+        assert!(!rendered.contains("Lv1-0"), "no backwards/empty range");
+    }
+
+    #[test]
+    fn switch_gated_potency_stays_conditional() {
+        // A `威力：Switch(...)` value: `Switch` is undecodable, so the `*` marker must be KEPT (the
+        // label stays conditional) and no ladder is emitted -- the conservative fallback. There are 0
+        // Switch-gated potencies in current data, so this is built from synthetic tokens.
+        let tokens = vec![
+            SeToken::Literal(POTENCY_LABEL.to_string()),
+            SeToken::Cond(Expr::Switch),
+        ];
+        let resolved = resolve_potency_ladders(&tokens, 27);
+        assert!(
+            resolved.potency_conditional,
+            "a Switch-gated potency must keep its `*`"
+        );
+        assert!(
+            resolved.ladders.is_empty(),
+            "an undecodable Switch must not emit a ladder"
+        );
+        // ..and the underlying evaluator reports the Switch as undecodable rather than collapsing it
+        // to its first case (which would have dropped the `*`).
+        assert_eq!(eval_potency_ladder(&Expr::Switch, 27), None);
+    }
+
+    #[test]
+    fn collapse_ladder_sorts_and_dedups() {
+        // Out of order, with a repeat of the previous value that must be dropped.
+        assert_eq!(
+            collapse_ladder(vec![(94, 160), (0, 150), (50, 150)]),
+            vec![(0, 150), (94, 160)]
+        );
+        // A later entry sharing a level overwrites the earlier one.
+        assert_eq!(collapse_ladder(vec![(0, 150), (0, 200)]), vec![(0, 200)]);
+    }
+
+    #[test]
+    fn level_split_reads_every_orientation() {
+        let level = |op: u8, threshold: u32| Expr::Cmp {
+            op,
+            lhs: Box::new(Expr::Param {
+                kind: SESTRING_PARAM_GNUM,
+                index: GNUM_LEVEL,
+            }),
+            rhs: Box::new(Expr::Int(threshold)),
+        };
+        // >= L : then covers [L, ..). > L : then covers [L+1, ..).
+        assert_eq!(eval_level_split(&level(0xE0, 94)), Some((94, true)));
+        assert_eq!(eval_level_split(&level(0xE1, 94)), Some((95, true)));
+        // < L : then covers [0, L). <= L : then covers [0, L+1).
+        assert_eq!(eval_level_split(&level(0xE3, 94)), Some((94, false)));
+        assert_eq!(eval_level_split(&level(0xE2, 94)), Some((95, false)));
+        // == / != on level is not a clean ladder.
+        assert_eq!(eval_level_split(&level(0xE4, 94)), None);
+        // Operand order flipped: `94 <= level` is `level >= 94`.
+        let flipped = Expr::Cmp {
+            op: 0xE2,
+            lhs: Box::new(Expr::Int(94)),
+            rhs: Box::new(Expr::Param {
+                kind: SESTRING_PARAM_GNUM,
+                index: GNUM_LEVEL,
+            }),
+        };
+        assert_eq!(eval_level_split(&flipped), Some((94, true)));
+        // A job comparison is not a level split.
+        let job = Expr::Cmp {
+            op: 0xE4,
+            lhs: Box::new(Expr::Param {
+                kind: SESTRING_PARAM_GNUM,
+                index: GNUM_CLASSJOB,
+            }),
+            rhs: Box::new(Expr::Int(19)),
+        };
+        assert_eq!(eval_level_split(&job), None);
+    }
+
+    #[test]
+    fn fast_blade_ladder_resolves_per_job() {
+        let bytes = decode_hex(FAST_BLADE_RAW);
+        let tokens = sestring_tokenize(&bytes).expect("row 9 is a well-formed SeString");
+
+        // The literal drops the conditional value, so the label ends the run right before the `If`.
+        let literal: String = tokens
+            .iter()
+            .filter_map(|token| match token {
+                SeToken::Literal(text) => Some(text.as_str()),
+                SeToken::Cond(_) => None,
+            })
+            .collect();
+        assert_eq!(literal, "对目标发动物理攻击　威力：");
+
+        // PLD (19): the full three-tier ladder, and the `*` marker stays.
+        let pld = resolve_potency_ladders(&tokens, 19);
+        assert!(pld.potency_conditional);
+        let steps = pld
+            .ladders
+            .iter()
+            .find(|ladder| ladder.label == "potency")
+            .map(|ladder| ladder.steps.clone());
+        assert_eq!(steps, Some(vec![(0, 150), (84, 200), (94, 220)]));
+
+        // SMN (27): the PLD-gated scaling collapses to a single constant, so no ladder and no `*`.
+        let smn = resolve_potency_ladders(&tokens, 27);
+        assert!(!smn.potency_conditional);
+        assert!(smn.ladders.is_empty());
     }
 
     // --- CLI + output guard ----------------------------------------------------------------------
@@ -3659,6 +4314,108 @@ mod tests {
         assert_eq!(parse_potencies(description), Vec::<u32>::new());
     }
 
+    /// The conditional-potency ladders, resolved per job against real game bytes. These are the exact
+    /// numbers physis throws away when it evaluates each `If` to its max-level branch.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn potency_ladders_match_known_rows() {
+        let gd = game();
+        let ladder = |id: u32, job: u32, label: &str| -> Option<Vec<(u32, u32)>> {
+            let bytes = gd
+                .transient_raw
+                .get(&id)
+                .unwrap_or_else(|| panic!("ActionTransient[{id}] must be present"));
+            let tokens = sestring_tokenize(bytes)
+                .unwrap_or_else(|| panic!("ActionTransient[{id}] must tokenize"));
+            resolve_potency_ladders(&tokens, job)
+                .ladders
+                .into_iter()
+                .find(|ladder| ladder.label == label)
+                .map(|ladder| ladder.steps)
+        };
+
+        // A clean two-tier level scaling: 25836 Mountain Buster (SMN) and 16514 Fountain of Fire (SMN).
+        assert_eq!(
+            ladder(25836, SMN, "potency"),
+            Some(vec![(0, 150), (94, 160)])
+        );
+        assert_eq!(
+            ladder(16514, SMN, "potency"),
+            Some(vec![(0, 540), (94, 580)])
+        );
+        // A healing potency: 120 Cure (WHM=24).
+        assert_eq!(
+            ladder(120, 24, "cure potency"),
+            Some(vec![(0, 450), (85, 500)])
+        );
+        // A three-tier ladder with the job re-checked at each tier: 9 Fast Blade (PLD=19).
+        assert_eq!(
+            ladder(9, 19, "potency"),
+            Some(vec![(0, 150), (84, 200), (94, 220)])
+        );
+        // 57 Second Wind: a role action that scales only for its owning jobs. PGL=2 gets the ladder;
+        // a job outside {2, 20} gets a single constant -- no ladder, no `*`.
+        assert_eq!(
+            ladder(57, 2, "cure potency"),
+            Some(vec![(0, 450), (32, 650)])
+        );
+        let bytes = gd.transient_raw.get(&57).unwrap();
+        let tokens = sestring_tokenize(bytes).unwrap();
+        let outsider = resolve_potency_ladders(&tokens, 24);
+        assert!(
+            outsider.ladders.is_empty(),
+            "Second Wind must be a flat constant for a non-owning job"
+        );
+        assert!(!outsider.cure_conditional, "..and so must drop its `*`");
+    }
+
+    /// The token-stream guard, mirroring [`sestring_walk_matches_physis`]: for every row with no
+    /// conditional, the concatenated literal of the token stream must equal physis's decoded text
+    /// byte-for-byte, so the expression parser cannot silently corrupt the framing.
+    #[ignore = "requires a local FFXIV install; run with --include-ignored"]
+    #[test]
+    fn token_stream_literal_matches_physis() {
+        goto_repo_root();
+        let config = get_config();
+        let mut resolver = ResourceResolver::new();
+        resolver.add_source(SqPackResource::from_existing(
+            &config.filesystem.game_path.clone(),
+        ));
+        let raw = read_action_transient_raw(&mut resolver, config.world.language())
+            .expect("failed to re-read ActionTransient as raw bytes");
+
+        let gd = game();
+        let mut compared = 0usize;
+        for (id, bytes) in &raw {
+            // Classify with the outer-only walk (which never fails where physis succeeds), so an
+            // exotic `If` body physis could not parse is skipped rather than tripping the tokenizer.
+            let walk = sestring_walk(bytes)
+                .unwrap_or_else(|| panic!("ActionTransient[{id}] is not a well-formed SeString"));
+            if walk.conditional {
+                continue;
+            }
+            let tokens = sestring_tokenize(bytes)
+                .unwrap_or_else(|| panic!("ActionTransient[{id}] must tokenize"));
+            let literal: String = tokens
+                .iter()
+                .filter_map(|token| match token {
+                    SeToken::Literal(text) => Some(text.as_str()),
+                    SeToken::Cond(_) => None,
+                })
+                .collect();
+            let physis = gd.descriptions.get(id).map(String::as_str).unwrap_or("");
+            assert_eq!(
+                literal, physis,
+                "ActionTransient[{id}]: token-stream literal disagrees with physis's decode"
+            );
+            compared += 1;
+        }
+        assert!(
+            compared > 40000,
+            "most rows are unconditional and must be checked"
+        );
+    }
+
     #[ignore = "requires a local FFXIV install; run with --include-ignored"]
     #[test]
     fn parses_the_aoe_falloff_off_a_real_description() {
@@ -3790,10 +4547,26 @@ mod tests {
                 .is_some_and(|d| d.contains("威力：240") && d.contains('\n'))
         );
 
-        // A CONDITIONAL potency: `16514 Fountain of Fire` guards 580 behind an `If`.
+        // A CONDITIONAL potency: `16514 Fountain of Fire` guards 580 behind a level `If`, so it
+        // varies by level for SMN and stays flagged, with a ladder.
         let fountain_of_fire = by_id(16514);
         assert_eq!(fountain_of_fire.potency, Some(580));
         assert!(fountain_of_fire.potency_is_conditional);
+        assert_eq!(
+            fountain_of_fire.potency_ladders,
+            vec![PotencyLadder {
+                label: "potency",
+                steps: vec![(0, 540), (94, 580)]
+            }]
+        );
+
+        // The `*` is now PER-LABEL PER-JOB, not per-row. `25821 Crimson Cyclone`'s `威力：180` is a
+        // plain literal; the `If` its row carries is the unrelated `三重灾祸变为星极核爆` transform.
+        // The old coarse flag mismarked its potency as conditional; the per-label logic does not.
+        let crimson_cyclone = by_id(25821);
+        assert_eq!(crimson_cyclone.potency, Some(180));
+        assert!(!crimson_cyclone.potency_is_conditional);
+        assert!(crimson_cyclone.potency_ladders.is_empty());
 
         // A falloff that is present.
         assert_eq!(by_id(7449).aoe_falloff_pct, Some(50), "7449 Akh Morn");
@@ -3816,12 +4589,17 @@ mod tests {
 
         // The split of the 22, pinned. It is the answer to "is a missing number a parse failure or
         // an action that simply has none?" -- and it is the latter, every time.
+        //
+        // `conditional` is 2 (16514 Fountain of Fire, 25807 Aerial Blast) -- the two whose SMN
+        // potency actually varies with level. The other three rows the coarse per-row detection used
+        // to flag (25805/25806 Demi-summons, 25821 Crimson Cyclone) carry a *literal* potency next to
+        // an unrelated `If`, so the per-label resolution correctly counts them as literal instead.
         let count = |f: fn(&&ActionEntry) -> bool| report.missing.iter().filter(f).count();
         let literal = count(|e| e.potency.is_some() && !e.potency_is_conditional);
         let conditional = count(|e| e.potency_is_conditional);
         let cure = count(|e| e.potency.is_none() && e.cure_potency.is_some());
         let no_number = count(|e| e.potency.is_none() && e.cure_potency.is_none());
-        assert_eq!((literal, conditional, cure, no_number), (10, 5, 3, 4));
+        assert_eq!((literal, conditional, cure, no_number), (13, 2, 3, 4));
 
         // The 4 that genuinely carry no number: a raise, a buff, a summon, a crowd-control.
         let numberless: BTreeSet<u32> = report
