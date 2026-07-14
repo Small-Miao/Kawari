@@ -20,6 +20,10 @@ const CLASSJOB_CATEGORY_BARD: u8 = 24;
 
 // GCD Actions
 const ACTION_HEAVY_SHOT: u32 = 97;
+const ACTION_STRAIGHT_SHOT: u32 = 98;
+const ACTION_VENOMOUS_BITE: u32 = 100;
+const ACTION_QUICK_NOCK: u32 = 106;
+const ACTION_WINDBITE: u32 = 113;
 const ACTION_BURST_SHOT: u32 = 16495;
 const ACTION_REFULGENT_ARROW: u32 = 7409;
 const ACTION_SHADOWBITE: u32 = 16494;
@@ -28,6 +32,8 @@ const ACTION_STORMBITE: u32 = 7407;
 const ACTION_IRON_JAWS: u32 = 3560;
 const ACTION_APEX_ARROW: u32 = 16496;
 const ACTION_BLAST_ARROW: u32 = 25784;
+const ACTION_LADONSBITE: u32 = 25783;
+const ACTION_WIDE_VOLLEY: u32 = 36974;
 
 // Song Actions
 const ACTION_MAGES_BALLAD: u32 = 114;
@@ -105,6 +111,8 @@ const NATURES_MINNE_DURATION: Duration = Duration::from_secs(15);
 const READY_STATUS_DURATION: Duration = Duration::from_secs(30);
 const HEAVY_SHOT_HAWK_EYE_PROC_CHANCE_PERCENT: u8 = 20;
 const BURST_SHOT_HAWK_EYE_PROC_CHANCE_PERCENT: u8 = 35;
+const QUICK_NOCK_HAWK_EYE_PROC_CHANCE_PERCENT: u8 = 20;
+const LADONSBITE_HAWK_EYE_PROC_CHANCE_PERCENT: u8 = 35;
 
 /// Bard's current song
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -584,6 +592,14 @@ pub(crate) fn can_execute_bard_action(
         // Iron Jaws requires at least one DoT active
         ACTION_IRON_JAWS => brd.has_dot_active(),
 
+        // Straight Shot requires a Hawk's Eye proc. Barrage opens this gate too, but only via the
+        // Hawk's Eye stacks it grants (see the Barrage arm) — which the consume arm zeroes after one
+        // cast, so a single shot is enabled per proc rather than the whole Barrage window.
+        ACTION_STRAIGHT_SHOT => brd.hawk_eye_stacks > 0,
+
+        // Wide Volley is gated identically: a Hawk's Eye proc (including the stacks Barrage grants).
+        ACTION_WIDE_VOLLEY => brd.hawk_eye_stacks > 0,
+
         // Heartbreak Shot requires level 92
         ACTION_HEARTBREAK_SHOT => level >= 92,
 
@@ -639,6 +655,16 @@ pub(crate) fn update_bard_state_after_action(
         ACTION_STORMBITE => {
             combat_state.bard.stormbite_expires_at = Some(Instant::now() + DOT_DURATION);
         }
+        // Venomous Bite is the pre-Lv64 predecessor of Caustic Bite: the field doubles as the
+        // pre-Lv64 DoT slot (Venomous/Caustic are mutually exclusive by level).
+        ACTION_VENOMOUS_BITE => {
+            combat_state.bard.caustic_bite_expires_at = Some(Instant::now() + DOT_DURATION);
+        }
+        // Windbite is the pre-Lv64 predecessor of Stormbite: the field doubles as the pre-Lv64
+        // DoT slot (Windbite/Stormbite are mutually exclusive by level).
+        ACTION_WINDBITE => {
+            combat_state.bard.stormbite_expires_at = Some(Instant::now() + DOT_DURATION);
+        }
 
         // Iron Jaws refreshes both DoTs
         ACTION_IRON_JAWS => {
@@ -686,6 +712,29 @@ pub(crate) fn update_bard_state_after_action(
                 owner_actor_id,
                 BURST_SHOT_HAWK_EYE_PROC_CHANCE_PERCENT,
             );
+        }
+        // AoE weaponskills can grant Hawk's Eye but do NOT grant Soul Voice.
+        ACTION_QUICK_NOCK => {
+            action_update.status_timer_refreshed |= maybe_proc_hawk_eye(
+                status_effects,
+                &mut combat_state.bard,
+                owner_actor_id,
+                QUICK_NOCK_HAWK_EYE_PROC_CHANCE_PERCENT,
+            );
+        }
+        ACTION_LADONSBITE => {
+            action_update.status_timer_refreshed |= maybe_proc_hawk_eye(
+                status_effects,
+                &mut combat_state.bard,
+                owner_actor_id,
+                LADONSBITE_HAWK_EYE_PROC_CHANCE_PERCENT,
+            );
+        }
+        // Wide Volley and Straight Shot consume the Hawk's Eye proc the Lua just used, clearing
+        // it from Rust state so the Burst→Refulgent morph / Straight Shot gate don't see a stale proc.
+        ACTION_WIDE_VOLLEY | ACTION_STRAIGHT_SHOT => {
+            action_update.status_timer_refreshed |=
+                remove_hawk_eye_status(status_effects, &mut combat_state.bard);
         }
         ACTION_REFULGENT_ARROW => {
             combat_state.bard.soul_voice = (combat_state.bard.soul_voice + 10).min(MAX_SOUL_VOICE);
@@ -896,4 +945,230 @@ pub(crate) fn refresh_bard_runtime_state_on_actor(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::zone_connection::{BaseParameters, TeleportQuery};
+    use kawari::common::DistanceRange;
+    use kawari::ipc::zone::{Conditions, SpawnPlayer};
+    use std::collections::HashMap;
+
+    /// Build a minimal `NetworkedActor::Player` (all-default, level 0) for exercising
+    /// `update_bard_state_after_action`. Only `combat_state` / `status_effects` matter here.
+    fn make_player_actor() -> NetworkedActor {
+        NetworkedActor::Player {
+            spawn: SpawnPlayer::default(),
+            status_effects: StatusEffects::default(),
+            teleport_query: TeleportQuery::default(),
+            distance_range: DistanceRange::Normal,
+            conditions: Conditions::default(),
+            executing_gimmick_jump: false,
+            inside_instance_exit: false,
+            parameters: BaseParameters::default(),
+            dueling_opponent_id: ObjectId::default(),
+            remove_cooldowns: false,
+            combat_state: PlayerCombatState::default(),
+            last_combo_action: 0,
+            combo_sequence: 0,
+            hated_by: HashMap::new(),
+            last_enmity_sent: Vec::new(),
+        }
+    }
+
+    fn bard_of(actor: &NetworkedActor) -> &BardState {
+        match actor {
+            NetworkedActor::Player { combat_state, .. } => &combat_state.bard,
+            _ => unreachable!("expected a Player actor"),
+        }
+    }
+
+    fn combat_state_of(actor: &NetworkedActor) -> &PlayerCombatState {
+        match actor {
+            NetworkedActor::Player { combat_state, .. } => combat_state,
+            _ => unreachable!("expected a Player actor"),
+        }
+    }
+
+    fn status_effects_of(actor: &NetworkedActor) -> &StatusEffects {
+        match actor {
+            NetworkedActor::Player { status_effects, .. } => status_effects,
+            _ => unreachable!("expected a Player actor"),
+        }
+    }
+
+    #[test]
+    fn maybe_proc_hawk_eye_never_procs_at_zero_chance() {
+        let mut status_effects = StatusEffects::default();
+        let mut brd = BardState::default();
+        let procced = maybe_proc_hawk_eye(&mut status_effects, &mut brd, ObjectId::default(), 0);
+        assert!(!procced);
+        assert_eq!(brd.hawk_eye_stacks, 0);
+        assert!(status_effects.get(STATUS_HAWK_EYE).is_none());
+    }
+
+    #[test]
+    fn maybe_proc_hawk_eye_always_procs_at_full_chance() {
+        let mut status_effects = StatusEffects::default();
+        let mut brd = BardState::default();
+        let procced = maybe_proc_hawk_eye(&mut status_effects, &mut brd, ObjectId::default(), 100);
+        assert!(procced);
+        assert_eq!(brd.hawk_eye_stacks, 1);
+        assert!(status_effects.get(STATUS_HAWK_EYE).is_some());
+    }
+
+    #[test]
+    fn straight_shot_gated_without_proc_or_barrage() {
+        let combat_state = PlayerCombatState::default();
+        assert!(!can_execute_bard_action(
+            ACTION_STRAIGHT_SHOT,
+            &combat_state,
+            90
+        ));
+    }
+
+    #[test]
+    fn straight_shot_allowed_with_hawk_eye() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.hawk_eye_stacks = 1;
+        combat_state.bard.hawk_eye_expires_at = Some(Instant::now() + READY_STATUS_DURATION);
+        assert!(can_execute_bard_action(
+            ACTION_STRAIGHT_SHOT,
+            &combat_state,
+            90
+        ));
+    }
+
+    #[test]
+    fn wide_volley_gated_without_proc_or_barrage() {
+        let combat_state = PlayerCombatState::default();
+        assert!(!can_execute_bard_action(
+            ACTION_WIDE_VOLLEY,
+            &combat_state,
+            90
+        ));
+    }
+
+    #[test]
+    fn wide_volley_allowed_with_hawk_eye() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.hawk_eye_stacks = 1;
+        combat_state.bard.hawk_eye_expires_at = Some(Instant::now() + READY_STATUS_DURATION);
+        assert!(can_execute_bard_action(
+            ACTION_WIDE_VOLLEY,
+            &combat_state,
+            90
+        ));
+    }
+
+    /// Barrage opens the gate (it grants Hawk's Eye stacks), but the consume arm zeroes those
+    /// stacks, so exactly ONE Straight Shot is enabled per Barrage — not the whole ~10s window.
+    #[test]
+    fn barrage_enables_exactly_one_straight_shot() {
+        let mut actor = make_player_actor();
+        update_bard_state_after_action(ACTION_BARRAGE, &mut actor, ObjectId::default());
+        assert!(can_execute_bard_action(
+            ACTION_STRAIGHT_SHOT,
+            combat_state_of(&actor),
+            90
+        ));
+
+        // First Straight Shot consumes the proc granted by Barrage.
+        update_bard_state_after_action(ACTION_STRAIGHT_SHOT, &mut actor, ObjectId::default());
+        assert!(!can_execute_bard_action(
+            ACTION_STRAIGHT_SHOT,
+            combat_state_of(&actor),
+            90
+        ));
+    }
+
+    /// Same one-shot-per-Barrage invariant for Wide Volley.
+    #[test]
+    fn barrage_enables_exactly_one_wide_volley() {
+        let mut actor = make_player_actor();
+        update_bard_state_after_action(ACTION_BARRAGE, &mut actor, ObjectId::default());
+        assert!(can_execute_bard_action(
+            ACTION_WIDE_VOLLEY,
+            combat_state_of(&actor),
+            90
+        ));
+
+        update_bard_state_after_action(ACTION_WIDE_VOLLEY, &mut actor, ObjectId::default());
+        assert!(!can_execute_bard_action(
+            ACTION_WIDE_VOLLEY,
+            combat_state_of(&actor),
+            90
+        ));
+    }
+
+    #[test]
+    fn venomous_bite_arm_activates_dot_and_iron_jaws_gate() {
+        let mut actor = make_player_actor();
+        update_bard_state_after_action(ACTION_VENOMOUS_BITE, &mut actor, ObjectId::default());
+        assert!(bard_of(&actor).has_dot_active());
+        assert!(can_execute_bard_action(
+            ACTION_IRON_JAWS,
+            combat_state_of(&actor),
+            60
+        ));
+    }
+
+    #[test]
+    fn windbite_arm_activates_dot_and_iron_jaws_gate() {
+        let mut actor = make_player_actor();
+        update_bard_state_after_action(ACTION_WINDBITE, &mut actor, ObjectId::default());
+        assert!(bard_of(&actor).has_dot_active());
+        assert!(can_execute_bard_action(
+            ACTION_IRON_JAWS,
+            combat_state_of(&actor),
+            60
+        ));
+    }
+
+    #[test]
+    fn wide_volley_arm_clears_hawk_eye_proc() {
+        let mut actor = make_player_actor();
+        if let NetworkedActor::Player {
+            combat_state,
+            status_effects,
+            ..
+        } = &mut actor
+        {
+            add_hawk_eye_status(
+                status_effects,
+                &mut combat_state.bard,
+                ObjectId::default(),
+                1,
+            );
+        }
+        assert_eq!(bard_of(&actor).hawk_eye_stacks, 1);
+
+        update_bard_state_after_action(ACTION_WIDE_VOLLEY, &mut actor, ObjectId::default());
+        assert_eq!(bard_of(&actor).hawk_eye_stacks, 0);
+        assert!(status_effects_of(&actor).get(STATUS_HAWK_EYE).is_none());
+    }
+
+    #[test]
+    fn straight_shot_arm_clears_hawk_eye_proc() {
+        let mut actor = make_player_actor();
+        if let NetworkedActor::Player {
+            combat_state,
+            status_effects,
+            ..
+        } = &mut actor
+        {
+            add_hawk_eye_status(
+                status_effects,
+                &mut combat_state.bard,
+                ObjectId::default(),
+                1,
+            );
+        }
+        assert_eq!(bard_of(&actor).hawk_eye_stacks, 1);
+
+        update_bard_state_after_action(ACTION_STRAIGHT_SHOT, &mut actor, ObjectId::default());
+        assert_eq!(bard_of(&actor).hawk_eye_stacks, 0);
+        assert!(status_effects_of(&actor).get(STATUS_HAWK_EYE).is_none());
+    }
 }
