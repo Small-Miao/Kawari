@@ -391,7 +391,14 @@ pub fn npc_behavior(
                         }
                     }
 
+                    // Player pets (owner_id set) must not use enemy timeline auto-attacks.
+                    // Summoner demi Bahamut/Solar already fire their 4×3s skill volleys via
+                    // `schedule_demi_auto_attack` / `process_demi_auto_attack`; those leave
+                    // `target_id` on the pet, which would otherwise also trigger Default.json's
+                    // action 870 and stack a second, wrong auto-attack stream. MCH/SMN pets
+                    // more generally are not hostile BNPC timelines.
                     if spawn.common.target_id.object_id.is_valid()
+                        && !spawn.common.owner_id.is_valid()
                         && timeline.autoattack_action_id != 0
                         && can_take_action
                     {
