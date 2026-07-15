@@ -291,7 +291,6 @@ impl ZoneConnection {
         }
 
         let actor_id = self.player_data.character.actor_id;
-        tracing::info!("Client {actor_id} is initializing zone session...");
 
         self.send_segment(PacketSegment::<ServerZoneIpcSegment> {
             segment_type: SegmentType::Initialize,

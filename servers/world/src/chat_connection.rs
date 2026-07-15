@@ -98,11 +98,6 @@ impl ChatConnection {
 
     pub async fn initialize(&mut self) {
         {
-            tracing::info!(
-                "Client {} is initializing chat session...",
-                self.player_data.actor_id
-            );
-
             // We have to send the client a keep alive!
             let response = PacketSegment::<ServerChatIpcSegment> {
                 segment_type: SegmentType::KeepAliveRequest,

@@ -269,7 +269,7 @@ impl WorldServer {
                 .iter()
                 .any(|x| x.zone.id == zone_id && x.content_finder_condition_id == 0)
             {
-                tracing::info!("Creating new public instance for {zone_id}!");
+                tracing::info!("Creating new public instance for zone {zone_id}!");
                 self.instances.push(Instance::new(zone_id, game_data));
             }
 
@@ -278,7 +278,7 @@ impl WorldServer {
                 .find(|x| x.zone.id == zone_id && x.content_finder_condition_id == 0)
                 .unwrap()
         } else {
-            tracing::info!("Creating new private instance for {zone_id}!");
+            tracing::info!("Creating new private instance for zone {zone_id}!");
             self.instances.push(Instance::new(zone_id, game_data));
             self.instances.last_mut().unwrap()
         }
@@ -500,6 +500,16 @@ fn set_shared_group_timeline_state(
             4 => SharedGroupTimelineState::TIMELINE_4,
             5 => SharedGroupTimelineState::TIMELINE_5,
             6 => SharedGroupTimelineState::TIMELINE_6,
+            7 => SharedGroupTimelineState::TIMELINE_7,
+            8 => SharedGroupTimelineState::TIMELINE_8,
+            9 => SharedGroupTimelineState::TIMELINE_9,
+            10 => SharedGroupTimelineState::TIMELINE_10,
+            11 => SharedGroupTimelineState::TIMELINE_11,
+            12 => SharedGroupTimelineState::TIMELINE_12,
+            13 => SharedGroupTimelineState::TIMELINE_13,
+            14 => SharedGroupTimelineState::TIMELINE_14,
+            15 => SharedGroupTimelineState::TIMELINE_15,
+            16 => SharedGroupTimelineState::TIMELINE_16,
             _ => unimplemented!(),
         });
     }
@@ -523,9 +533,9 @@ fn set_shared_group_timeline_state(
         from_actor_id,
         ActorControlCategory::SetSharedGroupTimelineState {
             state,
-            unk2: 0,
-            unk3: 0,
-            unk4: 0,
+            arg2: 0,
+            object_type: 0,
+            layout_id: 0,
         },
     );
 }
@@ -1912,7 +1922,7 @@ pub async fn server_main_loop(
             match msg {
                 ToServer::NewClient(handle) => {
                     tracing::info!(
-                        "New zone client {:?} is connecting with actor id {}",
+                        "New zone client {:?} created with actor {}",
                         handle.id,
                         handle.actor_id
                     );
@@ -1937,14 +1947,11 @@ pub async fn server_main_loop(
                         .insert(handle.id, (handle.clone(), ClientState::default()));
 
                     if let Some(party_id) = party_id {
-                        tracing::info!("{} is rejoining party {}", handle.actor_id, party_id);
                         network.send_to(
                             handle_id,
                             FromServer::RejoinPartyAfterDisconnect(party_id),
                             DestinationNetwork::ZoneClients,
                         );
-                    } else {
-                        tracing::info!("{} was not in a party before connecting.", handle.actor_id);
                     }
                 }
                 ToServer::NewChatClient(handle) => {
@@ -2979,7 +2986,7 @@ pub async fn server_main_loop(
                                 0,
                             );
                         }
-                        _ => tracing::warn!("Server doesn't know what to do with {:#?}", trigger),
+                        _ => tracing::warn!("Unknown client trigger {:#?}", trigger),
                     }
                 }
                 ToServer::Config(_from_id, from_actor_id, config) => {
@@ -3256,7 +3263,7 @@ pub async fn server_main_loop(
                 ToServer::CommenceDuty(from_actor_id) => {
                     let mut data = data.lock();
                     let entrance_actor_id;
-                    let state = EventState::UNK1 | EventState::UNK2 | EventState::UNK3;
+                    let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
 
                     {
                         let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
@@ -3275,7 +3282,7 @@ pub async fn server_main_loop(
                             instance.find_actor_mut(entrance_actor_id)
                         {
                             object.event_state = state;
-                            object.targetable_status = 1;
+                            object.not_targetable = true;
                         }
                     }
 

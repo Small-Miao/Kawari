@@ -1925,7 +1925,7 @@ pub fn director_tick(
                     continue;
                 };
 
-                let state = EventState::UNK1 | EventState::UNK2 | EventState::UNK3;
+                let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
 
                 let mut network = network.lock();
                 network.send_ac_in_range_instance(

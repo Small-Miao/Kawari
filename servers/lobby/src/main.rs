@@ -100,7 +100,9 @@ async fn main() {
                         if n == 0 {
                             let now = Instant::now();
                             if now.duration_since(connection.last_keep_alive) > NETWORK_TIMEOUT {
-                                tracing::info!("Connection was killed because of timeout");
+                                tracing::info!(
+                                    "Dropping connection because it timed out"
+                                );
                                 break;
                             }
                         } else {
@@ -156,10 +158,6 @@ async fn main() {
                                                 content_id,
                                                 ..
                                             } => {
-                                                tracing::info!(
-                                                    "Client is joining the world with {content_id}"
-                                                );
-
                                                 let our_actor_id;
 
                                                 // find the actor id for this content id

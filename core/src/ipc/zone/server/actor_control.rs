@@ -649,12 +649,11 @@ pub enum ActorControlCategory {
     #[brw(magic = 409u32)]
     SetSharedGroupTimelineState {
         state: SharedGroupTimelineState,
-        /// NOTE: I don't believe it's read by the client. And it looks like nonsense... maybe director id?
-        unk2: u32,
-        /// p3 == 1 means housing (?) item instead of event obj
-        unk3: u32,
-        /// housing item id
-        unk4: u32,
+        arg2: u32, // unused?
+        /// If 0, then search for an EventObject using the ActorControl Entity ID.
+        object_type: u32,
+        /// If object_type is not 0, search StandObjectManager by this layout id.
+        layout_id: u32,
     },
 
     /// Plays an animation for a SharedGroup object.

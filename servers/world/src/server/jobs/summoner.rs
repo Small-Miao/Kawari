@@ -1578,9 +1578,12 @@ pub(crate) fn spawn_slipstream_ground_vfx(
     center: Position,
     object_id: ObjectId,
 ) {
+    // Slipstream ground VFX is not targetable; the old `targetable_status: 4` bit
+    // pattern is not expressible as the new bool field and was never a real
+    // "targetable" flag for this AreaObject.
     let spawn = SpawnObject {
         kind: ObjectKind::AreaObject,
-        targetable_status: 4,
+        not_targetable: true,
         base_id: SUMMONER_SLIPSTREAM_GROUND_VFX_ID,
         entity_id: object_id,
         owner_id,

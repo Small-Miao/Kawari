@@ -139,7 +139,6 @@ impl Zone {
         }
 
         let path = format!("bg/{}.lvb", &bg_path);
-        tracing::info!("Loading {}", path);
         if let Ok(lvb) = game_data.resource.parsed::<Lvb>(&path) {
             let mut load_lgb = |path: &str| -> Option<Lgb> {
                 // Skip LGBs that aren't relevant for the server
@@ -152,7 +151,6 @@ impl Zone {
 
                 let lgb = game_data.resource.parsed::<Lgb>(path);
 
-                tracing::info!("Loading {path}");
                 if let Err(e) = &lgb {
                     tracing::warn!(
                         "Failed to parse {path}: {e}, this is most likely a bug in Physis and should be reported somewhere!"
@@ -543,15 +541,15 @@ impl Zone {
                         Affine3A::from(object.transform).to_scale_rotation_translation();
 
                     if let LayerEntryData::EventObject(eobj) = &object.data {
-                        let targetable_status = if let Some(event_type) = HandlerType::from_repr(
+                        let not_targetable = if let Some(event_type) = HandlerType::from_repr(
                             game_data.get_eobj_data(eobj.parent_data.base_id) >> 16,
                         ) && matches!(
                             event_type,
                             HandlerType::Invalid | HandlerType::GimmickRect
                         ) {
-                            1
+                            true
                         } else {
-                            0 // make it unselectable to be on the safe side.
+                            false // make it selectable to be on the safe side.
                         };
 
                         let base_id = if eobj.parent_data.base_id == EOBJ_SHORTCUT && explorer_mode
@@ -565,7 +563,7 @@ impl Zone {
                         let event_state = if eobj.parent_data.base_id == EOBJ_SHORTCUT
                             || eobj.parent_data.base_id == EOBJ_EXIT
                         {
-                            EventState::UNK1 | EventState::UNK2 | EventState::UNK3
+                            EventState::OFF | EventState::UNK2 | EventState::UNK3
                         } else {
                             EventState::empty()
                         };
@@ -573,7 +571,7 @@ impl Zone {
                         let spawn = SpawnObject {
                             kind: ObjectKind::EventObj,
                             base_id,
-                            targetable_status,
+                            not_targetable,
                             event_state,
                             entity_id: ObjectId(fastrand::u32(..)),
                             layout_id: object.instance_id,
