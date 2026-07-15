@@ -543,6 +543,65 @@ fn level_modifier_for(level: u32) -> LevelModifier {
     LEVEL_MODIFIERS[level.clamp(1, 100) as usize]
 }
 
+/// Retail-calibrated HP gained per point of vitality above the level's MAIN baseline.
+///
+/// `k(Lv)` is server-authoritative and not present in any EXD column or the client binary.
+/// Public curves (plugin fits, xivgear, Sapphire, AkhMorning absolute k) are L100-calibrated
+/// and wrong below cap — do not substitute them. Anchors below are BRD/WAR retail readings
+/// taken 2026-07-16 (no food/FC; job HP mod only) and inverted via
+/// `k = (HP − ⌊HpMod×jobHpMod/100⌋) / (VIT − MAIN)`.
+///
+/// Tank and non-tank are independent tables: the tank/non-tank ratio is ~1.34 at L70 and only
+/// approaches 10/7 at L100, so a constant multiplier is wrong.
+///
+/// Between knots: piecewise linear. Below the first knot: extrapolate the first segment,
+/// floored at 2.0. Above 100: clamp to the L100 value.
+fn hp_per_vitality(level: u32, is_tank: bool) -> f64 {
+    // (level, k) knots. Same levels for both roles so interpolation stays aligned.
+    const NON_TANK: [(u32, f64); 6] = [
+        (54, 12.036),
+        (60, 12.346),
+        (70, 13.312),
+        (80, 18.025),
+        (90, 23.936),
+        (100, 30.066),
+    ];
+    const TANK: [(u32, f64); 6] = [
+        (54, 16.482),
+        (60, 16.767),
+        (70, 17.869),
+        (80, 25.542),
+        (90, 34.102),
+        (100, 42.950),
+    ];
+    let table = if is_tank { &TANK } else { &NON_TANK };
+    interpolate_hp_per_vitality(level, table)
+}
+
+fn interpolate_hp_per_vitality(level: u32, table: &[(u32, f64)]) -> f64 {
+    let first = table[0];
+    let last = table[table.len() - 1];
+    if level >= last.0 {
+        return last.1;
+    }
+    if level <= first.0 {
+        // Extrapolate the first segment (54→60) down; never go below a tiny positive floor.
+        let (l0, k0) = first;
+        let (l1, k1) = table[1];
+        let slope = (k1 - k0) / f64::from(l1 - l0);
+        return (k0 + slope * f64::from(level as i32 - l0 as i32)).max(2.0);
+    }
+    for window in table.windows(2) {
+        let (l0, k0) = window[0];
+        let (l1, k1) = window[1];
+        if level <= l1 {
+            let t = f64::from(level - l0) / f64::from(l1 - l0);
+            return k0 + (k1 - k0) * t;
+        }
+    }
+    last.1
+}
+
 fn attack_modifier_for_level(level: u32) -> f64 {
     match level {
         0..=50 => 75.0,
@@ -902,30 +961,38 @@ impl BaseParameters {
             primary_damage_stat
         };
 
-        // To calculate HP, we use a formula loosely inspired by Akh Morning and take some liberties to keep it fairly simple, at least for now.
-        // TODO: This formula isn't the greatest for 1-50, as near the end of that range it's fairly low compared to retail. For level 80+ though it's pretty close.
-        // In clearer terms without all the casts: (100 + hp_modifier + (total_vit - base_vit) * (level_mod / 100)) * job_hp_modifier
+        // Retail HP (calibrated 2026-07-16 against live BRD/WAR readings):
+        //   HP = ⌊HpMod × jobHpMod / 100⌋ + ⌊(VIT − MAIN) × k(Lv, is_tank)⌋
+        // Two independent floors; jobHpMod applies to the HpMod term only.
+        // k is NOT ParamGrow.LevelModifier (that column is the damage divisor DIV) — see
+        // `hp_per_vitality`. The old formula used DIV/100 as k and multiplied jobHpMod across
+        // the whole expression, which halved synced-54 HP (3416 vs retail 6438 at vit 623).
+        //
+        // Excess is over raw MAIN, not the job-scaled seed. `calculate_based_on_level` still
+        // multiplies MAIN by vitMod when seeding VIT, so a tank's 110% vit mod contributes
+        // `0.1×MAIN` of excess (and thus HP) — that is intended. Both sites must read MAIN from
+        // `level_modifier_for` (not `BaseSpeed`/SUB); they must NOT both apply vitMod, or the
+        // job vit contribution cancels and tank HP falls short by hundreds–thousands.
         let classjob_hp_mod;
-        let classjob_vit_mod;
+        let is_tank;
 
         if let Some(modifiers) = modifiers {
-            classjob_hp_mod = modifiers.hp as f32 / 100.0;
-            classjob_vit_mod = modifiers.vitality as f32 / 100.0;
+            classjob_hp_mod = modifiers.hp as f64 / 100.0;
+            // ClassJob.ModifierHitPoints: tanks are 140 (PLD) / 145 (WAR/DRK/GNB); everyone
+            // else is 105. The threshold is the documented tank floor, not a fitted constant.
+            is_tank = modifiers.hp >= 140;
         } else {
             classjob_hp_mod = 1.0;
-            classjob_vit_mod = 1.0;
+            is_tank = false;
         };
 
-        let hp_mod = param_grow.HpModifier as f32;
-        // Must stay the same constant `calculate_based_on_level` seeds vitality from, or the two
-        // stop cancelling and HP shifts by the difference. That is MAIN, not `BaseSpeed`/SUB.
-        let base_vit = f32::from(level_modifier_for(level).main) * classjob_vit_mod; // TODO: Tribe adjustments, if we care about such a minimal change?
-        let lv_mod = param_grow.LevelModifier as f32;
+        let hp_mod = param_grow.HpModifier as f64;
+        let base_vit = f64::from(level_modifier_for(level).main); // TODO: Tribe adjustments?
+        let k = hp_per_vitality(level, is_tank);
+        // Guard a pathological VIT < base (should not happen for real characters).
+        let excess = (self.vitality as f64 - base_vit).max(0.0);
 
-        self.hp = (100.0
-            + hp_mod
-            + ((self.vitality as f32 - base_vit) * (lv_mod / 100.0)) * classjob_hp_mod)
-            .round() as u32;
+        self.hp = ((hp_mod * classjob_hp_mod).floor() + (excess * k).floor()) as u32;
     }
 
     fn primary_damage_stat_value(&self) -> u32 {
@@ -1863,6 +1930,20 @@ mod tests {
         }
     }
 
+    /// Warrior's `ClassJob` modifiers (tank: modifierHitPoints 145 ≥ 140).
+    fn warrior_modifiers() -> Modifiers {
+        Modifiers {
+            hp: 145,
+            mp: 100,
+            strength: 105,
+            vitality: 110,
+            dexterity: 95,
+            intelligence: 40,
+            mind: 55,
+            piety: 100,
+        }
+    }
+
     /// A character with no tribe/race adjustments, so the level bases stand alone.
     fn no_attributes() -> Attributes {
         Attributes {
@@ -2014,10 +2095,10 @@ mod tests {
         }
     }
 
-    /// HP must not move when the main-stat base does. `calculate_potencies` subtracts a base
-    /// vitality from the vitality total, and `calculate_based_on_level` seeds that same total, so
-    /// the two have to draw on the same constant — at level 54 `(346 + 414) - 346` and
-    /// `(209 + 414) - 209` are both 414. Letting only one of them move breaks HP by the difference.
+    /// HP excess is measured against raw MAIN. For a BRD (`vitMod = 100`) the seed equals MAIN, so
+    /// gear-only excess is exact: `(MAIN + 414) − MAIN = 414`. Both the seed and the HP subtrahend
+    /// must read MAIN from `level_modifier_for` (not SUB/`BaseSpeed`); if either drifts, excess —
+    /// and HP — move with it.
     #[test]
     fn test_hp_is_unaffected_by_the_main_stat_base() {
         let param_grow = param_grow_54();
@@ -2033,11 +2114,155 @@ mod tests {
         );
 
         // Stand in for il-133-clamped gear rather than re-deriving the gear sum here.
+        // Excess vitality over MAIN is 414 — the same excess the retail L54 BRD anchor used.
         base_parameters.vitality += 414;
         base_parameters.calculate_potencies(54, &param_grow, Some(&modifiers));
 
-        // 100 + 1386 + (414 * 4.44) * 1.05
-        assert_eq!(base_parameters.hp, 3416);
+        // ⌊1386 × 1.05⌋ + ⌊414 × 12.036⌋ = 1455 + 4982 = 6437
+        // (retail reading 6438 differs by 1 HP only because the live k was 12.036232 before
+        // rounding the table to 3 d.p.; the MAIN-constant identity is what this test pins.)
+        assert_eq!(base_parameters.hp, 6437);
+    }
+
+    /// A tank's 110% vit mod must grant HP: seed is `MAIN×1.1`, subtrahend is raw MAIN, so a
+    /// naked WAR has excess `0.1×MAIN` and non-zero vit-term HP. Multiplying vitMod into the
+    /// subtrahend would cancel that contribution.
+    #[test]
+    fn test_tank_job_vit_mod_contributes_hp() {
+        let param_grow = param_grow_54();
+        let modifiers = warrior_modifiers();
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_based_on_level(
+            &no_attributes(),
+            54,
+            21, // WAR
+            &param_grow,
+            &modifiers,
+        );
+        // No gear. Seeded vit = floor(MAIN × 1.10) via apply_to; excess over raw MAIN is ~0.1×MAIN.
+        base_parameters.calculate_potencies(54, &param_grow, Some(&modifiers));
+
+        let main = u32::from(super::level_modifier_for(54).main);
+        let seeded = base_parameters.vitality;
+        assert!(seeded > main, "WAR vit mod must raise seeded vitality above MAIN");
+        // ⌊1386 × 1.45⌋ + ⌊(seeded − MAIN) × 16.482⌋
+        let expected = ((1386.0 * 1.45) as f64).floor() as u32
+            + (((seeded - main) as f64) * 16.482).floor() as u32;
+        assert_eq!(base_parameters.hp, expected);
+        assert!(
+            base_parameters.hp > ((1386.0 * 1.45) as f64).floor() as u32,
+            "naked tank HP must exceed the HpMod term alone"
+        );
+    }
+
+    /// The calibrated k table: knots exact, mid-segment linear, above-100 clamped, below-54
+    /// extrapolated from the first segment and floored at 2.0.
+    #[test]
+    fn test_hp_per_vitality_interpolates_and_clamps() {
+        assert!((super::hp_per_vitality(54, false) - 12.036).abs() < 1e-9);
+        assert!((super::hp_per_vitality(100, false) - 30.066).abs() < 1e-9);
+        assert!((super::hp_per_vitality(54, true) - 16.482).abs() < 1e-9);
+        assert!((super::hp_per_vitality(100, true) - 42.950).abs() < 1e-9);
+
+        // Midpoint of the 70→80 non-tank segment: (13.312 + 18.025) / 2.
+        let k75 = super::hp_per_vitality(75, false);
+        assert!((k75 - (13.312 + 18.025) / 2.0).abs() < 1e-9);
+
+        // Above the last knot clamps; tank and non-tank stay distinct.
+        assert!((super::hp_per_vitality(101, false) - 30.066).abs() < 1e-9);
+        assert!((super::hp_per_vitality(101, true) - 42.950).abs() < 1e-9);
+
+        // Far below the first knot: first-segment slope is small and positive, still ≥ 2.0.
+        assert!(super::hp_per_vitality(1, false) >= 2.0);
+        assert!(super::hp_per_vitality(1, false) < super::hp_per_vitality(54, false));
+    }
+
+    /// Pin the BRD (non-tank) curve at the excess values taken from the 2026-07-16 retail anchors.
+    /// Excess is aligned so the test is independent of which MAIN table seeded the vit total.
+    #[test]
+    fn test_hp_matches_retail_brd_excess_anchors() {
+        // (level, HpModifier, excess_vit, expected_hp)
+        // expected = ⌊HpMod×1.05⌋ + ⌊excess × k_nontank⌋ with the 3 d.p. table.
+        let anchors = [
+            (54u32, 1386u16, 414u32, 6437u32),
+            (60, 1767, 506, 8102),
+            (70, 2275, 876, 14049),
+            (80, 3121, 1519, 30656), // 3 d.p. table: retail was 30657 (−1)
+            (90, 3661, 1907, 49489), // retail 49490 (−1)
+            (100, 4205, 6315, 194281),
+        ];
+        let modifiers = bard_modifiers();
+        for (level, hp_mod, excess, expected_hp) in anchors {
+            let param_grow = param_grow(0, 0, hp_mod);
+            let main = u32::from(super::level_modifier_for(level).main);
+            let mut base_parameters = BaseParameters::default();
+            base_parameters.vitality = main + excess;
+            base_parameters.calculate_potencies(level, &param_grow, Some(&modifiers));
+            assert_eq!(
+                base_parameters.hp, expected_hp,
+                "BRD L{level}: vit={} excess={excess}",
+                main + excess
+            );
+        }
+    }
+
+    /// Pin the WAR (tank) curve to absolute retail HP at the calibrated excess values.
+    /// `modifierHitPoints = 145` selects the tank table; subtrahend is raw MAIN (not MAIN×1.1).
+    #[test]
+    fn test_hp_matches_retail_war_excess_anchors() {
+        // (level, HpModifier, excess_over_MAIN, expected_hp)
+        // expected = ⌊HpMod×1.45⌋ + ⌊excess × k_tank⌋ with the 3 d.p. table.
+        // Excess values are retail VIT − community MAIN (same inversion that produced k).
+        // 3 d.p. rounding: retail readings sit 0…−3 HP above these expectations.
+        let anchors = [
+            (54u32, 1386u16, 434u32, 9162u32),  // retail 9162
+            (60, 1767, 528, 11414),             // retail 11415 (−1)
+            (70, 2275, 895, 19290),             // retail 19291 (−1)
+            (80, 3121, 1536, 43757),            // retail 43757
+            (90, 3661, 1925, 70954),            // retail 70955 (−1)
+            (100, 4205, 5997, 263668),          // retail 263671 (−3)
+        ];
+        let modifiers = warrior_modifiers();
+        for (level, hp_mod, excess, expected_hp) in anchors {
+            let param_grow = param_grow(0, 0, hp_mod);
+            let main = u32::from(super::level_modifier_for(level).main);
+            let mut base_parameters = BaseParameters::default();
+            base_parameters.vitality = main + excess;
+            base_parameters.calculate_potencies(level, &param_grow, Some(&modifiers));
+            assert_eq!(
+                base_parameters.hp, expected_hp,
+                "WAR L{level}: vit={} excess={excess}",
+                main + excess
+            );
+        }
+    }
+
+    /// `modifierHitPoints >= 140` is the tank gate; 139 must still use the non-tank k table.
+    /// (Changing `hp` also changes the first-term job multiplier, so each side has its own
+    /// expected value — the point of the test is which *k* is selected, not that job stays 105.)
+    #[test]
+    fn test_hp_tank_threshold_is_modifier_hit_points_140() {
+        let param_grow = param_grow(0, 0, 1386);
+        let main = u32::from(super::level_modifier_for(54).main);
+        let excess = 414u32;
+
+        let mut just_below = bard_modifiers();
+        just_below.hp = 139;
+        let mut bp = BaseParameters::default();
+        bp.vitality = main + excess;
+        bp.calculate_potencies(54, &param_grow, Some(&just_below));
+        // ⌊1386 × 1.39⌋ + ⌊414 × 12.036⌋ = 1926 + 4982 = 6908
+        assert_eq!(bp.hp, 6908);
+
+        let mut at_floor = bard_modifiers();
+        at_floor.hp = 140;
+        let mut bp = BaseParameters::default();
+        bp.vitality = main + excess;
+        bp.calculate_potencies(54, &param_grow, Some(&at_floor));
+        // ⌊1386 × 1.40⌋ + ⌊414 × 16.482⌋ = 1940 + 6823 = 8763
+        assert_eq!(bp.hp, 8763);
+        assert!(bp.hp > 6908, "crossing the tank floor must select the higher k");
     }
 
     /// A one- and a two-handed weapon both sit in the main hand but draw on different budgets
