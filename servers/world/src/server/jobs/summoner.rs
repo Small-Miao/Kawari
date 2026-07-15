@@ -94,6 +94,9 @@ const ACTION_LUX_SOLARIS: u32 = 36997;
 const ACTION_ENKINDLE_BAHAMUT: u32 = 7429;
 const ACTION_ENKINDLE_SOLAR_BAHAMUT: u32 = 36998;
 const LEVEL_SUMMON_SOLAR_BAHAMUT: u8 = 100;
+/// Trait 178 Enhanced Dreadwyrm Trance / Action Summon Bahamut (7427) ClassJobLevel=70.
+/// Below this, modern demi Bahamut and the demi-cycle arcanum ready bits are not legal.
+const LEVEL_SUMMON_BAHAMUT: u8 = 70;
 const ACTION_WYRM_WAVE: u32 = 7428;
 const ACTION_LUXWAVE: u32 = 36993;
 
@@ -2165,7 +2168,7 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
     let next_demi = resolve_next_demi_state(&smn, level);
 
     let summon_expires_at = smn.demi_expires_at.or(smn.primal_summon_expires_at);
-    let summon_timer = summon_expires_at
+    let mut summon_timer = summon_expires_at
         .map(|expires_at| {
             expires_at
                 .saturating_duration_since(Instant::now())
@@ -2228,6 +2231,22 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
             }
             _ => {}
         },
+    }
+
+    // Level-sync send-side masks (do not wipe stored SummonerState — un-sync restores values).
+    // Trait 619 Enhanced Summon Bahamut II / Summon Solar Bahamut L100.
+    if level < LEVEL_SUMMON_SOLAR_BAHAMUT {
+        aether_flags &= !(SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_FIRST_PRIMED
+            | SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_SECOND_PRIMED);
+    }
+    // Trait 178 Enhanced Dreadwyrm Trance / Action Summon Bahamut L70: modern demi cycle,
+    // arcanum ready bits from that cycle, and demi/primal-II summon timers are not legal
+    // below 70. Aetherflow (Energy Drain L10) and carbuncle stay.
+    if level < LEVEL_SUMMON_BAHAMUT {
+        aether_flags &= !(SUMMONER_GAUGE_FLAG_IFRIT_READY
+            | SUMMONER_GAUGE_FLAG_TITAN_READY
+            | SUMMONER_GAUGE_FLAG_GARUDA_READY);
+        summon_timer = 0;
     }
 
     let carbuncle: u8 = if smn.carbuncle_summoned {
@@ -2759,5 +2778,81 @@ pub(crate) fn apply_gauge_action(combat_state: &mut PlayerCombatState, action: &
             combat_state.summoner.aetherflow_stacks = stacks.clamp(0, MAX_AETHERFLOW as i32) as u8;
         }
         other => tracing::warn!("modify_gauge: unknown gauge index {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::combat_state::PlayerCombatState;
+
+    fn aether_flags_byte(data: u64) -> u8 {
+        (data >> 56) as u8
+    }
+
+    fn summon_timer_word(data: u64) -> u16 {
+        data as u16
+    }
+
+    /// Trait 619: Solar primed bits must not leave the server under level sync.
+    #[test]
+    fn gauge_masks_solar_bits_below_100() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner.next_demi = SummonerNextDemi::SolarBahamutFirst;
+        combat_state.summoner.aetherflow_stacks = 2;
+        combat_state.summoner.ruby_arcanum = true;
+
+        let data_54 = build_summoner_gauge_data(&combat_state, 54);
+        let flags_54 = aether_flags_byte(data_54);
+        assert_eq!(
+            flags_54
+                & (SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_FIRST_PRIMED
+                    | SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_SECOND_PRIMED),
+            0
+        );
+        // Below 70, arcanum ready is also masked; aetherflow remains.
+        assert_eq!(flags_54 & SUMMONER_GAUGE_FLAG_IFRIT_READY, 0);
+        assert_ne!(flags_54 & SUMMONER_GAUGE_FLAG_AETHERFLOW_2, 0);
+
+        let data_100 = build_summoner_gauge_data(&combat_state, 100);
+        let flags_100 = aether_flags_byte(data_100);
+        assert_ne!(
+            flags_100 & SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_FIRST_PRIMED,
+            0
+        );
+        assert_ne!(flags_100 & SUMMONER_GAUGE_FLAG_IFRIT_READY, 0);
+    }
+
+    /// Trait 178 / Summon Bahamut L70: arcanum ready + demi timer masked under sync.
+    #[test]
+    fn gauge_masks_arcanum_and_demi_timer_below_70() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner.ruby_arcanum = true;
+        combat_state.summoner.topaz_arcanum = true;
+        combat_state.summoner.emerald_arcanum = true;
+        combat_state.summoner.aetherflow_stacks = 1;
+        combat_state.summoner.demi_phase = SummonerDemiPhase::Bahamut;
+        combat_state.summoner.demi_expires_at = Some(Instant::now() + Duration::from_secs(10));
+
+        let data = build_summoner_gauge_data(&combat_state, 54);
+        let flags = aether_flags_byte(data);
+        assert_eq!(
+            flags
+                & (SUMMONER_GAUGE_FLAG_IFRIT_READY
+                    | SUMMONER_GAUGE_FLAG_TITAN_READY
+                    | SUMMONER_GAUGE_FLAG_GARUDA_READY),
+            0
+        );
+        assert_ne!(flags & SUMMONER_GAUGE_FLAG_AETHERFLOW_1, 0);
+        assert_eq!(summon_timer_word(data), 0);
+
+        // Storage unchanged.
+        assert!(combat_state.summoner.ruby_arcanum);
+        assert!(combat_state.summoner.demi_expires_at.is_some());
+
+        let data_70 = build_summoner_gauge_data(&combat_state, 70);
+        let flags_70 = aether_flags_byte(data_70);
+        assert_ne!(flags_70 & SUMMONER_GAUGE_FLAG_IFRIT_READY, 0);
+        assert!(summon_timer_word(data_70) > 0);
     }
 }

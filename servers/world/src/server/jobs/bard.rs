@@ -839,6 +839,10 @@ pub(crate) fn update_bard_state_after_action(
 /// The ActorGauge packet carries the 8-byte class-specific tail of the client's BardGauge:
 /// bytes 0-1 SongTimer | bytes 2-3 unused | byte 4 Repertoire | byte 5 SoulVoice |
 /// byte 6 RadiantFinaleCoda | byte 7 SongFlags.
+///
+/// Level-sync masking (send-side only; stored state is left intact so un-sync restores it):
+/// - Soul Voice (Trait 287) below 80 → byte 5 = 0
+/// - Minstrel's Coda (Trait 448) below 90 → clear coda bits in SongFlags and byte 6 = 0
 pub(crate) fn build_bard_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
     let mut brd = combat_state.bard.clone();
     refresh_bard_runtime_state(&mut brd);
@@ -858,7 +862,11 @@ pub(crate) fn build_bard_gauge_data(combat_state: &PlayerCombatState, level: u8)
         }
         _ => 0,
     };
-    let song_flags = visible_song_flags(&brd);
+    let mut song_flags = visible_song_flags(&brd);
+    // Trait 448 Minstrel's Coda (L90): do not emit coda bits under level sync.
+    if level < LEVEL_RADIANT_FINALE_CODA {
+        song_flags &= !SONG_FLAG_CODA_MASK;
+    }
     let radiant_finale_coda = coda_count(song_flags);
 
     let data = (song_remaining as u64)
@@ -1225,5 +1233,39 @@ mod tests {
         let data = build_bard_gauge_data(&combat_state, 80);
         let soul_voice_byte = (data >> 40) as u8;
         assert_eq!(soul_voice_byte, 100);
+    }
+
+    /// Trait 448 Minstrel's Coda (L90): carried-over coda bits are masked under sync.
+    #[test]
+    fn gauge_masks_coda_below_minstrels_coda() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.song_flags = SONG_FLAG_MAGES_BALLAD_CODA
+            | SONG_FLAG_ARMYS_PAEON_CODA
+            | SONG_FLAG_WANDERERS_MINUET_CODA;
+        let data = build_bard_gauge_data(&combat_state, 54);
+        let coda_byte = (data >> 48) as u8;
+        let song_flags = (data >> 56) as u8;
+        assert_eq!(coda_byte, 0);
+        assert_eq!(song_flags & SONG_FLAG_CODA_MASK, 0);
+        // Stored state is not wiped — only the packet is masked.
+        assert_ne!(
+            combat_state.bard.song_flags & SONG_FLAG_CODA_MASK,
+            0,
+            "storage must keep coda across sync"
+        );
+    }
+
+    /// At/above L90, coda bits are emitted.
+    #[test]
+    fn gauge_emits_coda_at_minstrels_coda() {
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.bard.song_flags = SONG_FLAG_MAGES_BALLAD_CODA
+            | SONG_FLAG_ARMYS_PAEON_CODA
+            | SONG_FLAG_WANDERERS_MINUET_CODA;
+        let data = build_bard_gauge_data(&combat_state, 90);
+        let coda_byte = (data >> 48) as u8;
+        let song_flags = (data >> 56) as u8;
+        assert_eq!(coda_byte, 3);
+        assert_eq!(song_flags & SONG_FLAG_CODA_MASK, SONG_FLAG_CODA_MASK);
     }
 }
