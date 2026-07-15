@@ -2221,7 +2221,7 @@ pub fn director_tick(
                 }
             }
             LuaDirectorTask::SpawnTreasure { id } => {
-                if let Some(mut treasure) = instance.zone.get_treasure(*id as u8) {
+                if let Some(mut treasure) = instance.zone.get_treasure(*id) {
                     treasure.handler_id = director_id;
 
                     let actor_id = ObjectId(fastrand::u32(..));

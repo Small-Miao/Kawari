@@ -108,7 +108,8 @@ pub struct Zone {
     dropin_layers: Vec<DropInLayer>,
     cached_objects: HashMap<u32, SpawnObject>,
     cached_npcs: HashMap<u32, SpawnNpc>,
-    cached_treasure: HashMap<u8, SpawnTreasure>,
+    // Key is Treasure sheet base_id (u32 since physis nested it under GameObjectInstanceObject).
+    cached_treasure: HashMap<u32, SpawnTreasure>,
     layer_set: i32,
     bg_path: String,
     cached_housing_plots: Vec<HousingPlot>,
@@ -592,10 +593,11 @@ impl Zone {
                     }
 
                     if let LayerEntryData::Treasure(treasure) = &object.data {
+                        // physis nested Treasure under GameObjectInstanceObject (parent_data).
                         self.cached_treasure.insert(
-                            treasure.base_id,
+                            treasure.parent_data.base_id,
                             SpawnTreasure {
-                                base_id: treasure.base_id as u32,
+                                base_id: treasure.parent_data.base_id,
                                 entity_id: ObjectId(fastrand::u32(..)),
                                 layout_id: object.instance_id,
                                 rotation: euler_to_direction(rotation.to_euler(EulerRot::XYZ)),
@@ -669,8 +671,8 @@ impl Zone {
             })
     }
 
-    /// Returns an SpawnTreasure for the given base ID.
-    pub fn get_treasure(&self, base_id: u8) -> Option<SpawnTreasure> {
+    /// Returns a SpawnTreasure for the given base ID.
+    pub fn get_treasure(&self, base_id: u32) -> Option<SpawnTreasure> {
         self.cached_treasure.get(&base_id).cloned()
     }
 

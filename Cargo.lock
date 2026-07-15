@@ -1273,7 +1273,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "physis"
 version = "0.7.0"
-source = "git+https://github.com/Yarukon/Physis?rev=9336c467d1e4662e8a2e2b4b5e45a1462d328bfd#9336c467d1e4662e8a2e2b4b5e45a1462d328bfd"
+source = "git+https://github.com/Yarukon/Physis?rev=db33aecf3ea4b93ee9e4a1724de56cbd5c6954e0#db33aecf3ea4b93ee9e4a1724de56cbd5c6954e0"
 dependencies = [
  "binrw",
  "bitflags",
