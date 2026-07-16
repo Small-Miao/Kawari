@@ -40,6 +40,19 @@ impl std::fmt::Debug for DutyFinderSetting {
     }
 }
 
+impl DutyFinderSetting {
+    /// The DutyFinderSetting "mode word" Kawari writes into the ContentFinder ready packets.
+    /// Forces bit 0x20 — a server-authored "organized party / no-withdrawal-penalty" context bit
+    /// that the client never sends itself but reads back: it gates ContentsFinderQueueInfo+0x5E,
+    /// which controls whether the ready-popup Withdraw button shows the (false, for Kawari) duty-
+    /// abandonment penalty dialog. Without it every pop shows the penalty warning. The user's
+    /// selected icon flags (unrestricted/sync/etc.) ride along unchanged; the Explorer bit is NOT
+    /// added. (0x20's exact retail name is inferred from behavior.)
+    pub fn to_ready_mode_word(self) -> u64 {
+        self.bits() | 0x20
+    }
+}
+
 #[binrw]
 #[derive(Debug, Clone, Default)]
 pub struct QueueDuties {

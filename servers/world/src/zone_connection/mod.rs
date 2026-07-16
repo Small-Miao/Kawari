@@ -381,14 +381,28 @@ impl ZoneConnection {
     pub async fn register_for_content(&mut self, content_ids: [u16; 5]) {
         self.queued_content = Some(content_ids[0]);
 
+        // The `DutyFinderSetting` mode word the client renders the ready-popup mode icon from.
+        // `to_ready_mode_word` echoes the actual queued settings (instead of the old hardcode that
+        // left the Explorer bit permanently set) while forcing bit 0x20, the server-authored
+        // context bit that suppresses the false withdraw-penalty dialog.
+        let settings_word = self
+            .content_settings
+            .unwrap_or_default()
+            .to_ready_mode_word();
+
         // update
         {
             let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ContentFinderUpdate {
-                state1: 1,
+                queue_state: 1,
                 classjob_id: self.player_data.classjob.current_class as u8, // TODO: store what they registered with, because it can change
-                unk1: [0, 0, 0, 0, 0, 0, 96, 4, 2, 64, 1, 0, 0, 0, 0, 0, 1, 1],
-                content_ids,
-                unk2: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                languages: 0,
+                unk_3_7: [0; 5],
+                settings: settings_word,
+                roulette_id: 0,
+                unk_17: 0,
+                unk_18: 1,
+                ready_flag: 1,
+                content_ids: content_ids.map(|id| id as u32),
             });
             self.send_ipc_self(ipc).await;
         }
@@ -396,12 +410,16 @@ impl ZoneConnection {
         // found
         {
             let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ContentFinderFound {
-                unk1: [
-                    3, 0, 0, 0, 0, 0, 0, 0, 96, 4, 2, 64, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
-                    0, 0,
-                ],
-                content_id: content_ids[0],
-                unk2: [0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                queue_state: 3,
+                unk_1_7: [0; 7],
+                settings: settings_word,
+                in_progress_start_timestamp: 0,
+                unk_24: 1,
+                unk_25_27: [0; 3],
+                content_id: content_ids[0] as u32,
+                unk_32_35: 0,
+                unk_36_37: 0,
+                unk_38_39: 0x0100,
             });
             self.send_ipc_self(ipc).await;
         }

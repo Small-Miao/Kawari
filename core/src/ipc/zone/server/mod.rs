@@ -677,25 +677,59 @@ pub enum ServerZoneIpcData {
         unk2: u32,
     },
     ContentFinderUpdate {
+        /// ContentsFinderQueueState (payload offset 0). Observed values:
         /// 0 = Nothing happens
-        /// 1 = Reserving server
+        /// 1 = Reserving server / pending
         /// 2 = again? ^
         /// 3 = duty ready
         /// 4 = checking member status
         /// nothing appears to happen above 5
-        state1: u8,
-        /// The class you registered with. Index into the ClassJob Excel sheet.
+        queue_state: u8,
+        /// The class you registered with (payload offset 1). Index into the ClassJob Excel sheet.
         classjob_id: u8,
-        unk1: [u8; 18],
+        /// Selected match languages (payload offset 2).
+        languages: u8,
+        /// Unknown (payload offset 3-7).
+        unk_3_7: [u8; 5],
+        /// The `DutyFinderSetting` bitfield as a little-endian u64 "mode word" (payload offset
+        /// 8-15). The client renders the ready-popup mode icon from it; bit 0x20 additionally gates
+        /// ContentsFinderQueueInfo+0x5E (the withdraw-penalty dialog).
+        settings: u64,
+        /// QueuedContentRouletteId (payload offset 16). 0 = not a roulette.
+        roulette_id: u8,
+        /// Unknown (payload offset 17).
+        unk_17: u8,
+        /// Unknown (payload offset 18); retail = 1.
+        unk_18: u8,
+        /// Ready flag (payload offset 19); bit 0 = began-queue/ready.
+        ready_flag: u8,
         /// The content IDs you registered for. Index into the ContentFinderCondition Excel sheet.
-        content_ids: [u16; 5],
-        unk2: [u8; 10],
+        /// The client reads these as 5 x u32 (DWORDs) at payload offset 20-39.
+        content_ids: [u32; 5],
     },
     ContentFinderFound {
-        unk1: [u8; 28],
-        /// The content ID that popped. Index into the ContentFinderCondition Excel sheet.
-        content_id: u16,
-        unk2: [u8; 10],
+        /// ContentsFinderQueueState (payload offset 0); 3 = duty ready.
+        queue_state: u8,
+        /// Unknown (payload offset 1-7).
+        unk_1_7: [u8; 7],
+        /// The `DutyFinderSetting` bitfield as a little-endian u64 "mode word" (payload offset
+        /// 8-15). The client renders the ready-popup mode icon from it.
+        settings: u64,
+        /// PoppedContentInProgressStartTimestamp (payload offset 16-23).
+        in_progress_start_timestamp: u64,
+        /// Unknown (payload offset 24); retail/Kawari = 1.
+        unk_24: u8,
+        /// Unknown (payload offset 25-27).
+        unk_25_27: [u8; 3],
+        /// The content ID that popped (PoppedQueueEntry / ContentFinderConditionId, payload offset
+        /// 28-31). The client reads this as a DWORD.
+        content_id: u32,
+        /// Unknown (payload offset 32-35).
+        unk_32_35: u32,
+        /// Unknown (payload offset 36-37).
+        unk_36_37: u16,
+        /// Unknown (payload offset 38-39).
+        unk_38_39: u16,
     },
     SpawnObject(SpawnObject),
     ActorGauge {
@@ -1937,5 +1971,101 @@ mod tests {
     #[test]
     fn party_portrait_entry_size() {
         crate::common::ensure_size::<PartyPortraitEntry, 176>();
+    }
+
+    // Byte-exact layout guard for the reshaped `ContentFinderUpdate`. Since binrw writes fields
+    // sequentially with no padding, field order == byte order; any offset error shows up here.
+    // The client reads `content_ids` as 5 x u32 (DWORDs) at payload offset 20-39, so slot 1 must
+    // land at offset 24 (not 22, which the old `[u16; 5]` layout gave).
+    #[test]
+    fn content_finder_update_byte_layout() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let data = ServerZoneIpcData::ContentFinderUpdate {
+            queue_state: 1,
+            classjob_id: 0x1F,
+            languages: 0,
+            unk_3_7: [0; 5],
+            settings: 0x202020,
+            roulette_id: 0,
+            unk_17: 0,
+            unk_18: 1,
+            ready_flag: 1,
+            content_ids: [0x0056, 0x1234, 0, 0, 0],
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        data.write_le(&mut cursor).unwrap();
+        let body = cursor.into_inner();
+
+        assert_eq!(body.len(), 40);
+        #[rustfmt::skip]
+        let expected: [u8; 40] = [
+            1, 0x1F, 0, // queue_state, classjob_id, languages (0-2)
+            0, 0, 0, 0, 0, // unk_3_7 (3-7)
+            0x20, 0x20, 0x20, 0, 0, 0, 0, 0, // settings mode word 0x202020 LE (8-15)
+            0, 0, 1, 1, // roulette_id, unk_17, unk_18, ready_flag (16-19)
+            0x56, 0, 0, 0, // content_ids[0] (20-23)
+            0x34, 0x12, 0, 0, // content_ids[1] (24-27)
+            0, 0, 0, 0, // content_ids[2] (28-31)
+            0, 0, 0, 0, // content_ids[3] (32-35)
+            0, 0, 0, 0, // content_ids[4] (36-39)
+        ];
+        assert_eq!(body, expected);
+    }
+
+    // Byte-exact layout guard for the reshaped `ContentFinderFound`. The ready/prepare popup
+    // renders its mode icon from the `DutyFinderSetting` mode word (little-endian u64 at payload
+    // offset 8-15); it must echo the actual settings and never leave the Explorer bit set (payload
+    // offset 12). The trailing `unk_38_39` = 0x0100 preserves the old wire byte at offset 39.
+    #[test]
+    fn content_finder_found_byte_layout() {
+        use crate::ipc::zone::DutyFinderSetting;
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let settings = (DutyFinderSetting::UNRESTRICTED_PARTY | DutyFinderSetting::LEVEL_SYNC)
+            .to_ready_mode_word();
+
+        let data = ServerZoneIpcData::ContentFinderFound {
+            queue_state: 3,
+            unk_1_7: [0; 7],
+            settings,
+            in_progress_start_timestamp: 0,
+            unk_24: 1,
+            unk_25_27: [0; 3],
+            content_id: 0x56,
+            unk_32_35: 0,
+            unk_36_37: 0,
+            unk_38_39: 0x0100,
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        data.write_le(&mut cursor).unwrap();
+        let body = cursor.into_inner();
+
+        assert_eq!(body.len(), 40);
+        let mode_word = u64::from_le_bytes(body[8..16].try_into().unwrap());
+        assert_eq!(mode_word, 0x202020); // (UNRESTRICTED | LEVEL_SYNC) | 0x20
+        assert_eq!(body[12], 0); // Explorer bit (bit 32) clear
+        assert_eq!(body[24], 1); // unk_24
+        assert_eq!(&body[38..40], &[0x00, 0x01]); // unk_38_39 = 0x0100 LE
+    }
+
+    // The mode word forces the server-authored 0x20 "organized party / no-withdraw-penalty" bit
+    // while preserving the player's selected icon flags and never adding the Explorer bit.
+    #[test]
+    fn ready_mode_word_sets_organized_bit_and_preserves_icons() {
+        use crate::ipc::zone::DutyFinderSetting;
+
+        let word = (DutyFinderSetting::UNRESTRICTED_PARTY | DutyFinderSetting::LEVEL_SYNC)
+            .to_ready_mode_word();
+        assert_eq!(word & 0x20, 0x20); // organized-party / withdraw-penalty gate bit
+        assert_eq!(word & 0x100000000, 0); // Explorer bit never added
+        assert_eq!(word & 0x2000, 0x2000); // UNRESTRICTED_PARTY preserved
+        assert_eq!(word & 0x200000, 0x200000); // LEVEL_SYNC preserved
+
+        assert_eq!(DutyFinderSetting::empty().to_ready_mode_word(), 0x20);
     }
 }

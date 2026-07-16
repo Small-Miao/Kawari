@@ -18,9 +18,10 @@ use kawari::ipc::chat::ClientChatIpcData;
 
 use kawari::ipc::zone::{
     ActorControlCategory, CWLSLeaveReason, Conditions, ContentFinderUserAction, CrossRealmListing,
-    CrossRealmListings, EventType, FurnitureTranslatedForObserver, GlamourDresserContents, ItemInfo,
-    LinkshellInviteResponse, MarketBoardItem, OnlineStatus, OnlineStatusMask, PlayerSetup,
-    SceneFlags, SearchInfo, SocialListRequestType, TrustContent, TrustInformation, WarpType,
+    CrossRealmListings, DutyFinderSetting, EventType, FurnitureTranslatedForObserver,
+    GlamourDresserContents, ItemInfo, LinkshellInviteResponse, MarketBoardItem, OnlineStatus,
+    OnlineStatusMask, PlayerSetup, SceneFlags, SearchInfo, SocialListRequestType, TrustContent,
+    TrustInformation, WarpType,
 };
 
 use kawari::ipc::zone::{
@@ -2914,6 +2915,10 @@ async fn process_packet(
                             duty_id = game_data.pick_roulette_duty(roulette) as u16;
                         }
 
+                        // The roulette path does not carry `DutyFinderSetting` flags, so reset to
+                        // empty rather than inheriting stale settings from a prior QueueDuties.
+                        // TODO: derive roulette-specific flags (e.g. level sync on high-level roulettes).
+                        connection.content_settings = Some(DutyFinderSetting::empty());
                         connection.register_for_content([duty_id, 0, 0, 0, 0]).await;
                     }
                     ClientZoneIpcData::ContentFinderAction { action, .. } => {

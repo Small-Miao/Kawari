@@ -19,8 +19,8 @@ use kawari::{
         ORNAMENT_BITMASK_SIZE, TRIPLE_TRIAD_CARDS_BITMASK_SIZE,
     },
     ipc::zone::{
-        ActorControlCategory, ActorControlSelf, ClientTriggerCommand, ItemInfo, ServerZoneIpcData,
-        ServerZoneIpcSegment,
+        ActorControlCategory, ActorControlSelf, ClientTriggerCommand, DutyFinderSetting, ItemInfo,
+        ServerZoneIpcData, ServerZoneIpcSegment,
     },
 };
 use physis::race::{Gender, Race, Tribe};
@@ -646,6 +646,8 @@ impl ZoneConnection {
                     self.gain_effect(*effect_id, *effect_param, *duration).await;
                 }
                 LuaTask::RegisterForContent { content_id } => {
+                    // Reset so scripted/debug entries don't inherit stale mode flags.
+                    self.content_settings = Some(DutyFinderSetting::empty());
                     self.register_for_content([*content_id, 0, 0, 0, 0]).await;
                 }
                 LuaTask::CommenceDuty { director_id } => {
