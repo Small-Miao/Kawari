@@ -22,7 +22,7 @@ use kawari::{
         ApartmentList, ApartmentListEntry, CWLSMemberListEntry, ClientTriggerCommand,
         ClientZoneIpcSegment, Condition, Conditions, DutyFinderSetting, DyeInformation,
         GrandCompany as IpcGrandCompany, LetterPreview, PlayerEntry, ServerZoneIpcData,
-        ServerZoneIpcSegment,
+        ServerZoneIpcSegment, build_cf_pop,
     },
     opcodes::ServerZoneIpcType,
     packet::{
@@ -390,39 +390,12 @@ impl ZoneConnection {
             .unwrap_or_default()
             .to_ready_mode_word();
 
-        // update
-        {
-            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ContentFinderUpdate {
-                queue_state: 1,
-                classjob_id: self.player_data.classjob.current_class as u8, // TODO: store what they registered with, because it can change
-                languages: 0,
-                unk_3_7: [0; 5],
-                settings: settings_word,
-                roulette_id: 0,
-                unk_17: 0,
-                unk_18: 1,
-                ready_flag: 1,
-                content_ids: content_ids.map(|id| id as u32),
-            });
-            self.send_ipc_self(ipc).await;
-        }
+        // TODO: store what they registered with, because it can change
+        let classjob_id = self.player_data.classjob.current_class as u8;
+        let (update, found) = build_cf_pop(settings_word, classjob_id, content_ids, 1);
 
-        // found
-        {
-            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ContentFinderFound {
-                queue_state: 3,
-                unk_1_7: [0; 7],
-                settings: settings_word,
-                in_progress_start_timestamp: 0,
-                unk_24: 1,
-                unk_25_27: [0; 3],
-                content_id: content_ids[0] as u32,
-                unk_32_35: 0,
-                unk_36_37: 0,
-                unk_38_39: 0x0100,
-            });
-            self.send_ipc_self(ipc).await;
-        }
+        self.send_ipc_self(ServerZoneIpcSegment::new(update)).await;
+        self.send_ipc_self(ServerZoneIpcSegment::new(found)).await;
     }
 
     pub async fn send_playtime(&mut self) {

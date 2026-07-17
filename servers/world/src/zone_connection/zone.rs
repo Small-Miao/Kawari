@@ -62,6 +62,20 @@ impl ZoneConnection {
 
         let bound_by_duty = content_finder_condition_id != 0;
 
+        // Snapshot our pre-duty overworld location the first time we cross from a non-content
+        // zone into instanced content, so LeaveContent / begin_log_out can send us back here.
+        // The party-commence vote path enters server-side and never calls `join_content`, so
+        // without this its members keep `old_zone_id = 0` and warp to zone 0 on leave (crash).
+        // Guard on the CURRENT (pre-transition) BoundByDuty — it is toggled to match the target
+        // only later in this function — so we capture exactly the overworld->duty edge: never on
+        // leave (cfc == 0), never on plain transitions (cfc == 0), and never on a duty->duty hop
+        // (already BoundByDuty) which would clobber the real overworld location.
+        if bound_by_duty && !self.conditions.has_condition(Condition::BoundByDuty) {
+            self.old_zone_id = self.player_data.volatile.zone_id as u16;
+            self.old_position = self.player_data.volatile.position;
+            self.old_rotation = self.player_data.volatile.rotation as f32;
+        }
+
         // Commit back our zone id and other volatile info on zone change.
         {
             self.player_data.volatile.zone_id = new_zone_id as i32;

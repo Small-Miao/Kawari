@@ -50,6 +50,57 @@ impl PartyMember {
 // The current amount of target signs available for the player's party to use.
 pub const NUM_TARGET_SIGNS: usize = 17;
 
+/// Server-side aggregation state for a party's ContentFinder commence vote. Lives on [`Party`] as an
+/// `Option` (`None` = no pop is active for this party). Mirrors the ReadyCheck state shape: created
+/// when the party pops a duty, mutated as members accept, destroyed on commence or on any cancel.
+/// The pure methods below are the "aggregation as a pure function" and are unit-tested without a
+/// network.
+#[derive(Clone, Debug)]
+pub struct ContentFinderVote {
+    /// The popped ContentFinderCondition id (`content_ids[0]`).
+    pub content_id: u16,
+    /// The queuer's `to_ready_mode_word()`, used to rebuild the pop and commence packets.
+    pub settings_word: u64,
+    /// The queuer's class id (cosmetic, for the broadcast Update; see plan D4).
+    pub classjob_id: u8,
+    /// Snapshot of the online members at pop time = the "total" that must accept.
+    pub participants: Vec<ObjectId>,
+    /// Which participants have accepted so far (deduped).
+    pub accepted: Vec<ObjectId>,
+}
+
+impl ContentFinderVote {
+    /// Records an acceptance. Idempotent: a duplicate accept from the same member is a no-op.
+    pub fn record_accept(&mut self, actor: ObjectId) {
+        if !self.accepted.contains(&actor) {
+            self.accepted.push(actor);
+        }
+    }
+
+    /// The recipient's ContentsFinderQueueState for the Commencing broadcast: 4 if they have
+    /// accepted, else 3.
+    pub fn state_for(&self, actor: ObjectId) -> u32 {
+        if self.accepted.contains(&actor) { 4 } else { 3 }
+    }
+
+    /// How many participants have accepted so far.
+    pub fn accepted_count(&self) -> u8 {
+        self.accepted.len() as u8
+    }
+
+    /// How many participants must accept in total.
+    pub fn total_count(&self) -> u8 {
+        self.participants.len() as u8
+    }
+
+    /// Whether every participant has accepted.
+    pub fn all_accepted(&self) -> bool {
+        self.participants
+            .iter()
+            .all(|actor| self.accepted.contains(actor))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Party {
     pub members: Vec<PartyMember>,
@@ -59,6 +110,7 @@ pub struct Party {
     pub target_signs: [ObjectTypeId; NUM_TARGET_SIGNS], // NOTE: We deviate from retail here, which seems to have per-instance lists of marked targets, and instead just have one per party for simplicity.
     pub waymarks: HashMap<i32, WaymarkPositions>, // TODO: If/when we ever get unique instance identifiers, use those instead of the zone id.
     pub readycheck_host: Option<ObjectId>, // Only one ready check can be undertaken at a time.
+    pub content_finder_vote: Option<ContentFinderVote>, // None = no ContentFinder pop active for this party.
 }
 
 impl Party {
@@ -190,6 +242,37 @@ pub fn get_party_id_from_actor_id(network: &NetworkState, actor_id: ObjectId) ->
         }
     }
     None
+}
+
+/// Cancels any active ContentFinder commence vote for `party_id`, telling every participant in the
+/// vote's snapshot that the registration was cancelled (LogMessage `reason_log_id`, generally
+/// 0x0373 = the generic "参加申请已取消。"). No-op if the party has no active vote.
+///
+/// The vote is `take`n out first so its `participants` snapshot survives even when the caller is
+/// about to remove members or the whole party (a member leaving/kicked/going offline, or the party
+/// disbanding, cancels the pop for everyone — accepted members have no client-side timer, so this
+/// server-side cancel is their only way out of the "waiting" popup).
+pub fn cancel_content_finder_vote(network: &mut NetworkState, party_id: u64, reason_log_id: u32) {
+    let vote = match network.parties.get_mut(&party_id) {
+        Some(party) => party.content_finder_vote.take(),
+        None => None,
+    };
+    let Some(vote) = vote else {
+        return;
+    };
+
+    for actor in &vote.participants {
+        let ipc = ServerZoneIpcData::UnkContentFinder {
+            content_id: 0,
+            log_message_id: reason_log_id,
+            unk_12: 0,
+        };
+        network.send_to_by_actor_id(
+            *actor,
+            FromServer::PacketSegment(ServerZoneIpcSegment::new(ipc), *actor),
+            DestinationNetwork::ZoneClients,
+        );
+    }
 }
 
 /// Helper function to send the party's currently marked targets to a specific actor that changed areas or returned from being offline.
@@ -670,6 +753,10 @@ pub fn handle_party_messages(
         ) => {
             let data = data.lock();
             let mut network = network.lock();
+
+            // A member leaving cancels any in-progress ContentFinder pop for the whole party.
+            cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+
             let party_list;
             let leaving_zone_client_id;
             let leaving_chat_client_id;
@@ -771,6 +858,10 @@ pub fn handle_party_messages(
         ToServer::PartyDisband(party_id, execute_account_id, execute_content_id, execute_name) => {
             let mut network = network.lock();
 
+            // Disbanding cancels any in-progress ContentFinder pop before the party is removed, so
+            // accepted members (who have no client-side timer) aren't stranded in the waiting popup.
+            cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+
             let msg = FromServer::PartyUpdate(
                 PartyUpdateTargets {
                     execute_account_id: *execute_account_id,
@@ -809,6 +900,10 @@ pub fn handle_party_messages(
         ) => {
             let data = data.lock();
             let mut network = network.lock();
+
+            // Kicking a member cancels any in-progress ContentFinder pop for the whole party.
+            cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+
             let party = network.parties.get_mut(party_id).unwrap();
 
             let Some(member) = party.get_member_by_content_id(*target_content_id) else {
@@ -902,6 +997,9 @@ pub fn handle_party_messages(
                 );
                 return true;
             }
+
+            // A member disconnecting mid-vote cancels the ContentFinder pop for the whole party.
+            cancel_content_finder_vote(&mut network, *party_id, 0x0373);
 
             let party = &mut network.parties.get_mut(party_id).unwrap();
             party.set_member_offline(*from_actor_id);
@@ -1403,5 +1501,70 @@ pub fn handle_party_messages(
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vote_of(participants: &[u32]) -> ContentFinderVote {
+        ContentFinderVote {
+            content_id: 0x030F,
+            settings_word: 0x20,
+            classjob_id: 0x1F,
+            participants: participants.iter().map(|id| ObjectId(*id)).collect(),
+            accepted: Vec::new(),
+        }
+    }
+
+    // A 2-member vote transitions correctly through partial and full acceptance, and a duplicate
+    // accept from the same member is a no-op.
+    #[test]
+    fn content_finder_vote_transitions() {
+        let a = ObjectId(1);
+        let b = ObjectId(2);
+        let mut vote = vote_of(&[1, 2]);
+
+        // Nobody has accepted yet.
+        assert_eq!(vote.accepted_count(), 0);
+        assert_eq!(vote.total_count(), 2);
+        assert_eq!(vote.state_for(a), 3);
+        assert_eq!(vote.state_for(b), 3);
+        assert!(!vote.all_accepted());
+
+        // A accepts: 1/2, A is state 4, B still 3.
+        vote.record_accept(a);
+        assert_eq!(vote.accepted_count(), 1);
+        assert_eq!(vote.total_count(), 2);
+        assert_eq!(vote.state_for(a), 4);
+        assert_eq!(vote.state_for(b), 3);
+        assert!(!vote.all_accepted());
+
+        // A accepts again: idempotent, still 1/2.
+        vote.record_accept(a);
+        assert_eq!(vote.accepted_count(), 1);
+        assert!(!vote.all_accepted());
+
+        // B accepts: 2/2, both state 4, all accepted.
+        vote.record_accept(b);
+        assert_eq!(vote.accepted_count(), 2);
+        assert_eq!(vote.state_for(a), 4);
+        assert_eq!(vote.state_for(b), 4);
+        assert!(vote.all_accepted());
+    }
+
+    // A single-participant vote (party of one online / solo-through-server) is all-accepted on the
+    // first accept.
+    #[test]
+    fn content_finder_vote_single_participant() {
+        let a = ObjectId(1);
+        let mut vote = vote_of(&[1]);
+
+        assert!(!vote.all_accepted());
+        vote.record_accept(a);
+        assert!(vote.all_accepted());
+        assert_eq!(vote.accepted_count(), 1);
+        assert_eq!(vote.total_count(), 1);
     }
 }

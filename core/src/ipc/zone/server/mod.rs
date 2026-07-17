@@ -793,7 +793,25 @@ pub enum ServerZoneIpcData {
     UpdateInventorySlot(ItemInfo),
     EffectResult(EffectResult),
     ContentFinderCommencing {
-        unk1: [u8; 24],
+        /// ContentsFinderQueueState for the recipient (payload offset 0). 3 = the recipient has not
+        /// accepted yet, 4 = the recipient has accepted. Broadcast to every online party member on
+        /// each acceptance event, each carrying that recipient's own state.
+        state: u32,
+        /// Unknown (payload offset 4); always 1 per capture.
+        unk_4: u32,
+        /// The content ID being commenced (payload offset 8). Index into the ContentFinderCondition
+        /// Excel sheet.
+        content_id: u32,
+        /// Unknown (payload offset 12).
+        unk_12: u32,
+        /// Unknown / padding (payload offset 16-17); retail sends 0.
+        unk_16: u16,
+        /// How many online party members have accepted so far (payload offset 18).
+        accepted_count: u8,
+        /// How many online party members must accept in total (payload offset 19).
+        total_count: u8,
+        /// Unknown (payload offset 20-23).
+        unk_20_23: [u8; 4],
     },
     StatusEffectList3 {
         /// List of status effects.
@@ -1070,7 +1088,14 @@ pub enum ServerZoneIpcData {
         unk: [u8; 40],
     },
     UnkContentFinder {
-        unk: [u8; 16],
+        /// Attribution content id (payload offset 0). 0 in every observed cancel capture (no name
+        /// attribution).
+        content_id: u64,
+        /// LogMessage sheet id explaining the cancel (payload offset 8): 0x037A = the withdrawer,
+        /// 0x0373 = the other members, 0x037C = the timed-out member.
+        log_message_id: u32,
+        /// Unknown (payload offset 12).
+        unk_12: u32,
     },
     TrustInformation(TrustInformation),
     DutySupportInformation {
@@ -1948,6 +1973,50 @@ pub enum ServerZoneIpcData {
     },
 }
 
+/// Builds the pair of `(ContentFinderUpdate, ContentFinderFound)` packets that pop a duty on the
+/// ready popup. The wire layout of these two packets lives here, in one place, so that the solo
+/// `register_for_content` self-pop and the server-side party pop propagation stay byte-identical.
+///
+/// `settings_word` is the `DutyFinderSetting` "mode word" (see [`ServerZoneIpcData::ContentFinderUpdate`]),
+/// `classjob_id` is the class the queuer registered with (cosmetic), `content_ids` are the
+/// queued ContentFinderCondition ids (the client reads them as 5 x u32), and `total_members` is the
+/// number of queued members (party size; the client reads it as the Found count-region total at
+/// payload byte [39]).
+pub fn build_cf_pop(
+    settings_word: u64,
+    classjob_id: u8,
+    content_ids: [u16; 5],
+    total_members: u8,
+) -> (ServerZoneIpcData, ServerZoneIpcData) {
+    let update = ServerZoneIpcData::ContentFinderUpdate {
+        queue_state: 1,
+        classjob_id,
+        languages: 0,
+        unk_3_7: [0; 5],
+        settings: settings_word,
+        roulette_id: 0,
+        unk_17: 0,
+        unk_18: 1,
+        ready_flag: 1,
+        content_ids: content_ids.map(|id| id as u32),
+    };
+
+    let found = ServerZoneIpcData::ContentFinderFound {
+        queue_state: 3,
+        unk_1_7: [0; 7],
+        settings: settings_word,
+        in_progress_start_timestamp: 0,
+        unk_24: 1,
+        unk_25_27: [0; 3],
+        content_id: content_ids[0] as u32,
+        unk_32_35: 0,
+        unk_36_37: 0,
+        unk_38_39: (total_members as u16) << 8,
+    };
+
+    (update, found)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::common::test_opcodes;
@@ -2051,6 +2120,158 @@ mod tests {
         assert_eq!(body[12], 0); // Explorer bit (bit 32) clear
         assert_eq!(body[24], 1); // unk_24
         assert_eq!(&body[38..40], &[0x00, 0x01]); // unk_38_39 = 0x0100 LE
+    }
+
+    // Byte-exact layout guard for the reshaped `ContentFinderCommencing`. Broadcast to each online
+    // party member on every acceptance event; the reshape from a 24-byte blob into named fields must
+    // preserve the exact wire values (per-recipient state + X/Y counts). The vector below is the
+    // 2-client retail capture (Acc1_进本 line 19): recipient accepted (state 4), 1 of 2 ready, for
+    // ContentFinderCondition 0x030F.
+    #[test]
+    fn content_finder_commencing_byte_layout() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let data = ServerZoneIpcData::ContentFinderCommencing {
+            state: 4,
+            unk_4: 1,
+            content_id: 0x030F,
+            unk_12: 0,
+            unk_16: 0,
+            accepted_count: 1,
+            total_count: 2,
+            unk_20_23: [0; 4],
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        data.write_le(&mut cursor).unwrap();
+        let body = cursor.into_inner();
+
+        assert_eq!(body.len(), 24);
+        #[rustfmt::skip]
+        let expected: [u8; 24] = [
+            4, 0, 0, 0, // state = 4 (0-3)
+            1, 0, 0, 0, // unk_4 = 1 (4-7)
+            0x0F, 0x03, 0, 0, // content_id = 0x030F (8-11)
+            0, 0, 0, 0, // unk_12 (12-15)
+            0, 0, // unk_16 (16-17)
+            1, // accepted_count (18)
+            2, // total_count (19)
+            0, 0, 0, 0, // unk_20_23 (20-23)
+        ];
+        assert_eq!(body, expected);
+    }
+
+    // Byte-exact layout guard for the reshaped `UnkContentFinder`, sent to each participant on a
+    // Withdraw/Timeout cancel. The vector below is the retail capture (Acc1_出发但辞退 line 25): no
+    // attribution (content_id 0) and the generic "registration cancelled" LogMessage 0x0373.
+    #[test]
+    fn unk_content_finder_byte_layout() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let data = ServerZoneIpcData::UnkContentFinder {
+            content_id: 0,
+            log_message_id: 0x0373,
+            unk_12: 0,
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        data.write_le(&mut cursor).unwrap();
+        let body = cursor.into_inner();
+
+        assert_eq!(body.len(), 16);
+        #[rustfmt::skip]
+        let expected: [u8; 16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, // content_id = 0 (0-7)
+            0x73, 0x03, 0, 0, // log_message_id = 0x0373 (8-11)
+            0, 0, 0, 0, // unk_12 (12-15)
+        ];
+        assert_eq!(body, expected);
+    }
+
+    // `build_cf_pop` must produce the exact same field values the solo `register_for_content` path
+    // has always sent, so the two pop paths stay wire-identical.
+    #[test]
+    fn build_cf_pop_matches_register_for_content() {
+        use crate::ipc::zone::DutyFinderSetting;
+
+        let settings = DutyFinderSetting::UNRESTRICTED_PARTY.to_ready_mode_word();
+        let (update, found) = build_cf_pop(settings, 0x1F, [0x030F, 0, 0, 0, 0], 1);
+
+        match update {
+            ServerZoneIpcData::ContentFinderUpdate {
+                queue_state,
+                classjob_id,
+                languages,
+                unk_3_7,
+                settings: s,
+                roulette_id,
+                unk_17,
+                unk_18,
+                ready_flag,
+                content_ids,
+            } => {
+                assert_eq!(queue_state, 1);
+                assert_eq!(classjob_id, 0x1F);
+                assert_eq!(languages, 0);
+                assert_eq!(unk_3_7, [0; 5]);
+                assert_eq!(s, settings);
+                assert_eq!(roulette_id, 0);
+                assert_eq!(unk_17, 0);
+                assert_eq!(unk_18, 1);
+                assert_eq!(ready_flag, 1);
+                assert_eq!(content_ids, [0x030F, 0, 0, 0, 0]);
+            }
+            _ => panic!("build_cf_pop did not return a ContentFinderUpdate"),
+        }
+
+        match found {
+            ServerZoneIpcData::ContentFinderFound {
+                queue_state,
+                unk_1_7,
+                settings: s,
+                in_progress_start_timestamp,
+                unk_24,
+                unk_25_27,
+                content_id,
+                unk_32_35,
+                unk_36_37,
+                unk_38_39,
+            } => {
+                assert_eq!(queue_state, 3);
+                assert_eq!(unk_1_7, [0; 7]);
+                assert_eq!(s, settings);
+                assert_eq!(in_progress_start_timestamp, 0);
+                assert_eq!(unk_24, 1);
+                assert_eq!(unk_25_27, [0; 3]);
+                assert_eq!(content_id, 0x030F);
+                assert_eq!(unk_32_35, 0);
+                assert_eq!(unk_36_37, 0);
+                assert_eq!(unk_38_39, 0x0100);
+            }
+            _ => panic!("build_cf_pop did not return a ContentFinderFound"),
+        }
+    }
+
+    // Retail encodes the queued-member total at the Found packet's payload byte [39] (the u16
+    // `unk_38_39`, LE, = total << 8): 0x0200 for a 2-person party, 0x0100 for a solo pop.
+    #[test]
+    fn build_cf_pop_encodes_total_members() {
+        use crate::ipc::zone::DutyFinderSetting;
+
+        let settings = DutyFinderSetting::UNRESTRICTED_PARTY.to_ready_mode_word();
+
+        for (total_members, expected) in [(2u8, 0x0200u16), (1u8, 0x0100u16)] {
+            let (_update, found) =
+                build_cf_pop(settings, 0x1F, [0x030F, 0, 0, 0, 0], total_members);
+            match found {
+                ServerZoneIpcData::ContentFinderFound { unk_38_39, .. } => {
+                    assert_eq!(unk_38_39, expected);
+                }
+                _ => panic!("build_cf_pop did not return a ContentFinderFound"),
+            }
+        }
     }
 
     // The mode word forces the server-authored 0x20 "organized party / no-withdraw-penalty" bit

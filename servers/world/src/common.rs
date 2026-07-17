@@ -24,11 +24,11 @@ use kawari::{
         chat::{CWLinkshellMessage, ChatChannelType, PartyMessage, TellMessage},
         zone::{
             ActionRequest, ActorControlCategory, CWLSLeaveReason, CWLSPermissionRank,
-            ClientTrigger, Conditions, Config, CrossworldLinkshellInvite, InviteReply, InviteType,
-            OnlineStatus, PartyMemberEntry, PartyMemberPositions, PartyUpdateStatus,
-            ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc, SpawnObject, SpawnPlayer,
-            SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType, WaymarkPlacementMode,
-            WaymarkPosition, WaymarkPreset,
+            ClientTrigger, Conditions, Config, ContentFinderUserAction, CrossworldLinkshellInvite,
+            InviteReply, InviteType, OnlineStatus, PartyMemberEntry, PartyMemberPositions,
+            PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc, SpawnObject,
+            SpawnPlayer, SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType,
+            WaymarkPlacementMode, WaymarkPosition, WaymarkPreset,
         },
     },
 };
@@ -524,6 +524,13 @@ pub enum ToServer {
     ReadyCheckInitiated(Option<u64>, ObjectId, u64, u64, String),
     /// The client responded to an on-going ready check in their party.
     ReadyCheckResponse(Option<u64>, ObjectId, u64, u64, String, ReadyCheckReply),
+    /// A party member queued the party for content, so the server should pop the duty to every
+    /// online member and open a commence vote. Fields: (party_id hint, queuer actor id, content ids,
+    /// mode word, queuer class id). The handler re-derives the authoritative party from the actor.
+    ContentFinderRegister(u64, ObjectId, [u16; 5], u64, u8),
+    /// A party member accepted, withdrew from, or timed out on a popped duty. Fields: (party_id hint,
+    /// member actor id, action). The handler re-derives the authoritative party from the actor.
+    ContentFinderAction(u64, ObjectId, ContentFinderUserAction),
     /// Removes action cooldowns for this player.
     RemoveCooldowns(ObjectId),
     /// The client's zone connection wishes to inform its chat connection about any linkshells the player belongs to.
@@ -644,6 +651,8 @@ impl ToServer {
             Self::BroadcastActorControl(..) => "BroadcastActorControl",
             Self::ReadyCheckInitiated(..) => "ReadyCheckInitiated",
             Self::ReadyCheckResponse(..) => "ReadyCheckResponse",
+            Self::ContentFinderRegister(..) => "ContentFinderRegister",
+            Self::ContentFinderAction(..) => "ContentFinderAction",
             Self::RemoveCooldowns(..) => "RemoveCooldowns",
             Self::SetLinkshells(..) => "SetLinkshells",
             Self::CWLSMessageSent(..) => "CWLSMessageSent",
