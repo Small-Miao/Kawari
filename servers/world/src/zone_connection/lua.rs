@@ -8,8 +8,7 @@ use crate::{
 };
 use kawari::{
     common::{
-        ContainerType, DirectorEvent, ERR_INVENTORY_ADD_FAILED, HandlerId, InstanceContentType,
-        ObjectTypeId, ObjectTypeKind,
+        ContainerType, ERR_INVENTORY_ADD_FAILED, InstanceContentType, ObjectTypeId, ObjectTypeKind,
     },
     constants::{
         ADVENTURE_BITMASK_SIZE, AETHER_CURRENT_BITMASK_SIZE,
@@ -19,8 +18,8 @@ use kawari::{
         ORNAMENT_BITMASK_SIZE, TRIPLE_TRIAD_CARDS_BITMASK_SIZE,
     },
     ipc::zone::{
-        ActorControlCategory, ActorControlSelf, ClientTriggerCommand, DutyFinderSetting, ItemInfo,
-        ServerZoneIpcData, ServerZoneIpcSegment,
+        ActorControlCategory, ClientTriggerCommand, DutyFinderSetting, ItemInfo, ServerZoneIpcData,
+        ServerZoneIpcSegment,
     },
 };
 use physis::race::{Gender, Race, Tribe};
@@ -650,43 +649,14 @@ impl ZoneConnection {
                     self.content_settings = Some(DutyFinderSetting::empty());
                     self.register_for_content([*content_id, 0, 0, 0, 0]).await;
                 }
-                LuaTask::CommenceDuty { director_id } => {
-                    // Have the director commence the duty
-                    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(
-                        ActorControlSelf {
-                            category: ActorControlCategory::DirectorEvent {
-                                handler_id: HandlerId(*director_id),
-                                event: DirectorEvent::DutyCommence {
-                                    arg1: player.content_data.duration as u32,
-                                    arg2: 0,
-                                    arg3: 0,
-                                    arg4: 0,
-                                },
-                            },
-                        },
-                    ));
-                    self.send_ipc_self(ipc).await;
-
-                    // Signal to the global server to commence the duty as well, since they need to update the entrance circle.
+                LuaTask::CommenceDuty { director_id: _ } => {
+                    // Signal to the global server to commence the duty. The synchronized "Duty
+                    // Commenced" text + duty timer (and the entrance circle despawn) are broadcast
+                    // there once every party member has finished their entry cutscene, so they are no
+                    // longer sent per-player here.
                     self.handle
                         .send(ToServer::CommenceDuty(self.player_data.character.actor_id))
                         .await;
-
-                    // shit
-                    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(
-                        ActorControlSelf {
-                            category: ActorControlCategory::DirectorEvent {
-                                handler_id: HandlerId(*director_id),
-                                event: DirectorEvent::SetDutyTimeRemaining {
-                                    arg1: (player.content_data.duration - 1) as u32, // TODO: lol
-                                    arg2: 0,
-                                    arg3: 0,
-                                    arg4: 0,
-                                },
-                            },
-                        },
-                    ));
-                    self.send_ipc_self(ipc).await;
                 }
                 LuaTask::QuestSequence { id, sequence } => {
                     self.set_quest_sequence(*id, *sequence).await;

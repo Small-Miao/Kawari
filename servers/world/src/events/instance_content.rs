@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kawari::ipc::zone::{EventType, SceneFlags};
+use kawari::ipc::zone::{Condition, EventType, SceneFlags};
 
 use crate::{Event, EventHandler, ZoneConnection, lua::LuaPlayer};
 
@@ -66,5 +66,9 @@ impl EventHandler for InstanceContentEventHandler {
             player.commence_duty(event.id);
         }
         player.finish_event();
+    }
+
+    fn condition(&self) -> Condition {
+        Condition::OccupiedInCutSceneEvent
     }
 }

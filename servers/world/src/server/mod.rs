@@ -30,9 +30,9 @@ use crate::{
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
-            NUM_TARGET_SIGNS, get_party_id_from_actor_id, handle_party_messages,
-            send_party_positions, update_party_position, update_party_waymark,
-            update_party_waymarks,
+            ContentFinderVote, NUM_TARGET_SIGNS, broadcast_party_portraits,
+            get_party_id_from_actor_id, handle_party_messages, send_party_positions,
+            update_party_position, update_party_waymark, update_party_waymarks,
         },
         social::handle_social_messages,
         zone::{
@@ -44,15 +44,16 @@ use crate::{
 };
 use kawari::{
     common::{
-        CharacterMode, DEAD_DESPAWN_TIME, EventState, HandlerId, HandlerType, MAX_SPAWNED_ACTORS,
-        MAX_SPAWNED_OBJECTS, ObjectId, ObjectTypeId, ObjectTypeKind, Position, SLIDECAST_WINDOW,
-        SharedGroupTimelineState, determine_initial_pop_range, euler_to_direction, is_private_area,
+        CharacterMode, DEAD_DESPAWN_TIME, DirectorEvent, EventState, HandlerId, HandlerType,
+        MAX_SPAWNED_ACTORS, MAX_SPAWNED_OBJECTS, ObjectId, ObjectTypeId, ObjectTypeKind, Position,
+        SLIDECAST_WINDOW, SharedGroupTimelineState, determine_initial_pop_range,
+        euler_to_direction, is_private_area,
     },
     config::{FilesystemConfig, get_config},
     ipc::zone::{
-        ActorControlCategory, ClientTriggerCommand, Condition, Conditions, DamageType, EnmityList,
-        Hater, HaterList, PlayerEnmity, ServerZoneIpcData, ServerZoneIpcSegment, WarpType,
-        WaymarkPreset,
+        ActorControlCategory, ActorControlSelf, ClientTriggerCommand, Condition, Conditions,
+        ContentFinderUserAction, DamageType, EnmityList, Hater, HaterList, PlayerEnmity,
+        ServerZoneIpcData, ServerZoneIpcSegment, WarpType, WaymarkPreset, build_cf_pop,
     },
 };
 
@@ -146,6 +147,91 @@ fn sync_player_hated_by(
     }
 
     (assigned, removed)
+}
+
+/// Commences the duty for everyone in `instance` — the synchronized "Duty Commenced" text + duty
+/// timer, then dropping the entrance barrier (the entrance-circle EObj) — but only once every Player
+/// actor has commenced (finished their entry cutscene). Idempotent: the first success sets
+/// `duty_commenced`, so later calls — a further commence, or a member leaving mid-cutscene — never
+/// re-broadcast. Returns `true` on the transition (so the caller can fire the one-shot portrait
+/// broadcast). Call it after inserting into `commenced_actors` (on commence) and after removing a
+/// player actor (on leave/disconnect), so a not-yet-commenced leaver stops blocking the survivors.
+fn commence_duty_for_all(instance: &mut Instance, network: &mut NetworkState) -> bool {
+    if instance.duty_commenced || !instance.all_players_commenced() {
+        return false;
+    }
+
+    instance.duty_commenced = true;
+
+    // Broadcast the "Duty Commenced" text + duty timer to everyone in the instance, synchronized to
+    // this all-commenced gate instead of firing per-player as each entry cutscene ends. Mirrors the
+    // DutyCompleted broadcast idiom in director.rs.
+    let commence =
+        ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
+            category: ActorControlCategory::DirectorEvent {
+                handler_id: instance.content_director_id,
+                event: DirectorEvent::DutyCommence {
+                    arg1: instance.duty_duration_secs,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                },
+            },
+        }));
+    network.send_to_instance(
+        ObjectId::default(),
+        instance,
+        FromServer::PacketSegment(commence, ObjectId::default()),
+        DestinationNetwork::ZoneClients,
+    );
+
+    let remaining =
+        ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
+            category: ActorControlCategory::DirectorEvent {
+                handler_id: instance.content_director_id,
+                event: DirectorEvent::SetDutyTimeRemaining {
+                    arg1: instance.duty_duration_secs.saturating_sub(1),
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                },
+            },
+        }));
+    network.send_to_instance(
+        ObjectId::default(),
+        instance,
+        FromServer::PacketSegment(remaining, ObjectId::default()),
+        DestinationNetwork::ZoneClients,
+    );
+
+    // Then drop the entrance barrier (best-effort; the text/timer above have already fired).
+    let Some(entrance_actor_id) = instance.find_entrance_circle() else {
+        tracing::warn!("Failed to find entrance circle, it won't despawn!");
+        return true;
+    };
+
+    let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
+
+    // Update invisibility flags for next spawn.
+    if let Some(NetworkedActor::Object { object, .. }) = instance.find_actor_mut(entrance_actor_id)
+    {
+        object.event_state = state;
+        object.not_targetable = true;
+    }
+
+    // Make the entrance circle invisible for everyone in the instance.
+    let msg = FromServer::ActorControl(
+        entrance_actor_id,
+        ActorControlCategory::SetEventState { state },
+    );
+    network.send_in_range_instance(
+        entrance_actor_id,
+        instance,
+        msg,
+        DestinationNetwork::ZoneClients,
+    );
+
+    true
 }
 
 fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState) -> Vec<ObjectId> {
@@ -318,6 +404,15 @@ impl WorldServer {
 
         let id = HandlerId::new(director_type, content_id);
 
+        // Store the director id + duty time limit on the instance so the synchronized DutyCommence
+        // text/timer can be broadcast at the all-commenced gate, independent of `director` (which is
+        // None for unscripted content).
+        instance.content_director_id = id;
+        instance.duty_duration_secs = game_data
+            .find_content_time_limit(content_id)
+            .unwrap_or_default() as u32
+            * 60;
+
         // Setup Lua state for our director
         let lua = KawariLua::new();
 
@@ -450,6 +545,64 @@ fn set_player_minion(
         from_actor_id,
         ActorControlCategory::MinionSpawnControl { minion_id },
     );
+}
+
+/// Moves the given actors into the instanced content for `content_id` (creating or reusing the
+/// instance for `zone_id`), carrying each actor's combat state across so summoned pets re-spawn.
+///
+/// Keyed on `actor_ids` — NOT a party id — so it serves every entry path with one code path: a
+/// party commence vote, the solo ContentFinder fallback, and the Lua debug `JoinContent` task. The
+/// caller resolves `actor_ids` (all online party members, or the lone actor) and `zone_id` for the
+/// content before calling.
+///
+/// `game_data` is passed as the shared `Arc` and locked only inside this function. Callers must NOT
+/// already hold the `game_data` lock across this call — `parking_lot` mutexes are non-reentrant and
+/// would deadlock.
+fn move_actors_into_content(
+    data: &mut WorldServer,
+    network: &mut NetworkState,
+    game_data: &Arc<Mutex<GameData>>,
+    actor_ids: &[(ClientId, ObjectId)],
+    zone_id: u16,
+    content_id: u16,
+) {
+    // Carry each player's combat state (job gauge, cooldowns, summoned-pet flag) into the duty.
+    // Without this the destination instance gets a brand-new actor with default state, so a
+    // summoner's pet would fail to re-spawn while the client still shows it — desyncing the pet UI.
+    let mut carried_states = Vec::new();
+    for (_, actor_id) in actor_ids {
+        // inform the players in this zone that this actor left
+        if let Some(current_instance) = data.find_actor_instance_mut(*actor_id) {
+            let state = take_combat_state_and_despawn_pets(current_instance, network, *actor_id);
+            carried_states.push((*actor_id, state));
+            network.remove_actor(current_instance, *actor_id);
+        }
+    }
+
+    // then find or create a new instance with the zone id and content finder condition
+    let mut game_data = game_data.lock();
+    if let Some(target_instance) =
+        data.create_instance_for_content(zone_id, content_id, &mut game_data)
+    {
+        for (client_id, actor_id) in actor_ids {
+            target_instance.insert_empty_actor(*actor_id);
+
+            let carried = carried_states
+                .iter()
+                .find(|(id, _)| id == actor_id)
+                .and_then(|(_, state)| state.clone());
+            restore_carried_combat_state(target_instance, *actor_id, carried);
+
+            change_zone_warp_to_entrance(
+                network,
+                target_instance,
+                true, // TODO: this shouldn't be hardcoded
+                *client_id,
+            );
+        }
+    } else {
+        tracing::warn!("Failed to create a new instance for content?!");
+    }
 }
 
 fn set_character_mode(
@@ -3142,51 +3295,281 @@ pub async fn server_main_loop(
                     }
 
                     if let Some(zone_id) = zone_id {
-                        // Carry each player's combat state (job gauge, cooldowns, summoned-pet flag)
-                        // into the duty. Without this the destination instance gets a brand-new
-                        // actor with default state, so a summoner's pet would fail to re-spawn while
-                        // the client still shows it — desyncing the pet UI.
-                        let mut carried_states = Vec::new();
-                        for (_, actor_id) in &actor_ids {
-                            // inform the players in this zone that this actor left
-                            if let Some(current_instance) = data.find_actor_instance_mut(*actor_id)
-                            {
-                                let state = take_combat_state_and_despawn_pets(
-                                    current_instance,
-                                    &mut network,
-                                    *actor_id,
-                                );
-                                carried_states.push((*actor_id, state));
-                                network.remove_actor(current_instance, *actor_id);
-                            }
-                        }
-
-                        // then find or create a new instance with the zone id and content finder condition
-                        let mut game_data = game_data.lock();
-                        if let Some(target_instance) =
-                            data.create_instance_for_content(zone_id, content_id, &mut game_data)
-                        {
-                            for (client_id, actor_id) in &actor_ids {
-                                target_instance.insert_empty_actor(*actor_id);
-
-                                let carried = carried_states
-                                    .iter()
-                                    .find(|(id, _)| id == actor_id)
-                                    .and_then(|(_, state)| state.clone());
-                                restore_carried_combat_state(target_instance, *actor_id, carried);
-
-                                change_zone_warp_to_entrance(
-                                    &mut network,
-                                    target_instance,
-                                    true, // TODO: this shouldn't be hardcoded
-                                    *client_id,
-                                );
-                            }
-                        } else {
-                            tracing::warn!("Failed to create a new instance for content?!");
-                        }
+                        move_actors_into_content(
+                            &mut data,
+                            &mut network,
+                            &game_data,
+                            &actor_ids,
+                            zone_id,
+                            content_id,
+                        );
                     } else {
                         tracing::warn!("Failed to find zone id for content?!");
+                    }
+                }
+                ToServer::ContentFinderRegister(
+                    _party_id,
+                    from_actor,
+                    content_ids,
+                    settings_word,
+                    classjob_id,
+                ) => {
+                    let data = data.lock();
+                    let mut network = network.lock();
+
+                    // Re-derive the authoritative party from the actor rather than trusting the
+                    // passed hint (it can lag); no party => solo, which pops itself inline.
+                    let Some(party_id) = get_party_id_from_actor_id(&network, from_actor) else {
+                        continue;
+                    };
+                    let Some(party) = network.parties.get_mut(&party_id) else {
+                        continue;
+                    };
+
+                    // One active vote per party (mirror ReadyCheck's single-host guard).
+                    if party.content_finder_vote.is_some() {
+                        continue;
+                    }
+
+                    // "All members" = every online member at pop time = the vote's total.
+                    let participants: Vec<ObjectId> = party
+                        .members
+                        .iter()
+                        .filter(|m| m.is_valid() && m.is_online())
+                        .map(|m| m.actor_id)
+                        .collect();
+
+                    party.content_finder_vote = Some(ContentFinderVote {
+                        content_id: content_ids[0],
+                        settings_word,
+                        classjob_id,
+                        participants: participants.clone(),
+                        accepted: Vec::new(),
+                    });
+
+                    // Pop the duty to every participant. Per-member `send_to_by_actor_id` so the
+                    // source actor equals the recipient (matches the solo `send_ipc_self` path).
+                    let total_members = participants.len() as u8;
+                    for actor in participants {
+                        // Each member gets THEIR OWN current job — the client gates the ready button
+                        // when the ContentFinderUpdate's job doesn't match the member's job, so
+                        // sending the leader's job to everyone blocks members on a different job.
+                        // Kawari has no queue wait, so current job == queued job. Fall back to the
+                        // queuer's job if the actor isn't found.
+                        let member_classjob = data
+                            .instances
+                            .iter()
+                            .find_map(|instance| match instance.actors.get(&actor) {
+                                Some(NetworkedActor::Player { spawn, .. }) => {
+                                    Some(spawn.common.class_job)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(classjob_id);
+                        let (update, found) = build_cf_pop(
+                            settings_word,
+                            member_classjob,
+                            content_ids,
+                            total_members,
+                        );
+                        network.send_to_by_actor_id(
+                            actor,
+                            FromServer::PacketSegment(ServerZoneIpcSegment::new(update), actor),
+                            DestinationNetwork::ZoneClients,
+                        );
+                        network.send_to_by_actor_id(
+                            actor,
+                            FromServer::PacketSegment(ServerZoneIpcSegment::new(found), actor),
+                            DestinationNetwork::ZoneClients,
+                        );
+                    }
+                }
+                ToServer::ContentFinderAction(_party_id, from_actor, action) => {
+                    match action {
+                        ContentFinderUserAction::Accepted => {
+                            let mut data = data.lock();
+                            let mut network = network.lock();
+
+                            // Re-derive the authoritative party (see ContentFinderRegister).
+                            let Some(party_id) = get_party_id_from_actor_id(&network, from_actor)
+                            else {
+                                continue;
+                            };
+
+                            // Record the accept and snapshot everything the broadcast needs, then
+                            // drop the party borrow before sending (send_to_by_actor_id also needs
+                            // `&mut network`).
+                            let broadcasts: Vec<(ObjectId, ServerZoneIpcData)>;
+                            let content_id: u16;
+                            let done: bool;
+                            {
+                                let Some(party) = network.parties.get_mut(&party_id) else {
+                                    continue;
+                                };
+                                // Stale accept (vote already cleared) => ignore.
+                                let Some(vote) = party.content_finder_vote.as_mut() else {
+                                    continue;
+                                };
+                                // Accept from a non-participant => ignore.
+                                if !vote.participants.contains(&from_actor) {
+                                    continue;
+                                }
+
+                                vote.record_accept(from_actor); // idempotent
+
+                                let accepted_count = vote.accepted_count();
+                                let total_count = vote.total_count();
+                                content_id = vote.content_id;
+                                done = vote.all_accepted();
+
+                                // "X of Y ready" status for each participant, each carrying their
+                                // own state (3 = not yet accepted, 4 = accepted).
+                                broadcasts = vote
+                                    .participants
+                                    .iter()
+                                    .map(|actor| {
+                                        (
+                                            *actor,
+                                            ServerZoneIpcData::ContentFinderCommencing {
+                                                state: vote.state_for(*actor),
+                                                unk_4: 1,
+                                                content_id: content_id as u32,
+                                                queued_tanks: 0,
+                                                needed_tanks: 0,
+                                                queued_healers: 0,
+                                                needed_healers: 0,
+                                                queued_dps: 0,
+                                                needed_dps: 0,
+                                                accepted_count,
+                                                total_count,
+                                                unk_20_23: [0; 4],
+                                            },
+                                        )
+                                    })
+                                    .collect();
+                            }
+
+                            for (actor, ipc) in broadcasts {
+                                network.send_to_by_actor_id(
+                                    actor,
+                                    FromServer::PacketSegment(
+                                        ServerZoneIpcSegment::new(ipc),
+                                        actor,
+                                    ),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+
+                            if !done {
+                                continue;
+                            }
+
+                            // Everyone accepted: clear the vote and gather the actor_ids to move
+                            // from the vote's participants (each member's live zone client id).
+                            let actor_ids: Vec<(ClientId, ObjectId)>;
+                            {
+                                let Some(party) = network.parties.get_mut(&party_id) else {
+                                    continue;
+                                };
+                                let participants = party
+                                    .content_finder_vote
+                                    .take()
+                                    .map(|vote| vote.participants)
+                                    .unwrap_or_default();
+                                actor_ids = participants
+                                    .iter()
+                                    .filter_map(|actor| {
+                                        party
+                                            .get_member_by_actor_id(*actor)
+                                            .filter(|m| m.is_valid() && m.is_online())
+                                            .map(|m| (m.zone_client_id, m.actor_id))
+                                    })
+                                    .collect();
+                            }
+
+                            let zone_id;
+                            {
+                                let mut game_data = game_data.lock();
+                                zone_id = game_data.find_zone_for_content(content_id);
+                            }
+                            let Some(zone_id) = zone_id else {
+                                tracing::warn!("Failed to find zone id for content?!");
+                                continue;
+                            };
+
+                            // Tear down the ready popup on every member before we zone them in. The commence popup
+                            // only closes when the server drives the client's ContentsFinder status to 0 (opcode
+                            // 0x0149 / UnkContentFinder); zoning alone does NOT dismiss it. Without this the window is
+                            // stranded — frozen countdown, a permanently-shown "X/Y", and a crash on duty exit. This
+                            // mirrors the solo ContentFinderAction path's silent 0x0149 (log_message_id 0 = no chat line).
+                            for (_client_id, actor_id) in &actor_ids {
+                                let ipc = ServerZoneIpcData::UnkContentFinder {
+                                    content_id: 0,
+                                    log_message_id: 0,
+                                    unk_12: 0,
+                                };
+                                network.send_to_by_actor_id(
+                                    *actor_id,
+                                    FromServer::PacketSegment(
+                                        ServerZoneIpcSegment::new(ipc),
+                                        *actor_id,
+                                    ),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+
+                            move_actors_into_content(
+                                &mut data,
+                                &mut network,
+                                &game_data,
+                                &actor_ids,
+                                zone_id,
+                                content_id,
+                            );
+                        }
+                        ContentFinderUserAction::Withdrawn | ContentFinderUserAction::Timeout => {
+                            let mut network = network.lock();
+
+                            let Some(party_id) = get_party_id_from_actor_id(&network, from_actor)
+                            else {
+                                continue;
+                            };
+                            let Some(party) = network.parties.get_mut(&party_id) else {
+                                continue;
+                            };
+                            // Take the vote so its participants snapshot survives the broadcast.
+                            let Some(vote) = party.content_finder_vote.take() else {
+                                continue;
+                            };
+
+                            // The canceller gets a specific LogMessage; everyone else the generic
+                            // "registration cancelled" line.
+                            let self_msg = if action == ContentFinderUserAction::Withdrawn {
+                                0x037A
+                            } else {
+                                0x037C
+                            };
+                            for actor in &vote.participants {
+                                let log_message_id = if *actor == from_actor {
+                                    self_msg
+                                } else {
+                                    0x0373
+                                };
+                                let ipc = ServerZoneIpcData::UnkContentFinder {
+                                    content_id: 0,
+                                    log_message_id,
+                                    unk_12: 0,
+                                };
+                                network.send_to_by_actor_id(
+                                    *actor,
+                                    FromServer::PacketSegment(
+                                        ServerZoneIpcSegment::new(ipc),
+                                        *actor,
+                                    ),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+                        }
                     }
                 }
                 ToServer::LeaveContent(
@@ -3212,6 +3595,10 @@ pub async fn server_main_loop(
                             from_actor_id,
                         );
                         network.remove_actor(current_instance, from_actor_id);
+
+                        // A member leaving mid-entry shrinks the Player set, so re-check the commence
+                        // gate — otherwise the survivors would softlock waiting on the departed member.
+                        commence_duty_for_all(current_instance, &mut network);
                     }
 
                     // create a new instance if necessary
@@ -3223,6 +3610,15 @@ pub async fn server_main_loop(
 
                     instance.insert_empty_actor(from_actor_id);
                     restore_carried_combat_state(instance, from_actor_id, carried_combat_state);
+
+                    // The leave re-inits the client's zone (its actor table is wiped), so clear the
+                    // server-side spawn mirror too — otherwise a stale `has_spawned` entry (e.g. a
+                    // co-duty party member) makes the proximity loop treat them as still-spawned and
+                    // never re-send SpawnPlayer. Mirrors do_change_zone (server/zone.rs:1208-1210).
+                    if let Some(state) = network.get_state_mut(from_client_id) {
+                        state.actor_allocator.clear();
+                        state.object_allocator.clear();
+                    }
 
                     let director_vars = instance
                         .director
@@ -3262,43 +3658,24 @@ pub async fn server_main_loop(
                 }
                 ToServer::CommenceDuty(from_actor_id) => {
                     let mut data = data.lock();
-                    let entrance_actor_id;
-                    let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
+                    let mut network = network.lock();
 
-                    {
+                    // Record this member's commence, then commence the duty only once every player in
+                    // the instance has commenced (solo fires immediately; a party holds until the last
+                    // entry cutscene finishes). On the transition, also broadcast the party portrait
+                    // wall so it appears synchronized with the "Duty Commenced" text/timer.
+                    let fired = {
                         let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                             continue;
                         };
-
-                        // Find the spawned entrance circle
-                        let Some(actor_id) = instance.find_entrance_circle() else {
-                            tracing::warn!("Failed to find entrance circle, it won't despawn!");
-                            continue;
-                        };
-                        entrance_actor_id = actor_id;
-
-                        // Update invisibility flags for next spawn
-                        if let Some(NetworkedActor::Object { object, .. }) =
-                            instance.find_actor_mut(entrance_actor_id)
-                        {
-                            object.event_state = state;
-                            object.not_targetable = true;
-                        }
+                        instance.commenced_actors.insert(from_actor_id);
+                        commence_duty_for_all(instance, &mut network)
+                    };
+                    if fired
+                        && let Some(party_id) = get_party_id_from_actor_id(&network, from_actor_id)
+                    {
+                        broadcast_party_portraits(&mut network, &data, party_id, from_actor_id);
                     }
-
-                    // Make the entrance circle invisible.
-                    let msg = FromServer::ActorControl(
-                        entrance_actor_id,
-                        ActorControlCategory::SetEventState { state },
-                    );
-
-                    let mut network = network.lock();
-                    network.send_in_range(
-                        entrance_actor_id,
-                        &data,
-                        msg,
-                        DestinationNetwork::ZoneClients,
-                    );
                 }
                 ToServer::Kill(_from_id, from_actor_id) => {
                     let mut data = data.lock();
@@ -3546,6 +3923,10 @@ pub async fn server_main_loop(
                     // remove them from the instance
                     if let Some(current_instance) = data.find_actor_instance_mut(actor_id) {
                         network.remove_actor(current_instance, actor_id);
+
+                        // A disconnect mid-entry shrinks the Player set, so re-check the commence gate
+                        // — otherwise the survivors would softlock waiting on the departed member.
+                        commence_duty_for_all(current_instance, &mut network);
                     }
                 }
 

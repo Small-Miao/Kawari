@@ -2898,9 +2898,28 @@ async fn process_packet(
                         connection.content_settings = Some(queue_duties.settings);
                         lua_player.content_data.settings =
                             DutyOption::from_content_flags(queue_duties.settings).bits(); // TODO: is this the best place to update this?
-                        connection
-                            .register_for_content(queue_duties.content_ids)
-                            .await;
+
+                        if connection.party_id != 0 {
+                            // Party queue: the server pops the duty to every online member and runs
+                            // the commence vote. `queued_content` is retained only as a safety
+                            // fallback; the pop is driven entirely server-side.
+                            connection.queued_content = Some(queue_duties.content_ids[0]);
+                            connection
+                                .handle
+                                .send(ToServer::ContentFinderRegister(
+                                    connection.party_id,
+                                    connection.player_data.character.actor_id,
+                                    queue_duties.content_ids,
+                                    queue_duties.settings.to_ready_mode_word(),
+                                    connection.player_data.classjob.current_class as u8,
+                                ))
+                                .await;
+                        } else {
+                            // Solo queue: unchanged self-pop path.
+                            connection
+                                .register_for_content(queue_duties.content_ids)
+                                .await;
+                        }
                     }
                     ClientZoneIpcData::QueueRoulette { roulette_id, .. } => {
                         let Some(roulette) = Roulette::from_repr(*roulette_id) else {
@@ -2922,33 +2941,58 @@ async fn process_packet(
                         connection.register_for_content([duty_id, 0, 0, 0, 0]).await;
                     }
                     ClientZoneIpcData::ContentFinderAction { action, .. } => {
-                        if *action == ContentFinderUserAction::Accepted {
-                            // commencing
-                            {
+                        if connection.party_id != 0 {
+                            // Party queue: forward to the server, which aggregates the commence vote
+                            // across all online members and only zones everyone in once every member
+                            // has accepted (cancelling for the whole party on withdraw/timeout).
+                            connection
+                                .handle
+                                .send(ToServer::ContentFinderAction(
+                                    connection.party_id,
+                                    connection.player_data.character.actor_id,
+                                    *action,
+                                ))
+                                .await;
+                        } else {
+                            // Solo queue: a one-participant vote, so the first Accept commences
+                            // immediately (unchanged behavior, now building the reshaped structs).
+                            if *action == ContentFinderUserAction::Accepted {
+                                let content_id = connection.queued_content.unwrap();
+
+                                // commencing
                                 let ipc = ServerZoneIpcSegment::new(
                                     ServerZoneIpcData::ContentFinderCommencing {
-                                        unk1: [
-                                            4, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                            1, 1, 0, 0, 0, 0,
-                                        ],
+                                        state: 4,
+                                        unk_4: 1,
+                                        content_id: content_id as u32,
+                                        queued_tanks: 0,
+                                        needed_tanks: 0,
+                                        queued_healers: 0,
+                                        needed_healers: 0,
+                                        queued_dps: 0,
+                                        needed_dps: 0,
+                                        accepted_count: 1,
+                                        total_count: 1,
+                                        unk_20_23: [0; 4],
                                     },
                                 );
                                 connection.send_ipc_self(ipc).await;
+
+                                connection.join_content(content_id).await;
                             }
 
-                            connection
-                                .join_content(connection.queued_content.unwrap())
-                                .await;
+                            // If we don't send this, the content finder gets stuck.
+                            // TODO: this may be screwing up the in-duty menu, probably need to fill it with data!
+                            let ipc =
+                                ServerZoneIpcSegment::new(ServerZoneIpcData::UnkContentFinder {
+                                    content_id: 0,
+                                    log_message_id: 0,
+                                    unk_12: 0,
+                                });
+                            connection.send_ipc_self(ipc).await;
+
+                            connection.queued_content = None;
                         }
-
-                        // If we don't send this, the content finder gets stuck.
-                        // TODO: this may be screwing up the in-duty menu, probably need to fill it with data!
-                        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UnkContentFinder {
-                            unk: [0; 16],
-                        });
-                        connection.send_ipc_self(ipc).await;
-
-                        connection.queued_content = None;
                     }
                     ClientZoneIpcData::EquipGearset {
                         gearset_index,
