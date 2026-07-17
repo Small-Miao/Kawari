@@ -14,9 +14,9 @@ use crate::{
 use kawari::{
     common::{CharacterMode, ObjectId, ObjectTypeId, Position},
     ipc::zone::{
-        ActorControlCategory, PartyMemberEntry, PartyMemberPositions, PartyUpdateStatus,
-        ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment, WaymarkPlacementMode,
-        WaymarkPosition, WaymarkPositions, WaymarkPreset,
+        ActorControlCategory, PartyMemberEntry, PartyMemberPositions, PartyPortraitEntry,
+        PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment,
+        WaymarkPlacementMode, WaymarkPosition, WaymarkPositions, WaymarkPreset,
     },
 };
 
@@ -111,6 +111,7 @@ pub struct Party {
     pub waymarks: HashMap<i32, WaymarkPositions>, // TODO: If/when we ever get unique instance identifiers, use those instead of the zone id.
     pub readycheck_host: Option<ObjectId>, // Only one ready check can be undertaken at a time.
     pub content_finder_vote: Option<ContentFinderVote>, // None = no ContentFinder pop active for this party.
+    pub portraits: HashMap<ObjectId, PartyPortraitEntry>, // Duty portrait entries pushed by members, keyed by actor id. In-memory only (not persisted); rebroadcast to the instance on each push.
 }
 
 impl Party {
@@ -242,6 +243,71 @@ pub fn get_party_id_from_actor_id(network: &NetworkState, actor_id: ObjectId) ->
         }
     }
     None
+}
+
+/// Rebroadcasts every stored party portrait to the online members of the pusher's instance.
+///
+/// Called after a member pushes their own entry ([`ToServer::UpdatePartyPortrait`]). Each recipient
+/// receives one single-slot 634 (`PartyMemberPortrait`) per stored entry, with `slot_index` = the
+/// member's 0-based index in `party.members` (identical ordering to `build_party_list`/the PartyList,
+/// so every recipient sees a consistent wall). Late-loading members self-heal: every push re-runs
+/// this broadcast.
+///
+/// Uses [`NetworkState::send_to_by_actor_id`] (not the proximity-filtered range send) so out-of-view
+/// party members still receive the wall.
+fn broadcast_party_portraits(
+    network: &mut NetworkState,
+    data: &WorldServer,
+    party_id: u64,
+    pusher_actor_id: ObjectId,
+) {
+    // Locate the pusher's instance so we only broadcast within it (in-instance filter).
+    let Some(instance) = data.find_actor_instance(pusher_actor_id) else {
+        return;
+    };
+
+    // Snapshot the payload and recipients out from under the immutable `party` borrow, then send.
+    let (slotted, recipients) = {
+        let Some(party) = network.parties.get(&party_id) else {
+            return;
+        };
+
+        // payload: every member (by party.members index) that has a stored portrait entry.
+        let mut slotted: Vec<(u8, PartyPortraitEntry)> = Vec::new();
+        for (index, member) in party.members.iter().enumerate() {
+            if let Some(entry) = party.portraits.get(&member.actor_id) {
+                slotted.push((index as u8, entry.clone()));
+            }
+        }
+
+        // recipients: members that are online, have their own stored entry (=> their
+        // AddonBannerParty exists), and are in the pusher's instance.
+        let mut recipients: Vec<ObjectId> = Vec::new();
+        for member in &party.members {
+            if member.is_online()
+                && party.portraits.contains_key(&member.actor_id)
+                && instance.actors.contains_key(&member.actor_id)
+            {
+                recipients.push(member.actor_id);
+            }
+        }
+
+        (slotted, recipients)
+    };
+
+    for recipient in recipients {
+        for (slot_index, entry) in &slotted {
+            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PartyMemberPortrait {
+                slot_index: *slot_index,
+                entry: entry.clone(),
+            });
+            network.send_to_by_actor_id(
+                recipient,
+                FromServer::PacketSegment(ipc, recipient),
+                DestinationNetwork::ZoneClients,
+            );
+        }
+    }
 }
 
 /// Cancels any active ContentFinder commence vote for `party_id`, telling every participant in the
@@ -780,6 +846,7 @@ pub fn handle_party_messages(
                     .chat_client_id;
 
                 party.remove_member(*execute_actor_id);
+                party.portraits.remove(execute_actor_id);
                 member_count = party.get_member_count();
                 leader_id = party.leader_id;
 
@@ -910,6 +977,7 @@ pub fn handle_party_messages(
                 return true;
             };
             party.remove_member(member.actor_id);
+            party.portraits.remove(&member.actor_id);
 
             // Construct the party list we're sending back to the clients in this party.
             let party_list = build_party_list(party, &data);
@@ -1498,6 +1566,23 @@ pub fn handle_party_messages(
                 );
             }
 
+            true
+        }
+        ToServer::UpdatePartyPortrait(pusher_actor_id, entry) => {
+            // Lock order data->network, mirroring PartyMemberChangedAreas.
+            let data = data.lock();
+            let mut network = network.lock();
+
+            let Some(party_id) = get_party_id_from_actor_id(&network, *pusher_actor_id) else {
+                return true;
+            };
+
+            let Some(party) = network.parties.get_mut(&party_id) else {
+                return true;
+            };
+            party.portraits.insert(*pusher_actor_id, entry.clone());
+
+            broadcast_party_portraits(&mut network, &data, party_id, *pusher_actor_id);
             true
         }
         _ => false,

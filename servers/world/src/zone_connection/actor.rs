@@ -366,15 +366,28 @@ impl ZoneConnection {
         }
     }
 
-    /// Sends this player their own job portrait in slot 0 via the single-slot 634 packet.
-    /// First-cut party-portrait dispatch (Phase 4): own portrait only, own connection context.
+    /// Pushes this player's own duty portrait entry.
+    ///
+    /// In a party, the entry is sent to the server ([`ToServer::UpdatePartyPortrait`]), which stores
+    /// it on the party and rebroadcasts the full portrait wall to the pusher's instance — each member
+    /// landing at its own `party.members` slot. Solo / partyless, it keeps the direct single-slot 634
+    /// in slot 0 on this connection.
     pub async fn send_own_party_portrait(&mut self) {
         let entry = self.build_own_portrait_entry();
-        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PartyMemberPortrait {
-            slot_index: 0,
-            entry,
-        });
-        self.send_ipc_self(ipc).await;
+        if self.is_in_party() {
+            self.handle
+                .send(ToServer::UpdatePartyPortrait(
+                    self.player_data.character.actor_id,
+                    entry,
+                ))
+                .await;
+        } else {
+            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PartyMemberPortrait {
+                slot_index: 0,
+                entry,
+            });
+            self.send_ipc_self(ipc).await;
+        }
     }
 
     pub async fn send_conditions(&mut self) {

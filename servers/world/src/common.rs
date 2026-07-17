@@ -26,8 +26,8 @@ use kawari::{
             ActionRequest, ActorControlCategory, CWLSLeaveReason, CWLSPermissionRank,
             ClientTrigger, Conditions, Config, ContentFinderUserAction, CrossworldLinkshellInvite,
             InviteReply, InviteType, OnlineStatus, PartyMemberEntry, PartyMemberPositions,
-            PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc, SpawnObject,
-            SpawnPlayer, SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType,
+            PartyPortraitEntry, PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc,
+            SpawnObject, SpawnPlayer, SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType,
             WaymarkPlacementMode, WaymarkPosition, WaymarkPreset,
         },
     },
@@ -584,6 +584,10 @@ pub enum ToServer {
     /// The examined player has built its examine IPC and wants it delivered to
     /// the original requester. Fields: (requester_actor_id, target_actor_id, ipc)
     ExamineResponse(ObjectId, ObjectId, ServerZoneIpcSegment),
+    /// A party member pushed their own duty portrait entry. The server stores it on the party
+    /// (keyed by actor id) and rebroadcasts every stored entry to the pusher's instance so the full
+    /// party portrait wall renders for everyone. Fields: (pusher_actor_id, entry)
+    UpdatePartyPortrait(ObjectId, PartyPortraitEntry),
 }
 
 impl ToServer {
@@ -673,6 +677,7 @@ impl ToServer {
             Self::VariantVote(..) => "VariantVote",
             Self::ExamineRequest(..) => "ExamineRequest",
             Self::ExamineResponse(..) => "ExamineResponse",
+            Self::UpdatePartyPortrait(..) => "UpdatePartyPortrait",
         }
     }
 }
