@@ -802,13 +802,20 @@ pub enum ServerZoneIpcData {
         /// The content ID being commenced (payload offset 8). Index into the ContentFinderCondition
         /// Excel sheet.
         content_id: u32,
-        /// Unknown (payload offset 12).
-        unk_12: u32,
-        /// Unknown / padding (payload offset 16-17); retail sends 0.
-        unk_16: u16,
-        /// How many online party members have accepted so far (payload offset 18).
+        /// Role queue counts, payload offset 12-19, sharing DOWN_CFDutyInfo's layout. Retail sends
+        /// the role slots (12-17) as 0 in the commence/ready packet (unrestricted parties aren't
+        /// role-gated); only queued_players/total_needed_players carry the ready-popup fraction.
+        queued_tanks: u8,
+        needed_tanks: u8,
+        queued_healers: u8,
+        needed_healers: u8,
+        queued_dps: u8,
+        needed_dps: u8,
+        /// Ready-popup numerator = QueuedPlayers, rises as members accept (payload offset 18,
+        /// = DOWN_CFDutyInfo QueuedPlayers).
         accepted_count: u8,
-        /// How many online party members must accept in total (payload offset 19).
+        /// Ready-popup denominator = TotalNeededPlayers, the party size (payload offset 19,
+        /// = DOWN_CFDutyInfo TotalNeededPlayers).
         total_count: u8,
         /// Unknown (payload offset 20-23).
         unk_20_23: [u8; 4],
@@ -2136,8 +2143,12 @@ mod tests {
             state: 4,
             unk_4: 1,
             content_id: 0x030F,
-            unk_12: 0,
-            unk_16: 0,
+            queued_tanks: 0,
+            needed_tanks: 0,
+            queued_healers: 0,
+            needed_healers: 0,
+            queued_dps: 0,
+            needed_dps: 0,
             accepted_count: 1,
             total_count: 2,
             unk_20_23: [0; 4],
