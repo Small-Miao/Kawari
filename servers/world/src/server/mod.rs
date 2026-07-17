@@ -3219,6 +3219,7 @@ pub async fn server_main_loop(
                     settings_word,
                     classjob_id,
                 ) => {
+                    let data = data.lock();
                     let mut network = network.lock();
 
                     // Re-derive the authoritative party from the actor rather than trusting the
@@ -3253,27 +3254,37 @@ pub async fn server_main_loop(
 
                     // Pop the duty to every participant. Per-member `send_to_by_actor_id` so the
                     // source actor equals the recipient (matches the solo `send_ipc_self` path).
-                    let (update, found) = build_cf_pop(
-                        settings_word,
-                        classjob_id,
-                        content_ids,
-                        participants.len() as u8,
-                    );
+                    let total_members = participants.len() as u8;
                     for actor in participants {
+                        // Each member gets THEIR OWN current job — the client gates the ready button
+                        // when the ContentFinderUpdate's job doesn't match the member's job, so
+                        // sending the leader's job to everyone blocks members on a different job.
+                        // Kawari has no queue wait, so current job == queued job. Fall back to the
+                        // queuer's job if the actor isn't found.
+                        let member_classjob = data
+                            .instances
+                            .iter()
+                            .find_map(|instance| match instance.actors.get(&actor) {
+                                Some(NetworkedActor::Player { spawn, .. }) => {
+                                    Some(spawn.common.class_job)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(classjob_id);
+                        let (update, found) = build_cf_pop(
+                            settings_word,
+                            member_classjob,
+                            content_ids,
+                            total_members,
+                        );
                         network.send_to_by_actor_id(
                             actor,
-                            FromServer::PacketSegment(
-                                ServerZoneIpcSegment::new(update.clone()),
-                                actor,
-                            ),
+                            FromServer::PacketSegment(ServerZoneIpcSegment::new(update), actor),
                             DestinationNetwork::ZoneClients,
                         );
                         network.send_to_by_actor_id(
                             actor,
-                            FromServer::PacketSegment(
-                                ServerZoneIpcSegment::new(found.clone()),
-                                actor,
-                            ),
+                            FromServer::PacketSegment(ServerZoneIpcSegment::new(found), actor),
                             DestinationNetwork::ZoneClients,
                         );
                     }
