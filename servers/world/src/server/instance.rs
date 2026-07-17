@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
@@ -18,7 +18,7 @@ use crate::{
     zone_connection::{BaseParameters, TeleportQuery},
 };
 use kawari::{
-    common::{DistanceRange, ENTRANCE_CIRCLE_IDS, ObjectId, Position, Timeline},
+    common::{DistanceRange, ENTRANCE_CIRCLE_IDS, HandlerId, ObjectId, Position, Timeline},
     config::{FilesystemConfig, get_config},
     ipc::zone::{
         ActionRequest, ActorControlCategory, Conditions, ServerZoneIpcSegment, SpawnNpc,
@@ -224,6 +224,16 @@ pub struct Instance {
     /// Director for this instance.
     pub director: Option<DirectorData>,
     pub enemy_ai_disabled: bool,
+    /// Actors that have finished entry (sent CommenceDuty). The entrance barrier drops once this
+    /// covers every Player actor in the instance.
+    pub commenced_actors: HashSet<ObjectId>,
+    /// Set once the entrance barrier has been dropped, so it is never re-broadcast.
+    pub duty_commenced: bool,
+    /// Director handler id for this content (stored independently of `director`, which is None for
+    /// unscripted content), used to broadcast the synchronized DutyCommence text/timer at the gate.
+    pub content_director_id: HandlerId,
+    /// Duty time limit in seconds (0 for non-content instances); the DutyCommence timer value.
+    pub duty_duration_secs: u32,
 }
 
 impl Instance {
@@ -278,6 +288,14 @@ impl Instance {
 
     pub fn find_actor(&self, id: ObjectId) -> Option<&NetworkedActor> {
         self.actors.get(&id)
+    }
+
+    /// Returns true when every Player actor in this instance has commenced (finished entry).
+    pub fn all_players_commenced(&self) -> bool {
+        self.actors
+            .iter()
+            .filter(|(_, actor)| matches!(actor, NetworkedActor::Player { .. }))
+            .all(|(id, _)| self.commenced_actors.contains(id))
     }
 
     pub fn find_actor_mut(&mut self, id: ObjectId) -> Option<&mut NetworkedActor> {
@@ -541,5 +559,31 @@ impl Instance {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_players_commenced_gates_on_every_player() {
+        let mut instance = Instance::default();
+
+        // Two players and one non-player (object) actor.
+        instance.insert_empty_actor(ObjectId(1));
+        instance.insert_empty_actor(ObjectId(2));
+        instance.insert_object(ObjectId(3), SpawnObject::default(), "test".to_string());
+
+        // No one has commenced yet.
+        assert!(!instance.all_players_commenced());
+
+        // Only the first player commenced.
+        instance.commenced_actors.insert(ObjectId(1));
+        assert!(!instance.all_players_commenced());
+
+        // Both players commenced; the non-player object is ignored.
+        instance.commenced_actors.insert(ObjectId(2));
+        assert!(instance.all_players_commenced());
     }
 }

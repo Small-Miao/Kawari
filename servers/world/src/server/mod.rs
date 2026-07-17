@@ -30,9 +30,9 @@ use crate::{
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
-            ContentFinderVote, NUM_TARGET_SIGNS, get_party_id_from_actor_id, handle_party_messages,
-            send_party_positions, update_party_position, update_party_waymark,
-            update_party_waymarks,
+            ContentFinderVote, NUM_TARGET_SIGNS, broadcast_party_portraits,
+            get_party_id_from_actor_id, handle_party_messages, send_party_positions,
+            update_party_position, update_party_waymark, update_party_waymarks,
         },
         social::handle_social_messages,
         zone::{
@@ -44,15 +44,16 @@ use crate::{
 };
 use kawari::{
     common::{
-        CharacterMode, DEAD_DESPAWN_TIME, EventState, HandlerId, HandlerType, MAX_SPAWNED_ACTORS,
-        MAX_SPAWNED_OBJECTS, ObjectId, ObjectTypeId, ObjectTypeKind, Position, SLIDECAST_WINDOW,
-        SharedGroupTimelineState, determine_initial_pop_range, euler_to_direction, is_private_area,
+        CharacterMode, DEAD_DESPAWN_TIME, DirectorEvent, EventState, HandlerId, HandlerType,
+        MAX_SPAWNED_ACTORS, MAX_SPAWNED_OBJECTS, ObjectId, ObjectTypeId, ObjectTypeKind, Position,
+        SLIDECAST_WINDOW, SharedGroupTimelineState, determine_initial_pop_range,
+        euler_to_direction, is_private_area,
     },
     config::{FilesystemConfig, get_config},
     ipc::zone::{
-        ActorControlCategory, ClientTriggerCommand, Condition, Conditions, ContentFinderUserAction,
-        DamageType, EnmityList, Hater, HaterList, PlayerEnmity, ServerZoneIpcData,
-        ServerZoneIpcSegment, WarpType, WaymarkPreset, build_cf_pop,
+        ActorControlCategory, ActorControlSelf, ClientTriggerCommand, Condition, Conditions,
+        ContentFinderUserAction, DamageType, EnmityList, Hater, HaterList, PlayerEnmity,
+        ServerZoneIpcData, ServerZoneIpcSegment, WarpType, WaymarkPreset, build_cf_pop,
     },
 };
 
@@ -146,6 +147,91 @@ fn sync_player_hated_by(
     }
 
     (assigned, removed)
+}
+
+/// Commences the duty for everyone in `instance` — the synchronized "Duty Commenced" text + duty
+/// timer, then dropping the entrance barrier (the entrance-circle EObj) — but only once every Player
+/// actor has commenced (finished their entry cutscene). Idempotent: the first success sets
+/// `duty_commenced`, so later calls — a further commence, or a member leaving mid-cutscene — never
+/// re-broadcast. Returns `true` on the transition (so the caller can fire the one-shot portrait
+/// broadcast). Call it after inserting into `commenced_actors` (on commence) and after removing a
+/// player actor (on leave/disconnect), so a not-yet-commenced leaver stops blocking the survivors.
+fn commence_duty_for_all(instance: &mut Instance, network: &mut NetworkState) -> bool {
+    if instance.duty_commenced || !instance.all_players_commenced() {
+        return false;
+    }
+
+    instance.duty_commenced = true;
+
+    // Broadcast the "Duty Commenced" text + duty timer to everyone in the instance, synchronized to
+    // this all-commenced gate instead of firing per-player as each entry cutscene ends. Mirrors the
+    // DutyCompleted broadcast idiom in director.rs.
+    let commence =
+        ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
+            category: ActorControlCategory::DirectorEvent {
+                handler_id: instance.content_director_id,
+                event: DirectorEvent::DutyCommence {
+                    arg1: instance.duty_duration_secs,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                },
+            },
+        }));
+    network.send_to_instance(
+        ObjectId::default(),
+        instance,
+        FromServer::PacketSegment(commence, ObjectId::default()),
+        DestinationNetwork::ZoneClients,
+    );
+
+    let remaining =
+        ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
+            category: ActorControlCategory::DirectorEvent {
+                handler_id: instance.content_director_id,
+                event: DirectorEvent::SetDutyTimeRemaining {
+                    arg1: instance.duty_duration_secs.saturating_sub(1),
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                },
+            },
+        }));
+    network.send_to_instance(
+        ObjectId::default(),
+        instance,
+        FromServer::PacketSegment(remaining, ObjectId::default()),
+        DestinationNetwork::ZoneClients,
+    );
+
+    // Then drop the entrance barrier (best-effort; the text/timer above have already fired).
+    let Some(entrance_actor_id) = instance.find_entrance_circle() else {
+        tracing::warn!("Failed to find entrance circle, it won't despawn!");
+        return true;
+    };
+
+    let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
+
+    // Update invisibility flags for next spawn.
+    if let Some(NetworkedActor::Object { object, .. }) = instance.find_actor_mut(entrance_actor_id)
+    {
+        object.event_state = state;
+        object.not_targetable = true;
+    }
+
+    // Make the entrance circle invisible for everyone in the instance.
+    let msg = FromServer::ActorControl(
+        entrance_actor_id,
+        ActorControlCategory::SetEventState { state },
+    );
+    network.send_in_range_instance(
+        entrance_actor_id,
+        instance,
+        msg,
+        DestinationNetwork::ZoneClients,
+    );
+
+    true
 }
 
 fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState) -> Vec<ObjectId> {
@@ -317,6 +403,15 @@ impl WorldServer {
             .unwrap();
 
         let id = HandlerId::new(director_type, content_id);
+
+        // Store the director id + duty time limit on the instance so the synchronized DutyCommence
+        // text/timer can be broadcast at the all-commenced gate, independent of `director` (which is
+        // None for unscripted content).
+        instance.content_director_id = id;
+        instance.duty_duration_secs = game_data
+            .find_content_time_limit(content_id)
+            .unwrap_or_default() as u32
+            * 60;
 
         // Setup Lua state for our director
         let lua = KawariLua::new();
@@ -3500,6 +3595,10 @@ pub async fn server_main_loop(
                             from_actor_id,
                         );
                         network.remove_actor(current_instance, from_actor_id);
+
+                        // A member leaving mid-entry shrinks the Player set, so re-check the commence
+                        // gate — otherwise the survivors would softlock waiting on the departed member.
+                        commence_duty_for_all(current_instance, &mut network);
                     }
 
                     // create a new instance if necessary
@@ -3559,43 +3658,24 @@ pub async fn server_main_loop(
                 }
                 ToServer::CommenceDuty(from_actor_id) => {
                     let mut data = data.lock();
-                    let entrance_actor_id;
-                    let state = EventState::OFF | EventState::UNK2 | EventState::UNK3;
+                    let mut network = network.lock();
 
-                    {
+                    // Record this member's commence, then commence the duty only once every player in
+                    // the instance has commenced (solo fires immediately; a party holds until the last
+                    // entry cutscene finishes). On the transition, also broadcast the party portrait
+                    // wall so it appears synchronized with the "Duty Commenced" text/timer.
+                    let fired = {
                         let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                             continue;
                         };
-
-                        // Find the spawned entrance circle
-                        let Some(actor_id) = instance.find_entrance_circle() else {
-                            tracing::warn!("Failed to find entrance circle, it won't despawn!");
-                            continue;
-                        };
-                        entrance_actor_id = actor_id;
-
-                        // Update invisibility flags for next spawn
-                        if let Some(NetworkedActor::Object { object, .. }) =
-                            instance.find_actor_mut(entrance_actor_id)
-                        {
-                            object.event_state = state;
-                            object.not_targetable = true;
-                        }
+                        instance.commenced_actors.insert(from_actor_id);
+                        commence_duty_for_all(instance, &mut network)
+                    };
+                    if fired
+                        && let Some(party_id) = get_party_id_from_actor_id(&network, from_actor_id)
+                    {
+                        broadcast_party_portraits(&mut network, &data, party_id, from_actor_id);
                     }
-
-                    // Make the entrance circle invisible.
-                    let msg = FromServer::ActorControl(
-                        entrance_actor_id,
-                        ActorControlCategory::SetEventState { state },
-                    );
-
-                    let mut network = network.lock();
-                    network.send_in_range(
-                        entrance_actor_id,
-                        &data,
-                        msg,
-                        DestinationNetwork::ZoneClients,
-                    );
                 }
                 ToServer::Kill(_from_id, from_actor_id) => {
                     let mut data = data.lock();
@@ -3843,6 +3923,10 @@ pub async fn server_main_loop(
                     // remove them from the instance
                     if let Some(current_instance) = data.find_actor_instance_mut(actor_id) {
                         network.remove_actor(current_instance, actor_id);
+
+                        // A disconnect mid-entry shrinks the Player set, so re-check the commence gate
+                        // — otherwise the survivors would softlock waiting on the departed member.
+                        commence_duty_for_all(current_instance, &mut network);
                     }
                 }
 

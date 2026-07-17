@@ -255,7 +255,7 @@ pub fn get_party_id_from_actor_id(network: &NetworkState, actor_id: ObjectId) ->
 ///
 /// Uses [`NetworkState::send_to_by_actor_id`] (not the proximity-filtered range send) so out-of-view
 /// party members still receive the wall.
-fn broadcast_party_portraits(
+pub(crate) fn broadcast_party_portraits(
     network: &mut NetworkState,
     data: &WorldServer,
     party_id: u64,
