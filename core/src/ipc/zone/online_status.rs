@@ -115,6 +115,28 @@ pub enum OnlineStatus {
     Online = 47,
 }
 
+impl OnlineStatus {
+    /// The status to stamp on the world-actor **nametag** channel.
+    ///
+    /// `Online` is a *list-only* status on retail: it lives in the friend/social 64-bit
+    /// mask but is never placed on the world actor, whose nametag value stays at an
+    /// `Icon == 0` status. `get_actual_online_status` returns `Online` for a plain-online
+    /// player, and `Online`'s sheet Icon is 61505, so the client would draw an icon on the
+    /// nameplate. Collapse it to `Offline` (Icon 0 -> no nametag icon), matching a retail
+    /// capture where switching to plain online sends `SetStatusIcon = 0`.
+    ///
+    /// Every other status (`NewAdventurer`/`AwayFromKeyboard`/`Busy`/`RolePlaying`/GM/
+    /// `ViewingCutscene`/...) is a legitimate nametag icon and passes through unchanged.
+    /// The other list-only statuses (`InDuty`, `AnotherWorld`) are never added to the
+    /// nametag channel's mask, so they are intentionally not handled here.
+    pub fn for_nametag(self) -> OnlineStatus {
+        match self {
+            OnlineStatus::Online => OnlineStatus::Offline,
+            other => other,
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 impl diesel::serialize::ToSql<diesel::sql_types::Integer, diesel::sqlite::Sqlite> for OnlineStatus {
     fn to_sql<'b>(
@@ -221,5 +243,22 @@ mod tests {
             OnlineStatusMask::from(mask).mask(),
             vec![OnlineStatus::Online]
         );
+    }
+
+    #[test]
+    fn nametag_collapses_plain_online() {
+        // `Online` is list-only: it must not produce a nametag icon (retail sends 0).
+        assert_eq!(OnlineStatus::Online.for_nametag(), OnlineStatus::Offline);
+        // Legitimate nametag statuses pass through unchanged.
+        assert_eq!(
+            OnlineStatus::NewAdventurer.for_nametag(),
+            OnlineStatus::NewAdventurer
+        );
+        assert_eq!(
+            OnlineStatus::AwayFromKeyboard.for_nametag(),
+            OnlineStatus::AwayFromKeyboard
+        );
+        assert_eq!(OnlineStatus::Busy.for_nametag(), OnlineStatus::Busy);
+        assert_eq!(OnlineStatus::Offline.for_nametag(), OnlineStatus::Offline);
     }
 }

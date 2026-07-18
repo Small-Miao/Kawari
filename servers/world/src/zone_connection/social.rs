@@ -394,6 +394,16 @@ impl ZoneConnection {
         OnlineStatus::Offline
     }
 
+    /// The online status to stamp on this player's **nametag** (world-actor) channel.
+    ///
+    /// Wraps [`Self::get_actual_online_status`] and collapses the list-only `Online`
+    /// status to `Offline` (see [`OnlineStatus::for_nametag`]) so a plain-online player
+    /// shows no nameplate icon, matching retail. Use this at the nametag/world-actor sites
+    /// (spawn, `SetStatusIcon`), NOT for the friend/social list mask which keeps `Online`.
+    pub fn nametag_online_status(&self) -> OnlineStatus {
+        self.get_actual_online_status().for_nametag()
+    }
+
     /// Updates the online status not just on yourself but also informing other players.
     pub async fn update_online_status(&mut self) {
         // TODO: re-review this now that OnlineStatusMask can be calculated independently from any ZoneConnection
@@ -406,7 +416,7 @@ impl ZoneConnection {
         self.handle
             .send(ToServer::SetOnlineStatus(
                 self.player_data.character.actor_id,
-                self.get_actual_online_status(),
+                self.nametag_online_status(),
             ))
             .await;
     }

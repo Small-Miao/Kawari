@@ -166,7 +166,7 @@ impl ZoneConnection {
             current_world_id: config.world.world_id,
             home_world_id: config.world.world_id,
             gm_rank: self.player_data.character.gm_rank,
-            online_status: self.get_actual_online_status(),
+            online_status: self.nametag_online_status(),
             common: common.clone(),
             title_id: self.player_data.volatile.title as u16,
             // The player is always standing (PoseType::Idle) right after (re)spawn, so seed the
