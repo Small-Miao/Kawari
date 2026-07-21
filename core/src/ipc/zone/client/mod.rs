@@ -3,7 +3,9 @@ use bstr::BString;
 use kawari_core_macro::opcode_data;
 
 mod action_request;
-pub use crate::ipc::zone::client::action_request::{ActionRequest, ActionType};
+pub use crate::ipc::zone::client::action_request::{
+    ActionRequest, ActionRequestGroundTargeted, ActionType,
+};
 
 mod send_chat_message;
 pub use send_chat_message::SendChatMessage;
@@ -129,6 +131,7 @@ pub enum ClientZoneIpcData {
         landset_index: i32,
     },
     ActionRequest(ActionRequest),
+    ActionRequestGroundTargeted(ActionRequestGroundTargeted),
     PingSync {
         timestamp: u32,
         /// Sapphire calls it this, but it never seems to have the player's actor id or any values resembling ids of any sort in it?

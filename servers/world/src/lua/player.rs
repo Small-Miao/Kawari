@@ -6,7 +6,10 @@ use parking_lot::Mutex;
 use crate::{
     GameData, PlayerData, RemakeMode, StatusEffects,
     inventory::{CrystalKind, CurrencyKind},
-    server::combat_state::{PlayerCombatState, SummonerAttunement, SummonerDemiPhase},
+    server::{
+        combat_state::{PlayerCombatState, SummonerAttunement, SummonerDemiPhase},
+        jobs::whm,
+    },
     zone_connection::BaseParameters,
 };
 use kawari::{
@@ -1014,6 +1017,33 @@ impl UserData for LuaPlayer {
         });
         methods.add_method("bard_radiant_encore_coda", |_, this, _: ()| {
             Ok(this.combat_state.bard.radiant_encore_coda)
+        });
+        methods.add_method("blm_element_stance", |_, this, _: ()| {
+            Ok(this.combat_state.blm.element_stance)
+        });
+        methods.add_method("blm_umbral_hearts", |_, this, _: ()| {
+            Ok(this.combat_state.blm.umbral_hearts)
+        });
+        methods.add_method("blm_polyglot_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.blm.polyglot_stacks)
+        });
+        methods.add_method("blm_paradox_active", |_, this, _: ()| {
+            Ok(this.combat_state.blm.paradox_active)
+        });
+        methods.add_method("blm_astral_soul_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.blm.astral_soul_stacks)
+        });
+        methods.add_method("whm_lily_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.whm.lily_stacks)
+        });
+        methods.add_method("whm_blood_lily_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.whm.blood_lily_stacks)
+        });
+        methods.add_method("whm_glare_iv_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.whm.glare_iv_stacks)
+        });
+        methods.add_method("whm_divine_caress_ready", |_, this, _: ()| {
+            Ok(this.status_effects.get(whm::STATUS_DIVINE_CARESS_READY).is_some())
         });
         methods.add_method_mut("start_talk_event", |_, this, _: ()| {
             this.start_talk_event();

@@ -54,6 +54,31 @@ pub struct ActionRequest {
     pub padding_prob: u32,
 }
 
+/// The ground-targeted variant of [`ActionRequest`], sent for actions placed on the ground
+/// (e.g. BLM Ley Lines / Retrace). Instead of a target it carries the cursor position.
+/// Layout confirmed against a CN 7.51 retail capture (24 bytes):
+/// `F50D0000 00 01 0300 FFF8FFF8 <x y z>` for Ley Lines (action 3573).
+#[binrw]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ActionRequestGroundTargeted {
+    /// Index into the Action Excel sheet.
+    pub action_id: u32,
+    pub unk1: u8, // what?
+    /// What kind of action is requested.
+    pub action_type: ActionType,
+    /// Will show up again in the resulting `ActionResult`.
+    pub sequence: u16,
+    #[br(map = read_quantized_rotation)]
+    #[bw(map = write_quantized_rotation)]
+    pub rotation1: f32,
+    #[br(map = read_quantized_rotation)]
+    #[bw(map = write_quantized_rotation)]
+    pub rotation2: f32,
+    /// Where on the ground the action is being placed. The CN 7.51 client fills this with
+    /// the player's own position for self-centered ground actions like Ley Lines.
+    pub position: crate::common::Position,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs::read, io::Cursor, path::PathBuf};

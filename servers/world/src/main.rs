@@ -2594,6 +2594,16 @@ async fn process_packet(
                             ))
                             .await;
                     }
+                    ClientZoneIpcData::ActionRequestGroundTargeted(request) => {
+                        connection
+                            .handle
+                            .send(ToServer::ActionRequestGroundTargeted(
+                                connection.id,
+                                connection.player_data.character.actor_id,
+                                request.clone(),
+                            ))
+                            .await;
+                    }
                     ClientZoneIpcData::DyeInformation(dye_item) => {
                         tracing::info!("Client is preparing to dye an item: {dye_item:#?}");
                         connection.dyeing_information = Some(dye_item.clone());

@@ -1884,6 +1884,12 @@ impl GameData {
         DamageElement::from_repr(row.Aspect).unwrap() // Should never fail under normal circumstances
     }
 
+    /// Returns the raw `Aspect` column of this action (1 = fire, 2 = ice, 5 = lightning,
+    /// 7 = unaspected). Used by BLM elemental-stance logic, which keys off the raw value.
+    pub fn get_action_aspect(&mut self, id: u32) -> u8 {
+        self.action_sheet.row(id).map(|row| row.Aspect).unwrap_or(0)
+    }
+
     /// Returns the id of the action this action comboes with.
     pub fn get_combo_action(&mut self, id: u32) -> u16 {
         let row = self.action_sheet.row(id).unwrap();

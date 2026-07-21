@@ -106,6 +106,8 @@ pub enum QueuedTaskData {
         request: ActionRequest,
         /// Currently means if it has a cast bar.
         interruptible: bool,
+        /// Set for ground-targeted actions (e.g. Ley Lines): where the action lands.
+        ground_position: Option<kawari::common::Position>,
     },
     CastEnemyAction {
         request: ActionRequest,

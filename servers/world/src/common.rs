@@ -23,11 +23,12 @@ use kawari::{
     ipc::{
         chat::{CWLinkshellMessage, ChatChannelType, PartyMessage, TellMessage},
         zone::{
-            ActionRequest, ActorControlCategory, CWLSLeaveReason, CWLSPermissionRank,
-            ClientTrigger, Conditions, Config, ContentFinderUserAction, CrossworldLinkshellInvite,
-            InviteReply, InviteType, OnlineStatus, PartyMemberEntry, PartyMemberPositions,
-            PartyPortraitEntry, PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc,
-            SpawnObject, SpawnPlayer, SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType,
+            ActionRequest, ActionRequestGroundTargeted, ActorControlCategory, CWLSLeaveReason,
+            CWLSPermissionRank, ClientTrigger, Conditions, Config, ContentFinderUserAction,
+            CrossworldLinkshellInvite, InviteReply, InviteType, OnlineStatus, PartyMemberEntry,
+            PartyMemberPositions, PartyPortraitEntry, PartyUpdateStatus, ReadyCheckReply,
+            ServerZoneIpcSegment, SpawnNpc, SpawnObject, SpawnPlayer, SpawnTreasure, StrategyBoard,
+            StrategyBoardUpdate, WarpType,
             WaymarkPlacementMode, WaymarkPosition, WaymarkPreset,
         },
     },
@@ -397,6 +398,8 @@ pub enum ToServer {
     FatalError(std::io::Error),
     /// Request to perform an action
     ActionRequest(ClientId, ObjectId, ActionRequest),
+    /// Request to perform a ground-targeted action (e.g. Ley Lines)
+    ActionRequestGroundTargeted(ClientId, ObjectId, ActionRequestGroundTargeted),
     /// We want to update our own equip display flags.
     Config(ClientId, ObjectId, Config),
     /// Tell the server what models IDs we have equipped.
@@ -604,6 +607,7 @@ impl ToServer {
             Self::Disconnected(..) => "Disconnected",
             Self::FatalError(..) => "FatalError",
             Self::ActionRequest(..) => "ActionRequest",
+            Self::ActionRequestGroundTargeted(..) => "ActionRequestGroundTargeted",
             Self::Config(..) => "Config",
             Self::Equip(..) => "Equip",
             Self::GainEffect(..) => "GainEffect",

@@ -26,7 +26,7 @@ use crate::{
         },
         effect::{handle_effect_messages, remove_effect, send_effects_list},
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{bard, summoner},
+        jobs::{bard, blm, summoner},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -330,6 +330,37 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             }
 
             if result.status_timer_refreshed {
+                refreshed.push(actor_id);
+            }
+        }
+
+        if blm::is_black_mage(class_job) {
+            let result = blm::refresh_blm_runtime_state_on_actor(actor_id, actor);
+            let level = actor
+                .common_spawn()
+                .expect("blm runtime actor has common spawn")
+                .level;
+            if result.changed
+                && let NetworkedActor::Player { combat_state, .. } = actor
+            {
+                let gauge_data = blm::build_blm_gauge_data(combat_state, level);
+                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
+                    classjob_id: blm::gauge_class_job_id(),
+                    data: gauge_data,
+                });
+                network.send_to_by_actor_id(
+                    actor_id,
+                    FromServer::PacketSegment(ipc, actor_id),
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+
+            // The Ley Lines circle expired this tick: despawn its VFX object.
+            if let Some(object_id) = result.despawn_object_id {
+                network.remove_actor(instance, object_id);
+            }
+
+            if result.status_changed {
                 refreshed.push(actor_id);
             }
         }
@@ -865,7 +896,14 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
             };
             hp_delta += (max_hp as f32 * frac).ceil() as i64;
         }
-        if is_player && cur_mp < max_mp {
+        // Astral Fire halts natural MP recovery entirely ("魔力不会自然恢复").
+        let blm_no_mp_regen = match actor {
+            NetworkedActor::Player { combat_state, .. } => {
+                blm::is_black_mage(common.class_job) && combat_state.blm.in_astral_fire()
+            }
+            _ => false,
+        };
+        if is_player && cur_mp < max_mp && !blm_no_mp_regen {
             mp_delta += (max_mp as f32 * MP_REGEN).ceil() as i64;
         }
 
@@ -1726,7 +1764,11 @@ pub async fn server_main_loop(
 
                     for (instance_index, task) in &tasks_to_execute {
                         match &task.data {
-                            QueuedTaskData::CastAction { request, .. } => {
+                            QueuedTaskData::CastAction {
+                                request,
+                                ground_position,
+                                ..
+                            } => {
                                 execute_action(
                                     network.clone(),
                                     data.clone(),
@@ -1735,6 +1777,7 @@ pub async fn server_main_loop(
                                     task.from_id,
                                     task.from_actor_id,
                                     request.clone(),
+                                    *ground_position,
                                 );
                             }
                             QueuedTaskData::CastEnemyAction { request, .. } => {

@@ -349,6 +349,31 @@ impl UserData for EffectsBuilder {
                 Ok(())
             },
         );
+        // HoT on the action's target (e.g. WHM Regen on a party member).
+        methods.add_method_mut(
+            "gain_hot_target",
+            |_, this, (effect_id, param, duration, potency): (u16, u16, f32, u16)| {
+                this.effects.push(ActionEffect {
+                    kind: EffectKind::GainEffect {
+                        unk1: 0,
+                        unk2: 0,
+                        unk3: 0,
+                        effect_id,
+                        duration,
+                        param,
+                    },
+                });
+                this.tick_actions.push(TickAction {
+                    effect_id,
+                    param,
+                    duration,
+                    potency,
+                    kind: TickKind::Heal,
+                    on_self: false,
+                });
+                Ok(())
+            },
+        );
         // MP refresh on the caster (e.g. Lucid Dreaming): applies the status AND registers a fixed
         // per-tick MP restore resolved server-side every 3 seconds.
         methods.add_method_mut(

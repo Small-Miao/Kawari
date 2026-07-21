@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::jobs::bard::BardState;
+use super::jobs::{bard::BardState, blm::BlmState, whm::WhmState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SummonerAttunement {
@@ -172,6 +172,8 @@ pub struct PlayerCombatState {
     pub cooldowns: Vec<Option<CooldownState>>,
     pub summoner: SummonerState,
     pub bard: BardState,
+    pub blm: BlmState,
+    pub whm: WhmState,
     /// Whether the player currently has aggro (something hates them). Tracked so the server only
     /// sends a battle-state toggle (weapon drawn + combat music) when it actually changes.
     pub in_combat: bool,
