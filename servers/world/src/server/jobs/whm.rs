@@ -53,16 +53,23 @@ const ACTION_CURE_II: u32 = 135;
 const ACTION_PRESENCE_OF_MIND: u32 = 136;
 pub(crate) const ACTION_HOLY: u32 = 139;
 const ACTION_ASYLUM: u32 = 3569;
+#[allow(dead_code)]
 const ACTION_TETRAGRAMMATON: u32 = 3570;
 const ACTION_ASSIZE: u32 = 3571;
 const ACTION_STONE_IV: u32 = 7431;
+#[allow(dead_code)]
 const ACTION_THIN_AIR: u32 = 7430;
+#[allow(dead_code)]
 const ACTION_DIVINE_BENISON: u32 = 7432;
 const ACTION_PLENARY_INDULGENCE: u32 = 7433;
-const ACTION_BENEDICTION: u32 = 140;
+pub(crate) const ACTION_BENEDICTION: u32 = 140;
+#[allow(dead_code)]
 const ACTION_REPOSE: u32 = 16560;
+#[allow(dead_code)]
 const ACTION_AETHERIAL_SHIFT: u32 = 37008;
+#[allow(dead_code)]
 const ACTION_ESUNA: u32 = 7568;
+#[allow(dead_code)]
 const ACTION_RESCUE: u32 = 7571;
 const ACTION_AFFLATUS_SOLACE: u32 = 16531;
 const ACTION_DIA: u32 = 16532;
@@ -80,18 +87,22 @@ pub(crate) const ACTION_DIVINE_CARESS: u32 = 37011;
 // ==================== Status IDs (CN 7.51 Status sheet) ====================
 
 /// 眩晕: Holy/Holy III stun (4s).
+#[allow(dead_code)]
 pub(crate) const STATUS_STUN: u16 = 2;
 /// 救疗效果提高 (Freecure): next Cure II costs no MP (15s).
 pub(crate) const STATUS_FREECURE: u16 = 155;
 /// 神速咏唱: Presence of Mind haste (cast/recast -20%, 15s).
 pub(crate) const STATUS_PRESENCE_OF_MIND: u16 = 157;
 /// 医济: Medica II regen.
+#[allow(dead_code)]
 pub(crate) const STATUS_MEDICA_II: u16 = 150;
 /// 医养: Medica III regen.
+#[allow(dead_code)]
 pub(crate) const STATUS_MEDICA_III: u16 = 3880;
 /// 无中生有: Thin Air, next action costs no MP (12s).
 pub(crate) const STATUS_THIN_AIR: u16 = 1217;
 /// 神祝祷: Divine Benison barrier (500 cure potency absorb, 15s).
+#[allow(dead_code)]
 pub(crate) const STATUS_DIVINE_BENISON: u16 = 1218;
 /// 告解: Plenary Indulgence (10% mitigation + bonus heal proc, 10s).
 pub(crate) const STATUS_CONFESSION: u16 = 1219;
@@ -437,7 +448,10 @@ pub(crate) fn update_whm_state_after_action(
         ACTION_ASSIZE => {
             // Restore 5% of max MP.
             let common = &mut spawn.common;
-            let restore = common.max_resource_points / (100 / ASSIZE_MP_RESTORE_PERCENT);
+            let restore = common
+                .max_resource_points
+                .saturating_mul(ASSIZE_MP_RESTORE_PERCENT as u16)
+                / 100;
             common.resource_points = common
                 .resource_points
                 .saturating_add(restore)

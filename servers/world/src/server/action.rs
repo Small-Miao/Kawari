@@ -1522,9 +1522,9 @@ pub fn execute_action(
                             .unwrap_or_default();
                         let outgoing_multiplier =
                             whm::outgoing_heal_multiplier(instance.find_actor(from_actor_id));
-                        {
+                        let healed = {
                             let network_guard = network.lock();
-                            let healed = whm::fan_out_aoe_heal(
+                            whm::fan_out_aoe_heal(
                                 &network_guard,
                                 instance,
                                 from_actor_id,
@@ -1533,11 +1533,11 @@ pub fn execute_action(
                                 radius,
                                 base_amount,
                                 outgoing_multiplier,
-                            );
-                            for member_id in healed {
-                                if member_id != resolved_request.target.object_id {
-                                    update_actor_hp_mp(network.clone(), instance, member_id);
-                                }
+                            )
+                        };
+                        for member_id in healed {
+                            if member_id != resolved_request.target.object_id {
+                                update_actor_hp_mp(network.clone(), instance, member_id);
                             }
                         }
                     }
@@ -1550,9 +1550,9 @@ pub fn execute_action(
                         .find_actor(from_actor_id)
                         .map(|actor| actor.position().0)
                         .unwrap_or_default();
-                    {
+                    let buffed = {
                         let network_guard = network.lock();
-                        let buffed = whm::fan_out_party_status(
+                        whm::fan_out_party_status(
                             &network_guard,
                             instance,
                             from_actor_id,
@@ -1561,10 +1561,10 @@ pub fn execute_action(
                             status_id,
                             param,
                             duration,
-                        );
-                        for member_id in buffed {
-                            send_dirty_status_effects(network.clone(), instance, member_id);
-                        }
+                        )
+                    };
+                    for member_id in buffed {
+                        send_dirty_status_effects(network.clone(), instance, member_id);
                     }
                 }
 
@@ -1573,19 +1573,19 @@ pub fn execute_action(
                         .find_actor(from_actor_id)
                         .map(|actor| actor.position().0)
                         .unwrap_or_default();
-                    {
+                    let buffed = {
                         let network_guard = network.lock();
-                        let buffed = whm::fan_out_divine_caress(
+                        whm::fan_out_divine_caress(
                             &network_guard,
                             instance,
                             from_actor_id,
                             center,
                             radius,
                             &lua_player.base_parameters,
-                        );
-                        for member_id in buffed {
-                            send_dirty_status_effects(network.clone(), instance, member_id);
-                        }
+                        )
+                    };
+                    for member_id in buffed {
+                        send_dirty_status_effects(network.clone(), instance, member_id);
                     }
                 }
 
@@ -2534,6 +2534,7 @@ pub fn execute_enemy_action(
                 } else {
                     (0.0, 0.0)
                 };
+            let whm_multiplier = whm::whm_mitigation_multiplier(Some(&*actor));
 
             // Apply ±5% variance and the target's defense mitigation to each hit.
             for effect in &mut effects_builder.effects {
@@ -2554,9 +2555,12 @@ pub fn execute_enemy_action(
                         source_has_addle,
                         *damage_type,
                     );
-                    *amount =
-                        ((*amount as f64) * variance * outgoing_multiplier * (1.0 - mitigation))
-                            .floor() as u32;
+                    *amount = ((*amount as f64)
+                        * variance
+                        * outgoing_multiplier
+                        * (1.0 - mitigation)
+                        * whm_multiplier)
+                        .floor() as u32;
                 }
             }
 
@@ -2565,6 +2569,17 @@ pub fn execute_enemy_action(
                     actor.apply_damage(amount as u32);
                 }
             }
+        }
+
+        // Liturgy of the Bell trigger: the WHM target took damage.
+        if whm::is_white_mage(
+            instance
+                .find_actor(request.target.object_id)
+                .map(|actor| actor.get_common_spawn().class_job)
+                .unwrap_or_default(),
+        ) {
+            let network_guard = network.lock();
+            whm::on_whm_took_damage(&network_guard, instance, request.target.object_id);
         }
 
         update_actor_hp_mp(network.clone(), instance, request.target.object_id);

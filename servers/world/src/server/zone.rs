@@ -1341,6 +1341,14 @@ pub fn handle_zone_messages(
                     crate::server::jobs::blm::gauge_class_job_id(),
                     build_blm_gauge_data(&combat_state, player_spawn.common.level),
                 ))
+            } else if crate::server::jobs::whm::is_white_mage(player_spawn.common.class_job) {
+                Some((
+                    crate::server::jobs::whm::gauge_class_job_id(),
+                    crate::server::jobs::whm::build_whm_gauge_data(
+                        &combat_state,
+                        player_spawn.common.level,
+                    ),
+                ))
             } else {
                 None
             };

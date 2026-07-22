@@ -26,7 +26,7 @@ use crate::{
         },
         effect::{handle_effect_messages, remove_effect, send_effects_list},
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{bard, blm, summoner},
+        jobs::{bard, blm, summoner, whm},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -67,7 +67,7 @@ pub(crate) mod combat_state;
 mod director;
 mod effect;
 mod instance;
-mod jobs;
+pub(crate) mod jobs;
 mod linkshell;
 mod network;
 mod party;
@@ -239,6 +239,46 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
     let mut refreshed = Vec::new();
 
     for actor_id in actor_ids {
+        let class_job = {
+            let Some(actor) = instance.find_actor(actor_id) else {
+                continue;
+            };
+            let Some(common) = actor.common_spawn() else {
+                continue;
+            };
+            common.class_job
+        };
+
+        if whm::is_white_mage(class_job) {
+            let result = whm::refresh_whm_runtime_state_on_actor(network, instance, actor_id);
+            if result.changed {
+                let level = {
+                    let Some(actor) = instance.find_actor(actor_id) else {
+                        continue;
+                    };
+                    actor.common_spawn().map(|common| common.level).unwrap_or(0)
+                };
+                if let Some(NetworkedActor::Player { combat_state, .. }) =
+                    instance.find_actor(actor_id)
+                {
+                    let gauge_data = whm::build_whm_gauge_data(combat_state, level);
+                    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
+                        classjob_id: whm::gauge_class_job_id(),
+                        data: gauge_data,
+                    });
+                    network.send_to_by_actor_id(
+                        actor_id,
+                        FromServer::PacketSegment(ipc, actor_id),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
+            }
+            if result.status_changed {
+                refreshed.push(actor_id);
+            }
+            continue;
+        }
+
         let Some(actor) = instance.find_actor_mut(actor_id) else {
             continue;
         };
