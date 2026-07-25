@@ -26,7 +26,7 @@ use crate::{
         },
         effect::{handle_effect_messages, remove_effect, send_effects_list},
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{bard, blm, summoner, whm},
+        jobs::{bard, black_mage, summoner, white_mage},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -249,8 +249,8 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             common.class_job
         };
 
-        if whm::is_white_mage(class_job) {
-            let result = whm::refresh_whm_runtime_state_on_actor(network, instance, actor_id);
+        if white_mage::is_white_mage(class_job) {
+            let result = white_mage::refresh_white_mage_runtime_state_on_actor(network, instance, actor_id);
             if result.changed {
                 let level = {
                     let Some(actor) = instance.find_actor(actor_id) else {
@@ -261,9 +261,9 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                 if let Some(NetworkedActor::Player { combat_state, .. }) =
                     instance.find_actor(actor_id)
                 {
-                    let gauge_data = whm::build_whm_gauge_data(combat_state, level);
+                    let gauge_data = white_mage::build_white_mage_gauge_data(combat_state, level);
                     let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
-                        classjob_id: whm::gauge_class_job_id(),
+                        classjob_id: white_mage::gauge_class_job_id(),
                         data: gauge_data,
                     });
                     network.send_to_by_actor_id(
@@ -374,18 +374,18 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             }
         }
 
-        if blm::is_black_mage(class_job) {
-            let result = blm::refresh_blm_runtime_state_on_actor(actor_id, actor);
+        if black_mage::is_black_mage(class_job) {
+            let result = black_mage::refresh_black_mage_runtime_state_on_actor(actor_id, actor);
             let level = actor
                 .common_spawn()
-                .expect("blm runtime actor has common spawn")
+                .expect("black_mage runtime actor has common spawn")
                 .level;
             if result.changed
                 && let NetworkedActor::Player { combat_state, .. } = actor
             {
-                let gauge_data = blm::build_blm_gauge_data(combat_state, level);
+                let gauge_data = black_mage::build_black_mage_gauge_data(combat_state, level);
                 let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
-                    classjob_id: blm::gauge_class_job_id(),
+                    classjob_id: black_mage::gauge_class_job_id(),
                     data: gauge_data,
                 });
                 network.send_to_by_actor_id(
@@ -937,13 +937,13 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
             hp_delta += (max_hp as f32 * frac).ceil() as i64;
         }
         // Astral Fire halts natural MP recovery entirely ("魔力不会自然恢复").
-        let blm_no_mp_regen = match actor {
+        let black_mage_no_mp_regen = match actor {
             NetworkedActor::Player { combat_state, .. } => {
-                blm::is_black_mage(common.class_job) && combat_state.blm.in_astral_fire()
+                black_mage::is_black_mage(common.class_job) && combat_state.black_mage.in_astral_fire()
             }
             _ => false,
         };
-        if is_player && cur_mp < max_mp && !blm_no_mp_regen {
+        if is_player && cur_mp < max_mp && !black_mage_no_mp_regen {
             mp_delta += (max_mp as f32 * MP_REGEN).ceil() as i64;
         }
 

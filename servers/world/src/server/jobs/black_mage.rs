@@ -156,7 +156,7 @@ const PERMANENT_STATUS_DURATION: f32 = 604800.0;
 
 /// Black Mage job state tracked server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct BlmState {
+pub struct BlackMageState {
     /// Elemental stance: 1-3 = Astral Fire stacks, -1..-3 = Umbral Ice stacks, 0 = none.
     pub element_stance: i8,
     /// Umbral Hearts (0-3). Each nullifies the AF fire MP increase for one cast; Flare
@@ -186,7 +186,7 @@ pub struct BlmState {
     pub ley_lines_object_id: Option<ObjectId>,
 }
 
-impl BlmState {
+impl BlackMageState {
     pub fn in_astral_fire(&self) -> bool {
         self.element_stance > 0
     }
@@ -272,7 +272,7 @@ fn enochian_damage_percent(level: u8) -> u32 {
 /// UI weakens fire 90/80/70 and leaves ice unmodified. Unaspected/lightning actions
 /// and the neutral stance are always 100. The Enochian magic bonus applies to every
 /// magic attack while a stance is up, and Scathe rolls its 20% double here.
-pub(crate) fn element_damage_percent(state: &BlmState, action_id: u32, aspect: u8, level: u8) -> u32 {
+pub(crate) fn element_damage_percent(state: &BlackMageState, action_id: u32, aspect: u8, level: u8) -> u32 {
     // Scathe: 20% chance to deal double damage, rolled here because this multiplier is
     // applied to every damage instance of the cast (primary + AoE secondaries).
     let scathe = if action_id == ACTION_SCATHE
@@ -312,7 +312,7 @@ pub(crate) fn element_damage_percent(state: &BlmState, action_id: u32, aspect: u
 ///
 /// `sheet_cost` is the Action-sheet MP cost (0 for the special cost types).
 pub(crate) fn effective_mp_cost(
-    state: &BlmState,
+    state: &BlackMageState,
     action_id: u32,
     sheet_cost: u32,
     aspect: u8,
@@ -364,7 +364,7 @@ pub(crate) fn effective_mp_cost(
 }
 
 /// Whether casting this fire spell in AF consumes an Umbral Heart (MP increase nullified).
-fn consumes_umbral_heart(state: &BlmState, action_id: u32, sheet_cost: u32, aspect: u8) -> bool {
+fn consumes_umbral_heart(state: &BlackMageState, action_id: u32, sheet_cost: u32, aspect: u8) -> bool {
     state.in_astral_fire()
         && state.umbral_hearts > 0
         && aspect == ASPECT_FIRE
@@ -387,7 +387,7 @@ pub(crate) fn min_mp_requirement(action_id: u32) -> u32 {
 /// Triplecast stack, or Lv100 Despair (Trait#616). `base_centisec` must be > 0 — actions
 /// that are already instant never consume Triplecast stacks.
 pub(crate) fn requires_no_cast_time(
-    state: &BlmState,
+    state: &BlackMageState,
     action_id: u32,
     base_centisec: u32,
     level: u8,
@@ -407,7 +407,7 @@ pub(crate) fn requires_no_cast_time(
 }
 
 /// AF3 halves ice cast times and UI3 halves fire cast times (Aspect Mastery III).
-pub(crate) fn cast_time_halved(state: &BlmState, aspect: u8) -> bool {
+pub(crate) fn cast_time_halved(state: &BlackMageState, aspect: u8) -> bool {
     (state.element_stance == MAX_ELEMENT_STANCE && aspect == ASPECT_ICE)
         || (state.element_stance == -MAX_ELEMENT_STANCE && aspect == ASPECT_FIRE)
 }
@@ -425,15 +425,15 @@ pub(crate) fn apply_ley_lines_haste(centisec: u32, in_ley_lines: bool) -> u32 {
 
 /// Resolve BLM action remapping: level-based upgrade ladders (Aspect Mastery traits) and
 /// the Paradox hotbar morph ("满足发动条件后，火炎和冰结变为悖论").
-pub(crate) fn resolve_blm_action(
+pub(crate) fn resolve_black_mage_action(
     request: &ActionRequest,
     combat_state: &PlayerCombatState,
     level: u8,
 ) -> u32 {
-    let blm = &combat_state.blm;
+    let black_mage = &combat_state.black_mage;
 
     // Paradox replaces Fire/Blizzard while the marker is lit.
-    if blm.paradox_active && matches!(request.action_id, ACTION_FIRE | ACTION_BLIZZARD) {
+    if black_mage.paradox_active && matches!(request.action_id, ACTION_FIRE | ACTION_BLIZZARD) {
         return ACTION_PARADOX;
     }
 
@@ -452,36 +452,36 @@ pub(crate) fn resolve_blm_action(
 }
 
 /// Check if the BLM can execute the given (already resolved) action.
-pub(crate) fn can_execute_blm_action(
+pub(crate) fn can_execute_black_mage_action(
     action_id: u32,
     combat_state: &PlayerCombatState,
     status_effects: &StatusEffects,
     level: u8,
 ) -> bool {
-    let blm = &combat_state.blm;
+    let black_mage = &combat_state.black_mage;
     match action_id {
-        ACTION_FIRE_IV | ACTION_DESPAIR | ACTION_FLARE => blm.in_astral_fire(),
-        ACTION_BLIZZARD_IV | ACTION_FREEZE => blm.in_umbral_ice(),
-        ACTION_FLARE_STAR => blm.astral_soul_stacks >= MAX_ASTRAL_SOUL,
+        ACTION_FIRE_IV | ACTION_DESPAIR | ACTION_FLARE => black_mage.in_astral_fire(),
+        ACTION_BLIZZARD_IV | ACTION_FREEZE => black_mage.in_umbral_ice(),
+        ACTION_FLARE_STAR => black_mage.astral_soul_stacks >= MAX_ASTRAL_SOUL,
         ACTION_XENOGLOSSY | ACTION_FOUL => {
-            blm.polyglot_stacks > 0 && level >= LEVEL_POLYGLOT
+            black_mage.polyglot_stacks > 0 && level >= LEVEL_POLYGLOT
         }
-        ACTION_PARADOX => blm.paradox_active && level >= LEVEL_PARADOX,
+        ACTION_PARADOX => black_mage.paradox_active && level >= LEVEL_PARADOX,
         ACTION_THUNDER
         | ACTION_THUNDER_III
         | ACTION_HIGH_THUNDER
         | ACTION_THUNDER_II
         | ACTION_THUNDER_IV
         | ACTION_HIGH_THUNDER_II => status_effects.get(STATUS_THUNDERHEAD).is_some(),
-        ACTION_AMPLIFIER => blm.element_stance != 0,
-        ACTION_MANAFONT => blm.in_astral_fire(),
-        ACTION_UMBRAL_SOUL => blm.in_umbral_ice(),
-        ACTION_TRANSPOSE => blm.element_stance != 0,
+        ACTION_AMPLIFIER => black_mage.element_stance != 0,
+        ACTION_MANAFONT => black_mage.in_astral_fire(),
+        ACTION_UMBRAL_SOUL => black_mage.in_umbral_ice(),
+        ACTION_TRANSPOSE => black_mage.element_stance != 0,
         // "发动条件：非黑魔纹状态中"
-        ACTION_LEY_LINES => !blm.has_ley_lines_active(),
-        ACTION_BETWEEN_THE_LINES => blm.has_ley_lines_active(),
+        ACTION_LEY_LINES => !black_mage.has_ley_lines_active(),
+        ACTION_BETWEEN_THE_LINES => black_mage.has_ley_lines_active(),
         // Trait#614 (Lv96) enables Retrace; it re-places the active circle.
-        ACTION_RETRACE => level >= LEVEL_RETRACE && blm.has_ley_lines_active(),
+        ACTION_RETRACE => level >= LEVEL_RETRACE && black_mage.has_ley_lines_active(),
         _ => true,
     }
 }
@@ -490,7 +490,7 @@ pub(crate) fn can_execute_blm_action(
 
 /// Result of the after-action hook.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct BlmActionUpdate {
+pub(crate) struct BlackMageActionUpdate {
     /// Gauge-affecting state changed; the caller re-sends the job gauge.
     pub(crate) changed: bool,
     /// A status was added/removed; the caller pushes the effects list.
@@ -520,34 +520,34 @@ fn grant_firestarter(status_effects: &mut StatusEffects, owner_actor_id: ObjectI
 /// Aspect Mastery V (#465): swapping to the opposite element while at max stance AND max
 /// Umbral Hearts lights the Paradox marker.
 fn maybe_grant_paradox_on_swap(
-    blm: &mut BlmState,
+    black_mage: &mut BlackMageState,
     previous_stance: i8,
     level: u8,
 ) {
     if level >= LEVEL_PARADOX
         && previous_stance.abs() == MAX_ELEMENT_STANCE
-        && blm.umbral_hearts >= MAX_UMBRAL_HEARTS
+        && black_mage.umbral_hearts >= MAX_UMBRAL_HEARTS
     {
-        blm.paradox_active = true;
+        black_mage.paradox_active = true;
     }
 }
 
 /// Clear Astral Soul whenever Astral Fire ends (Fire IV / Flare tooltips).
-fn clear_astral_soul_if_fire_ended(blm: &mut BlmState) {
-    if !blm.in_astral_fire() {
-        blm.astral_soul_stacks = 0;
+fn clear_astral_soul_if_fire_ended(black_mage: &mut BlackMageState) {
+    if !black_mage.in_astral_fire() {
+        black_mage.astral_soul_stacks = 0;
     }
 }
 
 /// Update BLM state after an action executes. Mirrors the BRD/SMN hooks: stance transitions,
 /// hearts/souls/polyglot/paradox bookkeeping, proc rolls, and MP restoration.
-pub(crate) fn update_blm_state_after_action(
+pub(crate) fn update_black_mage_state_after_action(
     action_id: u32,
     actor: &mut NetworkedActor,
     owner_actor_id: ObjectId,
     sheet_mp_cost: u32,
     aspect: u8,
-) -> BlmActionUpdate {
+) -> BlackMageActionUpdate {
     let level = actor.get_common_spawn().level;
     let NetworkedActor::Player {
         spawn,
@@ -556,29 +556,29 @@ pub(crate) fn update_blm_state_after_action(
         ..
     } = actor
     else {
-        return BlmActionUpdate::default();
+        return BlackMageActionUpdate::default();
     };
 
-    let blm = &mut combat_state.blm;
-    let mut update = BlmActionUpdate::default();
+    let black_mage = &mut combat_state.black_mage;
+    let mut update = BlackMageActionUpdate::default();
 
     // An Umbral Heart pays for this fire cast's MP increase (AF only).
-    if consumes_umbral_heart(blm, action_id, sheet_mp_cost, aspect) {
-        blm.umbral_hearts -= 1;
+    if consumes_umbral_heart(black_mage, action_id, sheet_mp_cost, aspect) {
+        black_mage.umbral_hearts -= 1;
         update.changed = true;
     }
 
-    let previous_stance = blm.element_stance;
-    let max_stacks = BlmState::max_stance_stacks(level);
+    let previous_stance = black_mage.element_stance;
+    let max_stacks = BlackMageState::max_stance_stacks(level);
 
     match action_id {
         ACTION_FIRE => {
-            if blm.in_umbral_ice() {
+            if black_mage.in_umbral_ice() {
                 // "在处于灵极冰状态时只会解除该状态" — removal is not a swap, no Thunderhead.
-                blm.element_stance = 0;
+                black_mage.element_stance = 0;
             } else {
-                let gained_from_neutral = blm.element_stance == 0;
-                blm.element_stance = (blm.element_stance + 1).min(max_stacks);
+                let gained_from_neutral = black_mage.element_stance == 0;
+                black_mage.element_stance = (black_mage.element_stance + 1).min(max_stacks);
                 if gained_from_neutral {
                     update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
                 }
@@ -591,11 +591,11 @@ pub(crate) fn update_blm_state_after_action(
             update.changed = true;
         }
         ACTION_BLIZZARD => {
-            if blm.in_astral_fire() {
-                blm.element_stance = 0;
+            if black_mage.in_astral_fire() {
+                black_mage.element_stance = 0;
             } else {
-                let gained_from_neutral = blm.element_stance == 0;
-                blm.element_stance = (blm.element_stance - 1).max(-max_stacks);
+                let gained_from_neutral = black_mage.element_stance == 0;
+                black_mage.element_stance = (black_mage.element_stance - 1).max(-max_stacks);
                 if gained_from_neutral {
                     update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
                 }
@@ -603,11 +603,11 @@ pub(crate) fn update_blm_state_after_action(
             update.changed = true;
         }
         ACTION_FIRE_III => {
-            let was_swap_or_gain = blm.element_stance <= 0;
-            blm.element_stance = max_stacks;
+            let was_swap_or_gain = black_mage.element_stance <= 0;
+            black_mage.element_stance = max_stacks;
             if was_swap_or_gain {
                 update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
-                maybe_grant_paradox_on_swap(blm, previous_stance, level);
+                maybe_grant_paradox_on_swap(black_mage, previous_stance, level);
             }
             // Fire III consumes Firestarter (free + instant, handled at cast time).
             if status_effects.get(STATUS_FIRESTARTER).is_some() {
@@ -617,94 +617,94 @@ pub(crate) fn update_blm_state_after_action(
             update.changed = true;
         }
         ACTION_FIRE_II | ACTION_HIGH_FIRE_II => {
-            let was_swap_or_gain = blm.element_stance <= 0;
+            let was_swap_or_gain = black_mage.element_stance <= 0;
             // Aspect Mastery III (Lv35) makes Fire II grant max stacks; below that it
             // builds one stack like Fire.
             if level >= LEVEL_STANCE_STACKS_3 {
-                blm.element_stance = max_stacks;
+                black_mage.element_stance = max_stacks;
             } else {
-                blm.element_stance = (blm.element_stance + 1).min(max_stacks);
+                black_mage.element_stance = (black_mage.element_stance + 1).min(max_stacks);
             }
             if was_swap_or_gain {
                 update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
-                maybe_grant_paradox_on_swap(blm, previous_stance, level);
+                maybe_grant_paradox_on_swap(black_mage, previous_stance, level);
             }
             update.changed = true;
         }
         ACTION_BLIZZARD_III => {
-            let was_swap_or_gain = blm.element_stance >= 0;
-            blm.element_stance = -max_stacks;
+            let was_swap_or_gain = black_mage.element_stance >= 0;
+            black_mage.element_stance = -max_stacks;
             if was_swap_or_gain {
                 update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
-                maybe_grant_paradox_on_swap(blm, previous_stance, level);
+                maybe_grant_paradox_on_swap(black_mage, previous_stance, level);
             }
             update.changed = true;
         }
         ACTION_BLIZZARD_II | ACTION_HIGH_BLIZZARD_II => {
-            let was_swap_or_gain = blm.element_stance >= 0;
+            let was_swap_or_gain = black_mage.element_stance >= 0;
             if level >= LEVEL_STANCE_STACKS_3 {
-                blm.element_stance = -max_stacks;
+                black_mage.element_stance = -max_stacks;
             } else {
-                blm.element_stance = (blm.element_stance - 1).max(-max_stacks);
+                black_mage.element_stance = (black_mage.element_stance - 1).max(-max_stacks);
             }
             if was_swap_or_gain {
                 update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
-                maybe_grant_paradox_on_swap(blm, previous_stance, level);
+                maybe_grant_paradox_on_swap(black_mage, previous_stance, level);
             }
             update.changed = true;
         }
         ACTION_TRANSPOSE => {
-            if blm.element_stance != 0 {
-                blm.element_stance = -blm.element_stance.signum();
+            if black_mage.element_stance != 0 {
+                black_mage.element_stance = -black_mage.element_stance.signum();
                 update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
-                maybe_grant_paradox_on_swap(blm, previous_stance, level);
+                maybe_grant_paradox_on_swap(black_mage, previous_stance, level);
                 update.changed = true;
             }
         }
         ACTION_FIRE_IV => {
             if level >= LEVEL_ASTRAL_SOUL {
-                blm.astral_soul_stacks = (blm.astral_soul_stacks + 1).min(MAX_ASTRAL_SOUL);
+                black_mage.astral_soul_stacks = (black_mage.astral_soul_stacks + 1).min(MAX_ASTRAL_SOUL);
             }
             update.changed = true;
         }
         ACTION_BLIZZARD_IV | ACTION_FREEZE => {
             if level >= LEVEL_UMBRAL_HEART {
-                blm.umbral_hearts = MAX_UMBRAL_HEARTS;
+                black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
             }
             update.changed = true;
         }
         ACTION_DESPAIR => {
-            blm.element_stance = max_stacks;
+            black_mage.element_stance = max_stacks;
             update.changed = true;
         }
         ACTION_FLARE => {
-            blm.element_stance = max_stacks;
+            black_mage.element_stance = max_stacks;
             // Flare consumes all Umbral Hearts to reduce its MP cost to 2/3.
-            blm.umbral_hearts = 0;
+            black_mage.umbral_hearts = 0;
             if level >= LEVEL_ASTRAL_SOUL {
-                blm.astral_soul_stacks = (blm.astral_soul_stacks + 3).min(MAX_ASTRAL_SOUL);
+                black_mage.astral_soul_stacks = (black_mage.astral_soul_stacks + 3).min(MAX_ASTRAL_SOUL);
             }
             update.changed = true;
         }
         ACTION_FLARE_STAR => {
-            blm.astral_soul_stacks = 0;
+            black_mage.astral_soul_stacks = 0;
             update.changed = true;
         }
         ACTION_UMBRAL_SOUL => {
             let common = &mut spawn.common;
             if !combat_state.in_combat {
                 // Out of combat: max UI, 3 hearts, and a flat 10000 MP.
-                blm.element_stance = -MAX_ELEMENT_STANCE;
-                blm.umbral_hearts = MAX_UMBRAL_HEARTS;
+                black_mage.element_stance = -MAX_ELEMENT_STANCE;
+                black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
                 let restored = common
                     .resource_points
                     .saturating_add(UMBRAL_SOUL_OOC_MP as u16)
                     .min(common.max_resource_points);
                 common.resource_points = restored;
             } else {
-                blm.element_stance = (blm.element_stance - 1).max(-max_stacks);
-                blm.umbral_hearts = (blm.umbral_hearts + 1).min(MAX_UMBRAL_HEARTS);
-                let mp = UMBRAL_SOUL_MP[(blm.umbral_ice_stacks() as usize - 1).min(2)];
+                black_mage.element_stance = (black_mage.element_stance - 1).max(-max_stacks);
+                black_mage.umbral_hearts = (black_mage.umbral_hearts + 1).min(MAX_UMBRAL_HEARTS);
+                let mp = UMBRAL_SOUL_MP[(black_mage.umbral_ice_stacks() as usize - 1).min(2)];
                 let restored = common
                     .resource_points
                     .saturating_add(mp.min(u16::MAX as u32) as u16)
@@ -717,27 +717,27 @@ pub(crate) fn update_blm_state_after_action(
         ACTION_MANAFONT => {
             let common = &mut spawn.common;
             common.resource_points = common.max_resource_points;
-            blm.element_stance = max_stacks;
-            blm.umbral_hearts = MAX_UMBRAL_HEARTS;
+            black_mage.element_stance = max_stacks;
+            black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
             update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
             if level >= LEVEL_PARADOX {
-                blm.paradox_active = true;
+                black_mage.paradox_active = true;
             }
             update.changed = true;
             update.mp_changed = true;
         }
         ACTION_AMPLIFIER => {
-            let cap = BlmState::max_polyglot(level);
-            blm.polyglot_stacks = (blm.polyglot_stacks + 1).min(cap);
+            let cap = BlackMageState::max_polyglot(level);
+            black_mage.polyglot_stacks = (black_mage.polyglot_stacks + 1).min(cap);
             update.changed = true;
         }
         ACTION_XENOGLOSSY | ACTION_FOUL => {
-            blm.polyglot_stacks = blm.polyglot_stacks.saturating_sub(1);
+            black_mage.polyglot_stacks = black_mage.polyglot_stacks.saturating_sub(1);
             update.changed = true;
         }
         ACTION_PARADOX => {
-            blm.paradox_active = false;
-            if blm.in_astral_fire() {
+            black_mage.paradox_active = false;
+            if black_mage.in_astral_fire() {
                 update.status_changed |= grant_firestarter(status_effects, owner_actor_id);
             }
             update.changed = true;
@@ -754,8 +754,8 @@ pub(crate) fn update_blm_state_after_action(
             }
         }
         ACTION_TRIPLECAST => {
-            blm.triplecast_stacks = TRIPLECAST_STACKS;
-            blm.triplecast_expires_at = Some(Instant::now() + TRIPLECAST_DURATION);
+            black_mage.triplecast_stacks = TRIPLECAST_STACKS;
+            black_mage.triplecast_expires_at = Some(Instant::now() + TRIPLECAST_DURATION);
             status_effects.add_with_source(
                 STATUS_TRIPLECAST,
                 u16::from(TRIPLECAST_STACKS),
@@ -772,8 +772,8 @@ pub(crate) fn update_blm_state_after_action(
     }
 
     // Ice spells restore MP on hit while in Umbral Ice (Aspect Mastery I/II/III).
-    if aspect == ASPECT_ICE && blm.in_umbral_ice() {
-        let mp = blm.umbral_ice_mp_on_hit();
+    if aspect == ASPECT_ICE && black_mage.in_umbral_ice() {
+        let mp = black_mage.umbral_ice_mp_on_hit();
         if mp > 0 {
             let common = &mut spawn.common;
             common.resource_points = common
@@ -788,13 +788,13 @@ pub(crate) fn update_blm_state_after_action(
     // which knows whether the executed spell actually had a cast time.)
 
     // Stance ended → Astral Soul and the Paradox marker go out (Trait#465).
-    if blm.element_stance == 0 && previous_stance != 0 {
-        blm.paradox_active = false;
-        blm.polyglot_next_at = None;
+    if black_mage.element_stance == 0 && previous_stance != 0 {
+        black_mage.paradox_active = false;
+        black_mage.polyglot_next_at = None;
     }
-    clear_astral_soul_if_fire_ended(blm);
+    clear_astral_soul_if_fire_ended(black_mage);
 
-    update.changed |= blm.element_stance != previous_stance;
+    update.changed |= black_mage.element_stance != previous_stance;
     update
 }
 
@@ -810,28 +810,28 @@ pub(crate) fn consume_triplecast_stack(actor: &mut NetworkedActor, owner_actor_i
         return false;
     };
 
-    let blm = &mut combat_state.blm;
-    if blm.triplecast_stacks == 0 {
+    let black_mage = &mut combat_state.black_mage;
+    if black_mage.triplecast_stacks == 0 {
         return false;
     }
-    if blm.triplecast_expires_at.is_some_and(|t| t <= Instant::now()) {
-        blm.triplecast_stacks = 0;
-        blm.triplecast_expires_at = None;
+    if black_mage.triplecast_expires_at.is_some_and(|t| t <= Instant::now()) {
+        black_mage.triplecast_stacks = 0;
+        black_mage.triplecast_expires_at = None;
         return false;
     }
 
-    blm.triplecast_stacks -= 1;
-    if blm.triplecast_stacks == 0 {
-        blm.triplecast_expires_at = None;
+    black_mage.triplecast_stacks -= 1;
+    if black_mage.triplecast_stacks == 0 {
+        black_mage.triplecast_expires_at = None;
         status_effects.remove(STATUS_TRIPLECAST);
     } else {
-        let remaining = blm
+        let remaining = black_mage
             .triplecast_expires_at
             .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f32())
             .unwrap_or(1.0);
         status_effects.add_with_source(
             STATUS_TRIPLECAST,
-            u16::from(blm.triplecast_stacks),
+            u16::from(black_mage.triplecast_stacks),
             remaining,
             owner_actor_id,
         );
@@ -858,7 +858,7 @@ pub(crate) fn thunder_dot_status(action_id: u32) -> Option<u16> {
 
 /// Result of the per-tick runtime refresh.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct BlmRuntimeUpdate {
+pub(crate) struct BlackMageRuntimeUpdate {
     pub(crate) changed: bool,
     pub(crate) status_changed: bool,
     /// A Ley Lines circle object that expired this tick and must be despawned.
@@ -867,10 +867,10 @@ pub(crate) struct BlmRuntimeUpdate {
 
 /// Per-server-tick driver: Polyglot generation (every 30s in a stance), Ley Lines expiry,
 /// and the standing-in-Ley-Lines status. Mirrors `refresh_bard_runtime_state_on_actor`.
-pub(crate) fn refresh_blm_runtime_state_on_actor(
+pub(crate) fn refresh_black_mage_runtime_state_on_actor(
     _actor_id: ObjectId,
     actor: &mut NetworkedActor,
-) -> BlmRuntimeUpdate {
+) -> BlackMageRuntimeUpdate {
     let level = actor.get_common_spawn().level;
     let position = actor.get_common_spawn().position.0;
     let NetworkedActor::Player {
@@ -879,17 +879,17 @@ pub(crate) fn refresh_blm_runtime_state_on_actor(
         ..
     } = actor
     else {
-        return BlmRuntimeUpdate::default();
+        return BlackMageRuntimeUpdate::default();
     };
 
-    let blm = &mut combat_state.blm;
+    let black_mage = &mut combat_state.black_mage;
     let now = Instant::now();
-    let mut update = BlmRuntimeUpdate::default();
+    let mut update = BlackMageRuntimeUpdate::default();
 
     // Triplecast expiry.
-    if blm.triplecast_expires_at.is_some_and(|t| t <= now) {
-        blm.triplecast_stacks = 0;
-        blm.triplecast_expires_at = None;
+    if black_mage.triplecast_expires_at.is_some_and(|t| t <= now) {
+        black_mage.triplecast_stacks = 0;
+        black_mage.triplecast_expires_at = None;
         if status_effects.get(STATUS_TRIPLECAST).is_some() {
             status_effects.remove(STATUS_TRIPLECAST);
             update.status_changed = true;
@@ -897,28 +897,28 @@ pub(crate) fn refresh_blm_runtime_state_on_actor(
     }
 
     // Polyglot generation: one stack every 30s while in Astral Fire or Umbral Ice.
-    let polyglot_cap = BlmState::max_polyglot(level);
-    if blm.element_stance != 0 && polyglot_cap > 0 {
-        if blm.polyglot_stacks >= polyglot_cap {
-            blm.polyglot_next_at = None;
+    let polyglot_cap = BlackMageState::max_polyglot(level);
+    if black_mage.element_stance != 0 && polyglot_cap > 0 {
+        if black_mage.polyglot_stacks >= polyglot_cap {
+            black_mage.polyglot_next_at = None;
         } else {
-            let next_at = blm.polyglot_next_at.get_or_insert(now + POLYGLOT_INTERVAL);
+            let next_at = black_mage.polyglot_next_at.get_or_insert(now + POLYGLOT_INTERVAL);
             if now >= *next_at {
-                blm.polyglot_stacks += 1;
-                blm.polyglot_next_at =
-                    (blm.polyglot_stacks < polyglot_cap).then_some(now + POLYGLOT_INTERVAL);
+                black_mage.polyglot_stacks += 1;
+                black_mage.polyglot_next_at =
+                    (black_mage.polyglot_stacks < polyglot_cap).then_some(now + POLYGLOT_INTERVAL);
                 update.changed = true;
             }
         }
     } else {
-        blm.polyglot_next_at = None;
+        black_mage.polyglot_next_at = None;
     }
 
     // Ley Lines: expire, and maintain the marker (737) / standing-inside haste (738).
-    if blm.ley_lines_expires_at.is_some_and(|t| t <= now) {
-        blm.ley_lines_expires_at = None;
-        blm.ley_lines_position = None;
-        update.despawn_object_id = blm.ley_lines_object_id.take();
+    if black_mage.ley_lines_expires_at.is_some_and(|t| t <= now) {
+        black_mage.ley_lines_expires_at = None;
+        black_mage.ley_lines_position = None;
+        update.despawn_object_id = black_mage.ley_lines_object_id.take();
         for status in [STATUS_LEY_LINES, STATUS_CIRCLE_OF_POWER] {
             if status_effects.get(status).is_some() {
                 status_effects.remove(status);
@@ -926,13 +926,13 @@ pub(crate) fn refresh_blm_runtime_state_on_actor(
             }
         }
     }
-    if blm.has_ley_lines_active()
-        && let Some(lines_position) = blm.ley_lines_position
+    if black_mage.has_ley_lines_active()
+        && let Some(lines_position) = black_mage.ley_lines_position
     {
         // 黑魔纹 (737): "lines are down" marker carrying the remaining duration; only
         // re-applied when missing (the client counts it down locally).
         if status_effects.get(STATUS_LEY_LINES).is_none() {
-            let remaining = blm
+            let remaining = black_mage
                 .ley_lines_expires_at
                 .map(|t| t.saturating_duration_since(now).as_secs_f32())
                 .unwrap_or(1.0);
@@ -971,11 +971,11 @@ pub(crate) fn refresh_blm_runtime_state_on_actor(
 ///   [4]    PolyglotStacks
 ///   [5]    EnochianFlags (bit0 = Enochian, bit1 = Paradox, bits2-4 = AstralSoul 0-6)
 ///   [6..8] padding
-pub(crate) fn build_blm_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
-    let blm = &combat_state.blm;
+pub(crate) fn build_black_mage_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
+    let black_mage = &combat_state.black_mage;
 
-    let polyglot_timer_ms = if blm.element_stance != 0 && level >= LEVEL_POLYGLOT {
-        blm.polyglot_next_at
+    let polyglot_timer_ms = if black_mage.element_stance != 0 && level >= LEVEL_POLYGLOT {
+        black_mage.polyglot_next_at
             .map(|t| {
                 t.saturating_duration_since(std::time::Instant::now())
                     .as_millis()
@@ -987,28 +987,28 @@ pub(crate) fn build_blm_gauge_data(combat_state: &PlayerCombatState, level: u8) 
     };
 
     let hearts = if level >= LEVEL_UMBRAL_HEART {
-        blm.umbral_hearts
+        black_mage.umbral_hearts
     } else {
         0
     };
-    let polyglot = blm.polyglot_stacks.min(BlmState::max_polyglot(level));
+    let polyglot = black_mage.polyglot_stacks.min(BlackMageState::max_polyglot(level));
 
     let mut flags = 0u8;
-    if blm.element_stance != 0 && level >= LEVEL_ENOCHIAN {
+    if black_mage.element_stance != 0 && level >= LEVEL_ENOCHIAN {
         flags |= 1; // Enochian (天语, Trait#460 Lv56)
     }
-    if blm.paradox_active && level >= LEVEL_PARADOX {
+    if black_mage.paradox_active && level >= LEVEL_PARADOX {
         flags |= 2; // Paradox
     }
     if level >= LEVEL_ASTRAL_SOUL {
-        flags |= (blm.astral_soul_stacks & 7) << 2;
+        flags |= (black_mage.astral_soul_stacks & 7) << 2;
     }
 
     let [timer_lo, timer_hi] = polyglot_timer_ms.to_le_bytes();
     let bytes = [
         timer_lo,
         timer_hi,
-        blm.element_stance as u8, // i8 two's complement: UI3 = 0xFD
+        black_mage.element_stance as u8, // i8 two's complement: UI3 = 0xFD
         hearts,
         polyglot,
         flags,
@@ -1049,15 +1049,15 @@ pub(crate) fn register_ley_lines_after_action(
         else {
             return;
         };
-        let blm = &mut combat_state.blm;
+        let black_mage = &mut combat_state.black_mage;
 
-        old_object_id = blm.ley_lines_object_id.take();
-        blm.ley_lines_position = Some(position.0);
+        old_object_id = black_mage.ley_lines_object_id.take();
+        black_mage.ley_lines_position = Some(position.0);
         // Retrace inherits the remaining duration; a fresh Ley Lines starts the full 20s.
         if action_id == ACTION_LEY_LINES {
-            blm.ley_lines_expires_at = Some(Instant::now() + LEY_LINES_DURATION);
+            black_mage.ley_lines_expires_at = Some(Instant::now() + LEY_LINES_DURATION);
         }
-        blm.ley_lines_object_id = Some(object_id);
+        black_mage.ley_lines_object_id = Some(object_id);
     }
 
     // Refresh the marker status so it shows the (possibly inherited) remaining duration.
@@ -1068,7 +1068,7 @@ pub(crate) fn register_ley_lines_after_action(
     }) = instance.find_actor_mut(from_actor_id)
     {
         let remaining = combat_state
-            .blm
+            .black_mage
             .ley_lines_expires_at
             .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f32())
             .unwrap_or(LEY_LINES_DURATION.as_secs_f32());

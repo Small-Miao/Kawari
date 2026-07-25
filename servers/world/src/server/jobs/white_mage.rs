@@ -170,7 +170,7 @@ const WEAKNESS_DURATION: f32 = 100.0;
 
 /// White Mage job state tracked server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct WhmState {
+pub struct WhiteMageState {
     /// Lily stacks (0-3), generated one per 20s in combat.
     pub lily_stacks: u8,
     /// Blood Lily stacks (0-3), from Afflatus Solace/Rapture. Spent by Afflatus Misery.
@@ -201,7 +201,7 @@ pub struct WhmState {
     pub bell_last_trigger_at: Option<Instant>,
 }
 
-impl WhmState {
+impl WhiteMageState {
     pub fn has_asylum_active(&self) -> bool {
         self.asylum_expires_at.is_some_and(|t| t > Instant::now())
     }
@@ -255,7 +255,7 @@ pub(crate) fn apply_pom_haste(centisec: u32, has_pom: bool) -> u32 {
 // ==================== Action resolution & conditions ====================
 
 /// Resolve WHM action remapping: level-based upgrade ladders.
-pub(crate) fn resolve_whm_action(request: &ActionRequest, level: u8) -> u32 {
+pub(crate) fn resolve_white_mage_action(request: &ActionRequest, level: u8) -> u32 {
     match request.action_id {
         // Stone → Stone II (18) → Stone III (54) → Stone IV (64) → Glare (72) → Glare III (82)
         ACTION_STONE if level >= 82 => ACTION_GLARE_III,
@@ -275,18 +275,18 @@ pub(crate) fn resolve_whm_action(request: &ActionRequest, level: u8) -> u32 {
 }
 
 /// Check if the WHM can execute the given (already resolved) action.
-pub(crate) fn can_execute_whm_action(
+pub(crate) fn can_execute_white_mage_action(
     action_id: u32,
     combat_state: &PlayerCombatState,
     status_effects: &StatusEffects,
     level: u8,
 ) -> bool {
-    let whm = &combat_state.whm;
+    let white_mage = &combat_state.white_mage;
     match action_id {
-        ACTION_AFFLATUS_SOLACE => whm.lily_stacks > 0 && level >= LEVEL_LILY,
-        ACTION_AFFLATUS_RAPTURE => whm.lily_stacks > 0 && level >= LEVEL_RAPTURE,
-        ACTION_AFFLATUS_MISERY => whm.blood_lily_stacks >= MAX_BLOOD_LILY,
-        ACTION_GLARE_IV => whm.glare_iv_stacks > 0,
+        ACTION_AFFLATUS_SOLACE => white_mage.lily_stacks > 0 && level >= LEVEL_LILY,
+        ACTION_AFFLATUS_RAPTURE => white_mage.lily_stacks > 0 && level >= LEVEL_RAPTURE,
+        ACTION_AFFLATUS_MISERY => white_mage.blood_lily_stacks >= MAX_BLOOD_LILY,
+        ACTION_GLARE_IV => white_mage.glare_iv_stacks > 0,
         ACTION_DIVINE_CARESS => status_effects.get(STATUS_DIVINE_CARESS_READY).is_some(),
         ACTION_LITURGY_OF_THE_BELL => level >= 90,
         _ => true,
@@ -297,7 +297,7 @@ pub(crate) fn can_execute_whm_action(
 
 /// Result of the after-action hook.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct WhmActionUpdate {
+pub(crate) struct WhiteMageActionUpdate {
     /// Gauge-affecting state changed; the caller re-sends the job gauge.
     pub(crate) changed: bool,
     /// A status was added/removed; the caller pushes the effects list.
@@ -309,13 +309,13 @@ pub(crate) struct WhmActionUpdate {
 /// Update WHM state after an action executes: lily/blood-lily bookkeeping, Glare IV stack
 /// consumption, Freecure procs/consumption, Thin Air consumption, Asylum/Bell placement,
 /// Raise, Assize MP restore, Temperance's Divine Caress ready grant.
-pub(crate) fn update_whm_state_after_action(
+pub(crate) fn update_white_mage_state_after_action(
     action_id: u32,
     actor: &mut NetworkedActor,
     owner_actor_id: ObjectId,
     sheet_mp_cost: u32,
     ground_position: Option<Position>,
-) -> WhmActionUpdate {
+) -> WhiteMageActionUpdate {
     let level = actor.get_common_spawn().level;
     let position = actor.get_common_spawn().position.0;
     let NetworkedActor::Player {
@@ -325,11 +325,11 @@ pub(crate) fn update_whm_state_after_action(
         ..
     } = actor
     else {
-        return WhmActionUpdate::default();
+        return WhiteMageActionUpdate::default();
     };
 
-    let whm = &mut combat_state.whm;
-    let mut update = WhmActionUpdate::default();
+    let white_mage = &mut combat_state.white_mage;
+    let mut update = WhiteMageActionUpdate::default();
 
     // Thin Air is consumed by any action that would have cost MP.
     if sheet_mp_cost > 0
@@ -364,20 +364,20 @@ pub(crate) fn update_whm_state_after_action(
             }
         }
         ACTION_AFFLATUS_SOLACE | ACTION_AFFLATUS_RAPTURE => {
-            whm.lily_stacks = whm.lily_stacks.saturating_sub(1);
+            white_mage.lily_stacks = white_mage.lily_stacks.saturating_sub(1);
             if level >= LEVEL_BLOOD_LILY {
-                whm.blood_lily_stacks = (whm.blood_lily_stacks + 1).min(MAX_BLOOD_LILY);
+                white_mage.blood_lily_stacks = (white_mage.blood_lily_stacks + 1).min(MAX_BLOOD_LILY);
             }
             update.changed = true;
         }
         ACTION_AFFLATUS_MISERY => {
-            whm.blood_lily_stacks = 0;
+            white_mage.blood_lily_stacks = 0;
             update.changed = true;
         }
         ACTION_PRESENCE_OF_MIND => {
             if level >= LEVEL_GLARE_IV {
-                whm.glare_iv_stacks = GLARE_IV_STACKS;
-                whm.glare_iv_expires_at = Some(Instant::now() + GLARE_IV_READY_DURATION);
+                white_mage.glare_iv_stacks = GLARE_IV_STACKS;
+                white_mage.glare_iv_expires_at = Some(Instant::now() + GLARE_IV_READY_DURATION);
                 status_effects.add_with_source(
                     STATUS_GLARE_IV_READY,
                     u16::from(GLARE_IV_STACKS),
@@ -388,18 +388,18 @@ pub(crate) fn update_whm_state_after_action(
             }
         }
         ACTION_GLARE_IV => {
-            whm.glare_iv_stacks = whm.glare_iv_stacks.saturating_sub(1);
-            if whm.glare_iv_stacks == 0 {
-                whm.glare_iv_expires_at = None;
+            white_mage.glare_iv_stacks = white_mage.glare_iv_stacks.saturating_sub(1);
+            if white_mage.glare_iv_stacks == 0 {
+                white_mage.glare_iv_expires_at = None;
                 status_effects.remove(STATUS_GLARE_IV_READY);
             } else {
-                let remaining = whm
+                let remaining = white_mage
                     .glare_iv_expires_at
                     .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f32())
                     .unwrap_or(1.0);
                 status_effects.add_with_source(
                     STATUS_GLARE_IV_READY,
-                    u16::from(whm.glare_iv_stacks),
+                    u16::from(white_mage.glare_iv_stacks),
                     remaining,
                     owner_actor_id,
                 );
@@ -425,18 +425,18 @@ pub(crate) fn update_whm_state_after_action(
         }
         ACTION_ASYLUM => {
             let center = ground_position.map(|p| p.0).unwrap_or(position);
-            whm.asylum_position = Some(center);
-            whm.asylum_expires_at = Some(Instant::now() + ASYLUM_DURATION);
-            whm.asylum_next_tick_at = Some(Instant::now() + ASYLUM_TICK_INTERVAL);
+            white_mage.asylum_position = Some(center);
+            white_mage.asylum_expires_at = Some(Instant::now() + ASYLUM_DURATION);
+            white_mage.asylum_next_tick_at = Some(Instant::now() + ASYLUM_TICK_INTERVAL);
         }
         ACTION_LITURGY_OF_THE_BELL => {
             // Re-using while a bell is active detonates the old one first (heal is resolved
             // by the caller via take_bell_detonation before this hook runs).
             let center = ground_position.map(|p| p.0).unwrap_or(position);
-            whm.bell_position = Some(center);
-            whm.bell_stacks = BELL_STACKS;
-            whm.bell_expires_at = Some(Instant::now() + BELL_DURATION);
-            whm.bell_last_trigger_at = None;
+            white_mage.bell_position = Some(center);
+            white_mage.bell_stacks = BELL_STACKS;
+            white_mage.bell_expires_at = Some(Instant::now() + BELL_DURATION);
+            white_mage.bell_last_trigger_at = None;
             status_effects.add_with_source(
                 STATUS_LITURGY_OF_THE_BELL,
                 u16::from(BELL_STACKS),
@@ -479,18 +479,18 @@ pub(crate) fn take_bell_detonation(
         return None;
     };
 
-    let whm = &mut combat_state.whm;
-    if !whm.has_bell_active() && whm.bell_stacks == 0 {
+    let white_mage = &mut combat_state.white_mage;
+    if !white_mage.has_bell_active() && white_mage.bell_stacks == 0 {
         return None;
     }
 
-    let position = whm.bell_position?;
-    let total_potency = u32::from(whm.bell_stacks) * BELL_EXPIRE_POTENCY_PER_STACK;
+    let position = white_mage.bell_position?;
+    let total_potency = u32::from(white_mage.bell_stacks) * BELL_EXPIRE_POTENCY_PER_STACK;
 
-    whm.bell_position = None;
-    whm.bell_stacks = 0;
-    whm.bell_expires_at = None;
-    whm.bell_last_trigger_at = None;
+    white_mage.bell_position = None;
+    white_mage.bell_stacks = 0;
+    white_mage.bell_expires_at = None;
+    white_mage.bell_last_trigger_at = None;
     if status_effects.get(STATUS_LITURGY_OF_THE_BELL).is_some() {
         status_effects.remove(STATUS_LITURGY_OF_THE_BELL);
     }
@@ -526,7 +526,7 @@ pub(crate) fn incoming_heal_multiplier(target: Option<&NetworkedActor>) -> f64 {
 
 /// Damage mitigation multiplier from a player target's WHM statuses (Aquaveil 15%,
 /// Temperance party 10%, Confession 10%), stacking multiplicatively like retail.
-pub(crate) fn whm_mitigation_multiplier(target: Option<&NetworkedActor>) -> f64 {
+pub(crate) fn white_mage_mitigation_multiplier(target: Option<&NetworkedActor>) -> f64 {
     let Some(status_effects) = target.and_then(NetworkedActor::status_effects) else {
         return 1.0;
     };
@@ -795,7 +795,7 @@ pub(crate) fn fan_out_divine_caress(
 
 /// Result of the per-tick runtime refresh.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct WhmRuntimeUpdate {
+pub(crate) struct WhiteMageRuntimeUpdate {
     pub(crate) changed: bool,
     pub(crate) status_changed: bool,
     /// Party members whose HP changed this tick (asylum tick / bell detonation).
@@ -804,12 +804,12 @@ pub(crate) struct WhmRuntimeUpdate {
 
 /// Per-server-tick driver: Lily generation (20s in combat), Glare IV expiry, Asylum ticks,
 /// and Liturgy of the Bell expiry detonation.
-pub(crate) fn refresh_whm_runtime_state_on_actor(
+pub(crate) fn refresh_white_mage_runtime_state_on_actor(
     network: &NetworkState,
     instance: &mut Instance,
     actor_id: ObjectId,
-) -> WhmRuntimeUpdate {
-    let mut update = WhmRuntimeUpdate::default();
+) -> WhiteMageRuntimeUpdate {
+    let mut update = WhiteMageRuntimeUpdate::default();
     let now = Instant::now();
 
     let Some(actor) = instance.find_actor(actor_id) else {
@@ -828,24 +828,24 @@ pub(crate) fn refresh_whm_runtime_state_on_actor(
         else {
             return update;
         };
-        let whm = &mut combat_state.whm;
+        let white_mage = &mut combat_state.white_mage;
 
         // Lily generation: one per 20s in combat, max 3 (Trait#196).
-        if level >= LEVEL_LILY && combat_state.in_combat && whm.lily_stacks < MAX_LILY {
-            let next_at = whm.lily_next_at.get_or_insert(now + LILY_INTERVAL);
+        if level >= LEVEL_LILY && combat_state.in_combat && white_mage.lily_stacks < MAX_LILY {
+            let next_at = white_mage.lily_next_at.get_or_insert(now + LILY_INTERVAL);
             if now >= *next_at {
-                whm.lily_stacks += 1;
-                whm.lily_next_at = (whm.lily_stacks < MAX_LILY).then_some(now + LILY_INTERVAL);
+                white_mage.lily_stacks += 1;
+                white_mage.lily_next_at = (white_mage.lily_stacks < MAX_LILY).then_some(now + LILY_INTERVAL);
                 update.changed = true;
             }
         } else {
-            whm.lily_next_at = None;
+            white_mage.lily_next_at = None;
         }
 
         // Glare IV expiry.
-        if whm.glare_iv_expires_at.is_some_and(|t| t <= now) {
-            whm.glare_iv_stacks = 0;
-            whm.glare_iv_expires_at = None;
+        if white_mage.glare_iv_expires_at.is_some_and(|t| t <= now) {
+            white_mage.glare_iv_stacks = 0;
+            white_mage.glare_iv_expires_at = None;
             if status_effects.get(STATUS_GLARE_IV_READY).is_some() {
                 status_effects.remove(STATUS_GLARE_IV_READY);
                 update.status_changed = true;
@@ -853,10 +853,10 @@ pub(crate) fn refresh_whm_runtime_state_on_actor(
         }
 
         // Asylum expiry (member status cleanup happens below, outside the actor borrow).
-        if whm.asylum_expires_at.is_some_and(|t| t <= now) {
-            whm.asylum_position = None;
-            whm.asylum_expires_at = None;
-            whm.asylum_next_tick_at = None;
+        if white_mage.asylum_expires_at.is_some_and(|t| t <= now) {
+            white_mage.asylum_position = None;
+            white_mage.asylum_expires_at = None;
+            white_mage.asylum_next_tick_at = None;
             asylum_expired = true;
         }
     }
@@ -879,7 +879,7 @@ pub(crate) fn refresh_whm_runtime_state_on_actor(
     // ---- Asylum tick: heal the party inside the area every 3s ----
     let asylum_tick = match instance.find_actor(actor_id) {
         Some(NetworkedActor::Player { combat_state, .. }) => {
-            match (combat_state.whm.asylum_position, combat_state.whm.asylum_next_tick_at) {
+            match (combat_state.white_mage.asylum_position, combat_state.white_mage.asylum_next_tick_at) {
                 (Some(center), Some(next_tick)) if now >= next_tick => Some(center),
                 _ => None,
             }
@@ -954,16 +954,16 @@ pub(crate) fn refresh_whm_runtime_state_on_actor(
         if let Some(NetworkedActor::Player { combat_state, .. }) =
             instance.find_actor_mut(actor_id)
         {
-            combat_state.whm.asylum_next_tick_at = Some(now + ASYLUM_TICK_INTERVAL);
+            combat_state.white_mage.asylum_next_tick_at = Some(now + ASYLUM_TICK_INTERVAL);
         }
     }
 
     // ---- Bell expiry detonation ----
     let bell_expired = match instance.find_actor(actor_id) {
         Some(NetworkedActor::Player { combat_state, .. }) => {
-            combat_state.whm.bell_stacks > 0
+            combat_state.white_mage.bell_stacks > 0
                 && combat_state
-                    .whm
+                    .white_mage
                     .bell_expires_at
                     .is_some_and(|t| t <= now)
         }
@@ -1008,33 +1008,33 @@ pub(crate) fn refresh_whm_runtime_state_on_actor(
 
 /// Called when a WHM player takes damage: consume one bell stack (1/s max) and heal the
 /// party within the bell's radius by 400 potency. Returns true if HP changed anywhere.
-pub(crate) fn on_whm_took_damage(
+pub(crate) fn on_white_mage_took_damage(
     network: &NetworkState,
     instance: &mut Instance,
-    whm_actor_id: ObjectId,
+    white_mage_actor_id: ObjectId,
 ) -> bool {
     let now = Instant::now();
 
     let (should_trigger, bell_center) = {
         let Some(NetworkedActor::Player { combat_state, .. }) =
-            instance.find_actor_mut(whm_actor_id)
+            instance.find_actor_mut(white_mage_actor_id)
         else {
             return false;
         };
-        let whm = &mut combat_state.whm;
-        if !whm.has_bell_active() {
+        let white_mage = &mut combat_state.white_mage;
+        if !white_mage.has_bell_active() {
             return false;
         }
-        if whm
+        if white_mage
             .bell_last_trigger_at
             .is_some_and(|t| now.duration_since(t) < BELL_TRIGGER_COOLDOWN)
         {
             return false;
         }
 
-        whm.bell_stacks = whm.bell_stacks.saturating_sub(1);
-        whm.bell_last_trigger_at = Some(now);
-        (true, whm.bell_position.unwrap_or_default())
+        white_mage.bell_stacks = white_mage.bell_stacks.saturating_sub(1);
+        white_mage.bell_last_trigger_at = Some(now);
+        (true, white_mage.bell_position.unwrap_or_default())
     };
 
     if !should_trigger {
@@ -1047,18 +1047,18 @@ pub(crate) fn on_whm_took_damage(
             combat_state,
             status_effects,
             ..
-        }) = instance.find_actor_mut(whm_actor_id)
+        }) = instance.find_actor_mut(white_mage_actor_id)
         else {
             return false;
         };
-        let stacks = combat_state.whm.bell_stacks;
+        let stacks = combat_state.white_mage.bell_stacks;
         if stacks == 0 {
-            combat_state.whm.bell_position = None;
-            combat_state.whm.bell_expires_at = None;
+            combat_state.white_mage.bell_position = None;
+            combat_state.white_mage.bell_expires_at = None;
             status_effects.remove(STATUS_LITURGY_OF_THE_BELL);
         } else {
             let remaining = combat_state
-                .whm
+                .white_mage
                 .bell_expires_at
                 .map(|t| t.saturating_duration_since(now).as_secs_f32())
                 .unwrap_or(1.0);
@@ -1066,13 +1066,13 @@ pub(crate) fn on_whm_took_damage(
                 STATUS_LITURGY_OF_THE_BELL,
                 u16::from(stacks),
                 remaining,
-                whm_actor_id,
+                white_mage_actor_id,
             );
         }
     }
 
     let (base, outgoing_multiplier) = instance
-        .find_actor(whm_actor_id)
+        .find_actor(white_mage_actor_id)
         .map(|caster| {
             let base = match caster {
                 NetworkedActor::Player { parameters, .. } => {
@@ -1087,7 +1087,7 @@ pub(crate) fn on_whm_took_damage(
     let healed = fan_out_aoe_heal(
         network,
         instance,
-        whm_actor_id,
+        white_mage_actor_id,
         0,
         bell_center,
         BELL_RADIUS,
@@ -1106,21 +1106,21 @@ pub(crate) fn on_whm_took_damage(
 ///   [4]    Lily (0-3)
 ///   [5]    BloodLily (0-3)
 ///   [6..8] padding
-pub(crate) fn build_whm_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
-    let whm = &combat_state.whm;
+pub(crate) fn build_white_mage_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
+    let white_mage = &combat_state.white_mage;
 
     let lily = if level >= LEVEL_LILY {
-        whm.lily_stacks
+        white_mage.lily_stacks
     } else {
         0
     };
     let blood_lily = if level >= LEVEL_BLOOD_LILY {
-        whm.blood_lily_stacks
+        white_mage.blood_lily_stacks
     } else {
         0
     };
     let lily_timer_ms = if level >= LEVEL_LILY && combat_state.in_combat && lily < MAX_LILY {
-        whm.lily_next_at
+        white_mage.lily_next_at
             .map(|t| {
                 t.saturating_duration_since(Instant::now())
                     .as_millis()

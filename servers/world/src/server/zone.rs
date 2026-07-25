@@ -21,7 +21,7 @@ use crate::{
         instance::{Instance, QueuedTaskData},
         jobs::{
             bard::{build_bard_gauge_data, gauge_class_job_id, is_bard},
-            blm::{build_blm_gauge_data, is_black_mage},
+            black_mage::{build_black_mage_gauge_data, is_black_mage},
             summoner::{apply_summon_pet_effect, build_summoner_gauge_data, is_summoner},
         },
         network::{DestinationNetwork, NetworkState},
@@ -1338,13 +1338,13 @@ pub fn handle_zone_messages(
                 ))
             } else if is_black_mage(player_spawn.common.class_job) {
                 Some((
-                    crate::server::jobs::blm::gauge_class_job_id(),
-                    build_blm_gauge_data(&combat_state, player_spawn.common.level),
+                    crate::server::jobs::black_mage::gauge_class_job_id(),
+                    build_black_mage_gauge_data(&combat_state, player_spawn.common.level),
                 ))
-            } else if crate::server::jobs::whm::is_white_mage(player_spawn.common.class_job) {
+            } else if crate::server::jobs::white_mage::is_white_mage(player_spawn.common.class_job) {
                 Some((
-                    crate::server::jobs::whm::gauge_class_job_id(),
-                    crate::server::jobs::whm::build_whm_gauge_data(
+                    crate::server::jobs::white_mage::gauge_class_job_id(),
+                    crate::server::jobs::white_mage::build_white_mage_gauge_data(
                         &combat_state,
                         player_spawn.common.level,
                     ),

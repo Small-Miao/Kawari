@@ -1,4 +1,4 @@
 pub mod bard;
-pub mod blm;
+pub mod black_mage;
 pub mod summoner;
-pub mod whm;
+pub mod white_mage;
