@@ -17,18 +17,23 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    StatusEffects,
+    FromServer, StatusEffects,
     server::{
         actor::{NetworkedActor, NpcState},
         combat_state::PlayerCombatState,
+        effect::send_effects_list_with,
         instance::Instance,
-        network::NetworkState,
+        network::{DestinationNetwork, NetworkState},
         party::get_party_id_from_actor_id,
     },
 };
 use kawari::{
-    common::{ObjectId, Position},
-    ipc::zone::ActionRequest,
+    common::{ObjectId, ObjectTypeId, Position},
+    ipc::zone::{
+        ActionEffect, ActionRequest, ActionResult, ActionType, ActorControlCategory,
+        BattleNpcSubKind, CharacterDataFlag, EffectKind, ObjectKind, ServerZoneIpcData,
+        ServerZoneIpcSegment, SpawnNpc, SpawnObject,
+    },
 };
 
 /// ClassJob row id for White Mage (WHM).
@@ -52,7 +57,7 @@ const ACTION_MEDICA_II: u32 = 133;
 const ACTION_CURE_II: u32 = 135;
 const ACTION_PRESENCE_OF_MIND: u32 = 136;
 pub(crate) const ACTION_HOLY: u32 = 139;
-const ACTION_ASYLUM: u32 = 3569;
+pub(crate) const ACTION_ASYLUM: u32 = 3569;
 #[allow(dead_code)]
 const ACTION_TETRAGRAMMATON: u32 = 3570;
 const ACTION_ASSIZE: u32 = 3571;
@@ -80,9 +85,32 @@ const ACTION_TEMPERANCE: u32 = 16536;
 const ACTION_GLARE_III: u32 = 25859;
 pub(crate) const ACTION_HOLY_III: u32 = 25860;
 pub(crate) const ACTION_LITURGY_OF_THE_BELL: u32 = 25862;
+/// 礼仪之铃（引爆）: the action the CN 7.51 client actually sends when the bell button is pressed
+/// while a bell is active (detonate early). The Action sheet row is an unrelated name — the
+/// client sends this id regardless, as confirmed by retail capture.
+pub(crate) const ACTION_LITURGY_OF_THE_BELL_DETONATE: u32 = 28507;
+/// The bell NPC's heal cast, shared by trigger / manual detonation / expiry.
+const ACTION_BELL_HEAL: u32 = 25864;
+/// Animation (spell) id on the bell's heal cast for manual detonation (and, by symmetry, the
+/// damage trigger).
+pub(crate) const BELL_HEAL_SPELL_MANUAL: u16 = 25895;
+/// Animation (spell) id on the bell's heal cast for expiry detonation.
+const BELL_HEAL_SPELL_EXPIRY: u16 = 26108;
 const ACTION_MEDICA_III: u32 = 37010;
 const ACTION_GLARE_IV: u32 = 37009;
 pub(crate) const ACTION_DIVINE_CARESS: u32 = 37011;
+
+// ==================== Bell / Asylum actor identity (retail capture, CN 7.51) ====================
+
+/// BNpcBase row for the bell NPC (captured NpcSpawn after de-obfuscation).
+const BELL_BNPC_BASE: u32 = 13961;
+/// BNpcName row for the bell NPC (礼仪之铃).
+const BELL_BNPC_NAME: u32 = 10349;
+const BELL_NAME: &str = "礼仪之铃";
+/// Pet sheet row the client binds the bell to (SetupPet / SetPetParameters pet_id 0x21).
+const BELL_PET_ID: u32 = 33;
+/// Asylum ground VFX object base id (retail ObjectSpawn capture).
+const ASYLUM_OBJECT_BASE_ID: u32 = 0x6EB;
 
 // ==================== Status IDs (CN 7.51 Status sheet) ====================
 
@@ -122,6 +150,8 @@ pub(crate) const STATUS_DIVINE_CARESS_READY: u16 = 3881;
 pub(crate) const STATUS_DIVINE_CARESS_BARRIER: u16 = 3903;
 /// 神爱环: Divine Caress follow-up regen.
 pub(crate) const STATUS_DIVINE_CARESSED: u16 = 3904;
+/// 庇护所: the area marker on the caster (24s), shown while an Asylum is active.
+pub(crate) const STATUS_ASYLUM_AREA: u16 = 1911;
 /// 庇护所: standing inside Asylum (+10% healing received).
 pub(crate) const STATUS_ASYLUM_INSIDE: u16 = 1912;
 /// 衰弱: Raise weakness.
@@ -156,6 +186,8 @@ const ASYLUM_DURATION: Duration = Duration::from_secs(24);
 const ASYLUM_RADIUS: f32 = 15.0;
 const ASYLUM_TICK_INTERVAL: Duration = Duration::from_secs(3);
 const ASYLUM_TICK_POTENCY: u32 = 100;
+/// Retail refreshes the asylum inside-status with a 5s duration on every tick.
+const ASYLUM_INSIDE_STATUS_DURATION: f32 = 5.0;
 const BELL_DURATION: Duration = Duration::from_secs(20);
 pub(crate) const BELL_RADIUS: f32 = 20.0;
 const BELL_STACKS: u8 = 5;
@@ -199,6 +231,12 @@ pub struct WhiteMageState {
     pub bell_expires_at: Option<Instant>,
     #[serde(skip)]
     pub bell_last_trigger_at: Option<Instant>,
+    /// The spawned bell NPC actor, so it can be despawned on detonation/expiry.
+    #[serde(skip)]
+    pub bell_actor_id: Option<ObjectId>,
+    /// The spawned Asylum ground VFX object, so it can be despawned on expiry/re-cast.
+    #[serde(skip)]
+    pub asylum_object_id: Option<ObjectId>,
 }
 
 impl WhiteMageState {
@@ -289,6 +327,7 @@ pub(crate) fn can_execute_white_mage_action(
         ACTION_GLARE_IV => white_mage.glare_iv_stacks > 0,
         ACTION_DIVINE_CARESS => status_effects.get(STATUS_DIVINE_CARESS_READY).is_some(),
         ACTION_LITURGY_OF_THE_BELL => level >= 90,
+        ACTION_LITURGY_OF_THE_BELL_DETONATE => white_mage.has_bell_active(),
         _ => true,
     }
 }
@@ -428,6 +467,15 @@ pub(crate) fn update_white_mage_state_after_action(
             white_mage.asylum_position = Some(center);
             white_mage.asylum_expires_at = Some(Instant::now() + ASYLUM_DURATION);
             white_mage.asylum_next_tick_at = Some(Instant::now() + ASYLUM_TICK_INTERVAL);
+            // The caster carries the 24s area-marker status while the Asylum is up (零售 capture:
+            // EffectResult grants 1911 for 24.0s alongside the 1912 inside-status).
+            status_effects.add_with_source(
+                STATUS_ASYLUM_AREA,
+                0,
+                ASYLUM_DURATION.as_secs_f32(),
+                owner_actor_id,
+            );
+            update.status_changed = true;
         }
         ACTION_LITURGY_OF_THE_BELL => {
             // Re-using while a bell is active detonates the old one first (heal is resolved
@@ -464,12 +512,13 @@ pub(crate) fn update_white_mage_state_after_action(
     update
 }
 
-/// Detonate the active bell (recast or expiry): heal party members within the bell's radius
-/// by 200 potency per remaining stack. Returns the total heal amount, or None if no bell.
-/// Clears the bell state and its status.
+/// Detonate the active bell (re-cast, manual detonation, or expiry): heal party members within
+/// the bell's radius by 200 potency per remaining stack. Returns the bell's position, the total
+/// potency, and the spawned bell NPC (if any) so the caller can send the heal cast and despawn
+/// the actor. Clears the bell state and its status.
 pub(crate) fn take_bell_detonation(
     actor: &mut NetworkedActor,
-) -> Option<(glam::Vec3, u32)> {
+) -> Option<(glam::Vec3, u32, Option<ObjectId>)> {
     let NetworkedActor::Player {
         combat_state,
         status_effects,
@@ -486,6 +535,7 @@ pub(crate) fn take_bell_detonation(
 
     let position = white_mage.bell_position?;
     let total_potency = u32::from(white_mage.bell_stacks) * BELL_EXPIRE_POTENCY_PER_STACK;
+    let bell_actor_id = white_mage.bell_actor_id.take();
 
     white_mage.bell_position = None;
     white_mage.bell_stacks = 0;
@@ -495,7 +545,7 @@ pub(crate) fn take_bell_detonation(
         status_effects.remove(STATUS_LITURGY_OF_THE_BELL);
     }
 
-    Some((position, total_potency))
+    Some((position, total_potency, bell_actor_id))
 }
 
 // ==================== Healing & mitigation modifiers ====================
@@ -608,7 +658,8 @@ pub(crate) fn is_confession_trigger(action_id: u32) -> bool {
 /// primary), applying both the caster's outgoing-heal multiplier and the target's
 /// incoming-heal multiplier, plus the Confession bonus where applicable. Also generates enmity
 /// for the caster on every enemy engaged with each healed member. Returns the healed actor ids
-/// so the caller can sync their HP/MP.
+/// with the amount each was actually healed for, so the caller can sync HP bars and reproduce
+/// the heal in effect packets.
 pub(crate) fn fan_out_aoe_heal(
     network: &NetworkState,
     instance: &mut Instance,
@@ -618,7 +669,7 @@ pub(crate) fn fan_out_aoe_heal(
     radius: f32,
     base_amount: u32,
     outgoing_multiplier: f64,
-) -> Vec<ObjectId> {
+) -> Vec<(ObjectId, u32)> {
     let members = party_member_actor_ids(network, from_actor_id);
     let outgoing = outgoing_multiplier;
 
@@ -696,7 +747,7 @@ pub(crate) fn fan_out_aoe_heal(
                     }
                 }
             }
-            healed.push(member_id);
+            healed.push((member_id, amount_healed));
         }
     }
 
@@ -791,6 +842,242 @@ pub(crate) fn fan_out_divine_caress(
     buffed
 }
 
+// ==================== Ground actors & effect packets (retail capture, CN 7.51) ====================
+
+/// Spawn the bell NPC at the bell's position and bind it to the caster's pet slot (SetupPet +
+/// SetPetParameters with pet_id 33), mirroring the retail packet sequence. Returns the new
+/// actor id.
+pub(crate) fn spawn_bell_actor(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    owner_actor_id: ObjectId,
+    position: Position,
+) -> Option<ObjectId> {
+    let owner = instance.find_actor(owner_actor_id)?;
+    let owner_common = owner.get_common_spawn();
+    let level = owner_common.level;
+    let owner_hp = owner_common.max_health_points;
+    let owner_mp = owner_common.max_resource_points;
+
+    let bell_actor_id = Instance::generate_actor_id();
+
+    // SetupPet binds the bell to the owner's pet hotbar slot; SetPetParameters follows with the
+    // same pet id and unk2=2 (both captured from retail).
+    network.send_to_by_actor_id(
+        owner_actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::SetupPet {
+            owner_id: owner_actor_id,
+            pet_id: BELL_PET_ID,
+            pet_actor_id: bell_actor_id,
+            unk2: 1,
+            unk3: 1,
+        }),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_to_by_actor_id(
+        owner_actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::SetPetParameters {
+            pet_id: BELL_PET_ID,
+            unk2: 2,
+            unk3: 0,
+            unk4: 0,
+            mount_state: 0,
+        }),
+        DestinationNetwork::ZoneClients,
+    );
+
+    let mut spawn = SpawnNpc::default();
+    spawn.common.base_id = BELL_BNPC_BASE;
+    spawn.common.name_id = BELL_BNPC_NAME;
+    spawn.common.name = BELL_NAME.to_string();
+    spawn.common.pet_id = BELL_PET_ID;
+    spawn.common.owner_id = owner_actor_id;
+    spawn.common.max_health_points = owner_hp;
+    spawn.common.health_points = owner_hp;
+    spawn.common.resource_points = owner_mp;
+    spawn.common.max_resource_points = owner_mp;
+    spawn.common.object_kind = ObjectKind::BattleNpc(BattleNpcSubKind::Pet);
+    spawn.common.level = level;
+    spawn.common.position = position;
+    spawn.character_data_flags = CharacterDataFlag::from_bits_retain(0x1);
+
+    instance.insert_npc(bell_actor_id, spawn);
+
+    let Some(actor) = instance.find_actor(bell_actor_id) else {
+        return None;
+    };
+    let NetworkedActor::Npc { spawn, .. } = actor else {
+        return None;
+    };
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::SpawnNpc(spawn.clone()));
+    network.send_in_range_inclusive_instance(
+        bell_actor_id,
+        instance,
+        FromServer::PacketSegment(ipc, bell_actor_id),
+        DestinationNetwork::ZoneClients,
+    );
+    send_effects_list_with(network, instance, bell_actor_id);
+
+    Some(bell_actor_id)
+}
+
+/// Detach the bell from the owner's pet slot and despawn the bell NPC (if one was spawned).
+pub(crate) fn despawn_bell_actor(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    owner_actor_id: ObjectId,
+    bell_actor_id: Option<ObjectId>,
+) {
+    network.send_to_by_actor_id(
+        owner_actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::SetupPet {
+            owner_id: owner_actor_id,
+            pet_id: 0,
+            pet_actor_id: ObjectId(0xE0000000),
+            unk2: 1,
+            unk3: 1,
+        }),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_to_by_actor_id(
+        owner_actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::SetPetParameters {
+            pet_id: 0,
+            unk2: 2,
+            unk3: 0,
+            unk4: 0,
+            mount_state: 0,
+        }),
+        DestinationNetwork::ZoneClients,
+    );
+
+    if let Some(bell_actor_id) = bell_actor_id {
+        network.remove_actor(instance, bell_actor_id);
+    }
+}
+
+/// Spawn (or replace) the Asylum ground VFX object at the given position, mirroring the retail
+/// ObjectSpawn (base 0x6EB, not targetable). Despawns any previous Asylum object first.
+pub(crate) fn spawn_asylum_object(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    owner_actor_id: ObjectId,
+    position: Position,
+    old_object_id: Option<ObjectId>,
+) -> ObjectId {
+    let object_id = ObjectId(fastrand::u32(..));
+
+    let spawn = SpawnObject {
+        kind: ObjectKind::AreaObject,
+        not_targetable: true,
+        base_id: ASYLUM_OBJECT_BASE_ID,
+        entity_id: object_id,
+        owner_id: owner_actor_id,
+        radius: ASYLUM_RADIUS,
+        position,
+        ..Default::default()
+    };
+    instance.insert_object(object_id, spawn, String::default());
+
+    network.spawn_inserted_object_in_range(instance, object_id);
+    if let Some(old_object_id) = old_object_id {
+        network.remove_actor(instance, old_object_id);
+    }
+
+    object_id
+}
+
+/// Send the bell's heal cast (action 25864) from the bell NPC, one ActionResult per healed
+/// party member. `spell_id` selects the retail animation variant (manual vs expiry).
+pub(crate) fn send_bell_heal_effects(
+    network: &mut NetworkState,
+    instance: &Instance,
+    source_actor_id: ObjectId,
+    healed: &[(ObjectId, u32)],
+    spell_id: u16,
+) {
+    for &(member_id, amount) in healed {
+        let target = ObjectTypeId {
+            object_id: member_id,
+            ..Default::default()
+        };
+        let mut effects = [ActionEffect::default(); 8];
+        effects[0] = ActionEffect {
+            kind: EffectKind::Heal {
+                unk1: [0; 5],
+                amount,
+            },
+        };
+        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+            animation_target_id: target,
+            target_id_again: target,
+            action_id: ACTION_BELL_HEAL,
+            animation_lock: 0.0,
+            rotation: 0.0,
+            spell_id,
+            source_sequence: 0,
+            effect_count: 1,
+            effects,
+            action_type: ActionType::Action,
+            global_sequence: network.global_action_sequence,
+            ..Default::default()
+        }));
+        network.global_action_sequence += 1;
+        network.send_in_range_inclusive_instance(
+            member_id,
+            instance,
+            FromServer::PacketSegment(ipc, source_actor_id),
+            DestinationNetwork::ZoneClients,
+        );
+    }
+}
+
+/// Floating heal number above `target_id` for a periodic heal tick (ActorControl category
+/// 1540), matching how retail renders HoT ticks.
+pub(crate) fn send_tick_heal_popup(
+    network: &mut NetworkState,
+    instance: &Instance,
+    target_id: ObjectId,
+    status_id: u32,
+    amount: u32,
+    source_actor_id: ObjectId,
+) {
+    network.send_in_range_inclusive_instance(
+        target_id,
+        instance,
+        FromServer::ActorControl(
+            target_id,
+            ActorControlCategory::TickHeal {
+                status_id,
+                amount,
+                source_actor_id,
+                unk2: 0,
+                unk3: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+}
+
+/// Broadcast an actor's current HP/MP so party members' bars move after silent heals.
+pub(crate) fn send_hp_mp(network: &mut NetworkState, instance: &Instance, actor_id: ObjectId) {
+    let Some(actor) = instance.find_actor(actor_id) else {
+        return;
+    };
+    let common_spawn = actor.get_common_spawn();
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateHpMpTp {
+        hp: common_spawn.health_points,
+        mp: common_spawn.resource_points,
+        unk: 0,
+    });
+    network.send_in_range_inclusive_instance(
+        actor_id,
+        instance,
+        FromServer::PacketSegment(ipc, actor_id),
+        DestinationNetwork::ZoneClients,
+    );
+}
+
 // ==================== Runtime tick ====================
 
 /// Result of the per-tick runtime refresh.
@@ -798,14 +1085,13 @@ pub(crate) fn fan_out_divine_caress(
 pub(crate) struct WhiteMageRuntimeUpdate {
     pub(crate) changed: bool,
     pub(crate) status_changed: bool,
-    /// Party members whose HP changed this tick (asylum tick / bell detonation).
-    pub(crate) hp_changed: bool,
 }
 
 /// Per-server-tick driver: Lily generation (20s in combat), Glare IV expiry, Asylum ticks,
-/// and Liturgy of the Bell expiry detonation.
+/// and Liturgy of the Bell expiry detonation. Sends its own packets (tick popups, HP syncs,
+/// ground-actor spawns/despawns) via `network`.
 pub(crate) fn refresh_white_mage_runtime_state_on_actor(
-    network: &NetworkState,
+    network: &mut NetworkState,
     instance: &mut Instance,
     actor_id: ObjectId,
 ) -> WhiteMageRuntimeUpdate {
@@ -819,6 +1105,7 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
 
     // ---- Actor-local state: lily generation, Glare IV expiry, asylum expiry ----
     let mut asylum_expired = false;
+    let mut asylum_object_id = None;
     {
         let Some(NetworkedActor::Player {
             combat_state,
@@ -857,11 +1144,17 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
             white_mage.asylum_position = None;
             white_mage.asylum_expires_at = None;
             white_mage.asylum_next_tick_at = None;
+            asylum_object_id = white_mage.asylum_object_id.take();
             asylum_expired = true;
+            if status_effects.get(STATUS_ASYLUM_AREA).is_some() {
+                status_effects.remove(STATUS_ASYLUM_AREA);
+                update.status_changed = true;
+            }
         }
     }
 
-    // Strip the Asylum inside-status from every party member once the area ends.
+    // Strip the Asylum inside-status from every party member once the area ends, and despawn
+    // the ground VFX object.
     if asylum_expired {
         let members = party_member_actor_ids(network, actor_id);
         for member_id in members {
@@ -871,8 +1164,11 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                 && status_effects.get(STATUS_ASYLUM_INSIDE).is_some()
             {
                 status_effects.remove(STATUS_ASYLUM_INSIDE);
-                update.status_changed = true;
+                send_effects_list_with(network, instance, member_id);
             }
+        }
+        if let Some(object_id) = asylum_object_id {
+            network.remove_actor(instance, object_id);
         }
     }
 
@@ -910,20 +1206,6 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                 .is_some_and(|s| s.get(STATUS_ASYLUM_INSIDE).is_some());
 
             if inside {
-                if !has_status {
-                    if let Some(status_effects) = instance
-                        .find_actor_mut(member_id)
-                        .and_then(|a| a.status_effects_mut())
-                    {
-                        status_effects.add_with_source(
-                            STATUS_ASYLUM_INSIDE,
-                            0,
-                            ASYLUM_TICK_INTERVAL.as_secs_f32() + 1.0,
-                            actor_id,
-                        );
-                        update.status_changed = true;
-                    }
-                }
                 // The +10% applies starting with the tick that finds the member already buffed.
                 let amount = if has_status {
                     (heal_amount as f64 * 1.1) as u32
@@ -937,8 +1219,32 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                     .health_points
                     .saturating_add(amount)
                     .min(common_spawn.max_health_points);
-                if common_spawn.health_points != before {
-                    update.hp_changed = true;
+                let amount_healed = common_spawn.health_points.saturating_sub(before);
+
+                // Retail refreshes the inside-status every tick (5s duration) and resends the
+                // member's status list alongside the flying tick number.
+                if let Some(status_effects) = instance
+                    .find_actor_mut(member_id)
+                    .and_then(|a| a.status_effects_mut())
+                {
+                    status_effects.add_with_source(
+                        STATUS_ASYLUM_INSIDE,
+                        0,
+                        ASYLUM_INSIDE_STATUS_DURATION,
+                        actor_id,
+                    );
+                }
+                send_effects_list_with(network, instance, member_id);
+                if amount_healed > 0 {
+                    send_tick_heal_popup(
+                        network,
+                        instance,
+                        member_id,
+                        u32::from(STATUS_ASYLUM_AREA),
+                        amount_healed,
+                        actor_id,
+                    );
+                    send_hp_mp(network, instance, member_id);
                 }
             } else if has_status {
                 if let Some(status_effects) = instance
@@ -946,7 +1252,7 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                     .and_then(|a| a.status_effects_mut())
                 {
                     status_effects.remove(STATUS_ASYLUM_INSIDE);
-                    update.status_changed = true;
+                    send_effects_list_with(network, instance, member_id);
                 }
             }
         }
@@ -974,7 +1280,7 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
         let detonation = instance
             .find_actor_mut(actor_id)
             .and_then(take_bell_detonation);
-        if let Some((bell_center, total_potency)) = detonation {
+        if let Some((bell_center, total_potency, bell_actor_id)) = detonation {
             let base = instance
                 .find_actor(actor_id)
                 .and_then(|caster| match caster {
@@ -994,7 +1300,17 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                 base,
                 outgoing_multiplier,
             );
-            update.hp_changed |= !healed.is_empty();
+            send_bell_heal_effects(
+                network,
+                instance,
+                bell_actor_id.unwrap_or(actor_id),
+                &healed,
+                BELL_HEAL_SPELL_EXPIRY,
+            );
+            for &(member_id, _) in &healed {
+                send_hp_mp(network, instance, member_id);
+            }
+            despawn_bell_actor(network, instance, actor_id, bell_actor_id);
             update.status_changed = true;
             update.changed = true;
         }
@@ -1007,15 +1323,16 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
 // ==================== Bell damage trigger ====================
 
 /// Called when a WHM player takes damage: consume one bell stack (1/s max) and heal the
-/// party within the bell's radius by 400 potency. Returns true if HP changed anywhere.
+/// party within the bell's radius by 400 potency. Sends the bell's heal cast and, when the
+/// last stack is consumed, detonates/despawns the bell. Returns true if a stack was consumed.
 pub(crate) fn on_white_mage_took_damage(
-    network: &NetworkState,
+    network: &mut NetworkState,
     instance: &mut Instance,
     white_mage_actor_id: ObjectId,
 ) -> bool {
     let now = Instant::now();
 
-    let (should_trigger, bell_center) = {
+    let (bell_center, bell_actor_id, stacks_left) = {
         let Some(NetworkedActor::Player { combat_state, .. }) =
             instance.find_actor_mut(white_mage_actor_id)
         else {
@@ -1034,14 +1351,15 @@ pub(crate) fn on_white_mage_took_damage(
 
         white_mage.bell_stacks = white_mage.bell_stacks.saturating_sub(1);
         white_mage.bell_last_trigger_at = Some(now);
-        (true, white_mage.bell_position.unwrap_or_default())
+        (
+            white_mage.bell_position.unwrap_or_default(),
+            white_mage.bell_actor_id,
+            white_mage.bell_stacks,
+        )
     };
 
-    if !should_trigger {
-        return false;
-    }
-
-    // Keep the bell status param in sync with the remaining stacks.
+    // Keep the bell status param in sync with the remaining stacks; clear the bell state when
+    // the last stack is spent.
     {
         let Some(NetworkedActor::Player {
             combat_state,
@@ -1051,10 +1369,10 @@ pub(crate) fn on_white_mage_took_damage(
         else {
             return false;
         };
-        let stacks = combat_state.white_mage.bell_stacks;
-        if stacks == 0 {
+        if stacks_left == 0 {
             combat_state.white_mage.bell_position = None;
             combat_state.white_mage.bell_expires_at = None;
+            combat_state.white_mage.bell_actor_id = None;
             status_effects.remove(STATUS_LITURGY_OF_THE_BELL);
         } else {
             let remaining = combat_state
@@ -1064,7 +1382,7 @@ pub(crate) fn on_white_mage_took_damage(
                 .unwrap_or(1.0);
             status_effects.add_with_source(
                 STATUS_LITURGY_OF_THE_BELL,
-                u16::from(stacks),
+                u16::from(stacks_left),
                 remaining,
                 white_mage_actor_id,
             );
@@ -1094,7 +1412,21 @@ pub(crate) fn on_white_mage_took_damage(
         base,
         outgoing_multiplier,
     );
-    !healed.is_empty()
+    send_bell_heal_effects(
+        network,
+        instance,
+        bell_actor_id.unwrap_or(white_mage_actor_id),
+        &healed,
+        BELL_HEAL_SPELL_MANUAL,
+    );
+    for &(member_id, _) in &healed {
+        send_hp_mp(network, instance, member_id);
+    }
+
+    if stacks_left == 0 {
+        despawn_bell_actor(network, instance, white_mage_actor_id, bell_actor_id);
+    }
+    true
 }
 
 // ==================== Job gauge ====================

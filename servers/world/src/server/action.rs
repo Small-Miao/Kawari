@@ -350,6 +350,12 @@ fn action_cooldown_rejections(
     action_id: u32,
     level: u8,
 ) -> Vec<(usize, Duration)> {
+    // The bell's detonate action uses no sheet-driven cooldown (its sheet row is an unrelated
+    // Viper action); its 1s lock is started explicitly in start_action_cooldowns.
+    if action_id == white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE {
+        return Vec::new();
+    }
+
     let primary_group = game_data.get_action_cooldown_group(action_id);
     let max_charges = game_data.get_action_max_charges_at_level(action_id, level);
 
@@ -409,6 +415,18 @@ fn start_action_cooldowns(
     // GM cheat: never put anything on cooldown so actions can be spammed.
     if *remove_cooldowns {
         return Vec::new();
+    }
+
+    // Bell detonation: retail starts a bare 1s lock on wire group 0 (captured
+    // SetCooldownTimerMax{group: 0, action: 28507, 100cs}) instead of any sheet-driven cooldown —
+    // the Action-sheet row for 28507 is an unrelated Viper action whose groups would be wrong.
+    if action_id == white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE {
+        combat_state.start_cooldown(0, action_id, Duration::from_secs(1), 1, COOLDOWN_TOLERANCE);
+        return vec![StartedCooldown {
+            cooldown_group: 0,
+            action_id,
+            duration_centisec: 100,
+        }];
     }
 
     let recast_100ms = u32::from(game_data.get_action_recast(action_id));
@@ -1535,7 +1553,7 @@ pub fn execute_action(
                                 outgoing_multiplier,
                             )
                         };
-                        for member_id in healed {
+                        for (member_id, _) in healed {
                             if member_id != resolved_request.target.object_id {
                                 update_actor_hp_mp(network.clone(), instance, member_id);
                             }
@@ -1833,13 +1851,19 @@ pub fn execute_action(
             };
 
             white_mage_gauge_data = if white_mage::is_white_mage(class_job) {
-                // Re-placing the bell detonates the old one first; resolve that heal before the
-                // new bell state is written by the after-action hook.
-                if resolved_request.action_id == white_mage::ACTION_LITURGY_OF_THE_BELL {
+                // Detonate the active bell: a re-cast replaces it, and the dedicated detonate
+                // action (28507, which the client sends when the bell button is pressed while a
+                // bell is active) only detonates. The heal resolves before the new bell state is
+                // written by the after-action hook.
+                if matches!(
+                    resolved_request.action_id,
+                    white_mage::ACTION_LITURGY_OF_THE_BELL
+                        | white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE
+                ) {
                     let detonation = instance
                         .find_actor_mut(from_actor_id)
                         .and_then(white_mage::take_bell_detonation);
-                    if let Some((bell_center, total_potency)) = detonation {
+                    if let Some((bell_center, total_potency, bell_actor_id)) = detonation {
                         let (base, outgoing_multiplier) = instance
                             .find_actor(from_actor_id)
                             .map(|caster| {
@@ -1852,8 +1876,8 @@ pub fn execute_action(
                                 (base, white_mage::outgoing_heal_multiplier(Some(caster)))
                             })
                             .unwrap_or((0, 1.0));
-                        let network_guard = network.lock();
-                        white_mage::fan_out_aoe_heal(
+                        let mut network_guard = network.lock();
+                        let healed = white_mage::fan_out_aoe_heal(
                             &network_guard,
                             instance,
                             from_actor_id,
@@ -1863,10 +1887,26 @@ pub fn execute_action(
                             base,
                             outgoing_multiplier,
                         );
+                        white_mage::send_bell_heal_effects(
+                            &mut network_guard,
+                            instance,
+                            bell_actor_id.unwrap_or(from_actor_id),
+                            &healed,
+                            white_mage::BELL_HEAL_SPELL_MANUAL,
+                        );
+                        for &(member_id, _) in &healed {
+                            white_mage::send_hp_mp(&mut network_guard, instance, member_id);
+                        }
+                        white_mage::despawn_bell_actor(
+                            &mut network_guard,
+                            instance,
+                            from_actor_id,
+                            bell_actor_id,
+                        );
                     }
                 }
 
-                if let Some(actor) = instance.find_actor_mut(from_actor_id) {
+                let gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id) {
                     let action_update = white_mage::update_white_mage_state_after_action(
                         resolved_request.action_id,
                         actor,
@@ -1885,7 +1925,58 @@ pub fn execute_action(
                 } else {
                     white_mage_action_update = white_mage::WhiteMageActionUpdate::default();
                     None
+                };
+
+                // Spawn/replace the ground actors for the freshly-written state: the bell NPC
+                // (re-cast only — detonation already despawned the old one above) and the
+                // Asylum VFX object.
+                let mut network_guard = network.lock();
+                if resolved_request.action_id == white_mage::ACTION_LITURGY_OF_THE_BELL {
+                    let position = ground_position.unwrap_or_else(|| {
+                        instance
+                            .find_actor(from_actor_id)
+                            .map(|actor| actor.position())
+                            .unwrap_or_default()
+                    });
+                    if let Some(bell_actor_id) = white_mage::spawn_bell_actor(
+                        &mut network_guard,
+                        instance,
+                        from_actor_id,
+                        position,
+                    ) && let Some(NetworkedActor::Player { combat_state, .. }) =
+                        instance.find_actor_mut(from_actor_id)
+                    {
+                        combat_state.white_mage.bell_actor_id = Some(bell_actor_id);
+                    }
+                } else if resolved_request.action_id == white_mage::ACTION_ASYLUM {
+                    let position = ground_position.unwrap_or_else(|| {
+                        instance
+                            .find_actor(from_actor_id)
+                            .map(|actor| actor.position())
+                            .unwrap_or_default()
+                    });
+                    let old_object_id = match instance.find_actor_mut(from_actor_id) {
+                        Some(NetworkedActor::Player { combat_state, .. }) => {
+                            combat_state.white_mage.asylum_object_id.take()
+                        }
+                        _ => None,
+                    };
+                    let object_id = white_mage::spawn_asylum_object(
+                        &mut network_guard,
+                        instance,
+                        from_actor_id,
+                        position,
+                        old_object_id,
+                    );
+                    if let Some(NetworkedActor::Player { combat_state, .. }) =
+                        instance.find_actor_mut(from_actor_id)
+                    {
+                        combat_state.white_mage.asylum_object_id = Some(object_id);
+                    }
                 }
+                drop(network_guard);
+
+                gauge_data
             } else {
                 white_mage_action_update = white_mage::WhiteMageActionUpdate::default();
                 None
@@ -2578,8 +2669,12 @@ pub fn execute_enemy_action(
                 .map(|actor| actor.get_common_spawn().class_job)
                 .unwrap_or_default(),
         ) {
-            let network_guard = network.lock();
-            white_mage::on_white_mage_took_damage(&network_guard, instance, request.target.object_id);
+            let mut network_guard = network.lock();
+            white_mage::on_white_mage_took_damage(
+                &mut network_guard,
+                instance,
+                request.target.object_id,
+            );
         }
 
         update_actor_hp_mp(network.clone(), instance, request.target.object_id);

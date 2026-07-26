@@ -2,6 +2,7 @@
 name = "kawari-actionaudit"
 edition.workspace = true
 version.workspace = true
+default-run = "kawari-actionaudit"
 
 [lints]
 workspace = true
