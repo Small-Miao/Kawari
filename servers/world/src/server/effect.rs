@@ -6,15 +6,15 @@ use mlua::Function;
 use parking_lot::Mutex;
 
 use crate::{
+    ClientId, FromServer, PlayerData, StatusEffects, ToServer,
     lua::{KawariLua, KawariLuaState, LuaContent, LuaPlayer, LuaZone},
     server::{
+        WorldServer,
         combat_state::PlayerCombatState,
         instance::{Instance, QueuedTaskData},
         network::{DestinationNetwork, NetworkState},
-        WorldServer,
     },
     zone_connection::BaseParameters,
-    ClientId, FromServer, PlayerData, StatusEffects, ToServer,
 };
 use kawari::{
     common::ObjectId,
@@ -191,6 +191,13 @@ pub fn gain_effect_instance(
     effect_source_actor_id: ObjectId,
     inform_players: bool,
 ) -> u8 {
+    if effect_id == 0
+        || !effect_duration.is_finite()
+        || !(0.0..=604800.0).contains(&effect_duration)
+    {
+        tracing::warn!("拒绝无效的状态 ID 或持续时间");
+        return 0;
+    }
     let Some(actor) = instance.find_actor_mut(from_actor_id) else {
         return 0;
     };
@@ -209,7 +216,34 @@ pub fn gain_effect_instance(
     // if the status already existed (a refresh, or the DoT/HoT tick registered it first via
     // add_tick), `add` reuses that slot instead of appending. Reporting the wrong index here makes
     // the client show the buff twice (one from this packet's index, one from the StatusEffectList).
-    let index = status_effects.position_of(effect_id).unwrap_or(0) as u8;
+    let Some(index) = status_effects.position_of(effect_id).map(|i| i as u8) else {
+        return 0;
+    };
+    let effect = status_effects.get(effect_id).unwrap();
+    if let Some(director) = &mut instance.director {
+        if director.battle_started_at.is_some() {
+            director
+                .runtime
+                .status_changes
+                .push(super::director::StatusChange {
+                    actor: from_actor_id,
+                    effect,
+                    gained: true,
+                });
+        }
+        // 外部刷新接管同 ID 状态时，不让副本重置误删新来源状态。
+        if director
+            .runtime
+            .owned_effects
+            .get(&(from_actor_id, effect_id))
+            .is_some_and(|s| *s != effect_source_actor_id)
+        {
+            director
+                .runtime
+                .owned_effects
+                .remove(&(from_actor_id, effect_id));
+        }
+    }
 
     if inform_players {
         {
@@ -229,11 +263,6 @@ pub fn gain_effect_instance(
         process_effects_list(network.clone(), instance, from_actor_id);
     }
 
-    // Scheduling doesn't make sense when the effect never ends.
-    if effect_duration == 0.0 {
-        return index;
-    }
-
     // Cancel any existing expiry task for this same status on this actor before scheduling the new
     // one. Re-applying a status (a refresh) re-adds it with the full duration, but the OLD expiry
     // task still points at the original end time — if left in place it fires early and removes the
@@ -245,6 +274,11 @@ pub fn gain_effect_instance(
                 QueuedTaskData::LoseStatusEffect { effect_id: e, .. } if e == effect_id
             ))
     });
+
+    // 永久刷新也必须先取消旧的定时移除任务。
+    if effect_duration == 0.0 {
+        return index;
+    }
 
     instance.insert_task(
         from_id,
@@ -260,6 +294,46 @@ pub fn gain_effect_instance(
     index
 }
 
+/// 在已有实例锁内移除状态并立即同步；供 Director 与正常到期路径共用。
+pub fn remove_effect_instance(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    actor_id: ObjectId,
+    effect_id: u16,
+) -> Option<StatusEffect> {
+    let statuses = instance.find_actor_mut(actor_id)?.status_effects_mut()?;
+    let effect = statuses.get(effect_id)?;
+    statuses.remove(effect_id);
+    instance.retain_tasks(|task| !(task.from_actor_id == actor_id && matches!(task.data, QueuedTaskData::LoseStatusEffect { effect_id: id, .. } if id == effect_id)));
+    if let Some(director) = &mut instance.director {
+        director
+            .runtime
+            .owned_effects
+            .remove(&(actor_id, effect_id));
+        if director.battle_started_at.is_some() {
+            director
+                .runtime
+                .status_changes
+                .push(super::director::StatusChange {
+                    actor: actor_id,
+                    effect,
+                    gained: false,
+                });
+        }
+    }
+    network.lock().send_ac_in_range_inclusive_instance(
+        instance,
+        actor_id,
+        ActorControlCategory::LoseEffect {
+            effect_id: effect_id as u32,
+            unk2: effect.param as u32,
+            source_actor_id: effect.source_actor_id,
+        },
+    );
+    process_effects_list(network, instance, actor_id);
+    Some(effect)
+}
+
 /// Removes an effect from the actor.
 pub fn remove_effect(
     network: Arc<Mutex<NetworkState>>,
@@ -268,54 +342,17 @@ pub fn remove_effect(
     from_id: ClientId,
     from_actor_id: ObjectId,
     effect_id: u16,
-    effect_param: u16,
-    effect_source_actor_id: ObjectId,
+    _effect_param: u16,
+    _effect_source_actor_id: ObjectId,
 ) {
-    // Remove it from our internal data model first
     {
         let mut data = data.lock();
-
         let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
             return;
         };
-
-        let Some(actor) = instance.find_actor_mut(from_actor_id) else {
-            return;
-        };
-
-        let Some(status_effects) = actor.status_effects_mut() else {
-            return;
-        };
-
-        // If we don't have the status effect, just do nothing
-        if status_effects.get(effect_id).is_none() {
+        if remove_effect_instance(network.clone(), instance, from_actor_id, effect_id).is_none() {
             return;
         }
-
-        status_effects.remove(effect_id);
-    }
-
-    // Then send the actor control to lose the effect
-    {
-        let data = data.lock();
-        let mut network = network.lock();
-
-        let ipc = ActorControlCategory::LoseEffect {
-            effect_id: effect_id as u32,
-            unk2: effect_param as u32,
-            source_actor_id: effect_source_actor_id,
-        };
-        network.send_ac_in_range_inclusive(&data, from_actor_id, ipc);
-    }
-
-    // Finally, inform the client of their new status effects list
-    {
-        let mut data = data.lock();
-
-        let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
-            return;
-        };
-        process_effects_list(network.clone(), instance, from_actor_id);
     }
 
     // Also run the effect's Lua script in case it wants to do something!

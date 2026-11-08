@@ -51,6 +51,7 @@ mod lua;
 mod mail;
 mod party;
 mod quest;
+mod resource_data;
 mod social;
 pub mod spawn_allocator;
 mod stats;

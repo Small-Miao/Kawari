@@ -1,3 +1,15 @@
+//! 副本 Lua 接口、战斗生命周期与网络任务执行。
+mod runtime;
+mod scripted;
+mod control;
+pub(super) mod external;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod native_tests;
+use runtime::AoeGuard;
+pub use runtime::{EncounterRuntime, StatusChange};
+
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -28,11 +40,116 @@ use crate::{
         WorldServer,
         action::update_actor_hp_mp,
         actor::{NetworkedActor, NpcState},
-        effect::gain_effect_instance,
+        effect::{gain_effect_instance, remove_effect_instance},
         instance::{Instance, QueuedTaskData},
         network::{DestinationNetwork, NetworkState},
     },
 };
+
+fn validate_seconds(seconds: f32) -> mlua::Result<()> {
+    if seconds.is_finite() && (0.0..=604800.0).contains(&seconds) {
+        Ok(())
+    } else {
+        Err(mlua::Error::runtime("时间必须是 0 到 604800 秒的有限值"))
+    }
+}
+
+/// 仅实际成功的伤害路径可以打开木桩门控，挑衅和感知仇恨不能开场。
+pub fn notify_attack_hit(instance: &mut Instance, source: ObjectId, target: ObjectId, damage: u32) {
+    if damage == 0
+        || !matches!(
+            instance.find_actor(source),
+            Some(NetworkedActor::Player { .. })
+        )
+    {
+        return;
+    }
+    if let Some(director) = &mut instance.director
+        && director.runtime.hit_trigger == Some(target)
+    {
+        director.runtime.hit_trigger = None;
+        director.start_battle();
+    }
+}
+
+fn interrupt_actor(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, actor: ObjectId) {
+    let helpers: Vec<_> = instance
+        .director
+        .as_ref()
+        .map(|d| {
+            d.runtime
+                .omen_sources
+                .iter()
+                .filter_map(|(helper, source)| {
+                    (*source == actor && *helper != actor).then_some(*helper)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for helper in helpers {
+        cancel_actor_cast(network.clone(), instance, helper);
+    }
+    cancel_actor_cast(network, instance, actor);
+}
+
+fn cancel_actor_cast(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, actor: ObjectId) {
+    let Some(director) = &mut instance.director else {
+        return;
+    };
+    let action = director
+        .runtime
+        .casts
+        .get(&actor)
+        .or_else(|| director.runtime.omens.get(&actor))
+        .map(|c| c.1)
+        .unwrap_or(0);
+    director.runtime.cancel_actor(actor);
+    if let Some(NetworkedActor::Npc { cast_locked, .. }) = instance.find_actor_mut(actor) {
+        *cast_locked = false;
+    }
+    if instance.find_actor(actor).is_none() {
+        return;
+    }
+    network.lock().send_ac_in_range_inclusive_instance(
+        instance,
+        actor,
+        ActorControlCategory::CancelCast {
+            log_message_id: 0,
+            action_type: 1,
+            action_id: action,
+            interrupted: true,
+        },
+    );
+}
+
+fn restore_boss(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, actor_id: ObjectId) {
+    let baseline = instance
+        .director
+        .as_ref()
+        .and_then(|d| d.runtime.initial_bosses.get(&actor_id))
+        .cloned();
+    if let Some(baseline) = baseline {
+        let controls = instance
+            .director
+            .as_ref()
+            .unwrap()
+            .runtime
+            .initial_controls
+            .get(&actor_id)
+            .cloned()
+            .unwrap_or_default();
+        instance.cancel_actor_tasks(actor_id);
+        network.lock().remove_actor(instance, actor_id);
+        instance.actors.insert(actor_id, baseline);
+        instance
+            .director
+            .as_mut()
+            .unwrap()
+            .runtime
+            .controls
+            .insert(actor_id, controls);
+    }
+}
 
 /// A value stored in encounter-scoped state (global vars or per-player vars). Mirrors the Lua
 /// value types a mechanic script needs to stash across phases.
@@ -70,8 +187,9 @@ impl EncounterVar {
 /// A lightweight, read-only snapshot of an actor taken at the start of an encounter tick. Lua
 /// mechanic callbacks query these (position, hp, alive) instead of touching the live instance, so
 /// the high-frequency encounter tick can stay pure-`data` and the Lua director stays detached.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ActorSnapshot {
+    pub enmity: Vec<ObjectId>,
     pub id: ObjectId,
     pub is_player: bool,
     /// True if this actor is one of the registered bosses.
@@ -80,6 +198,8 @@ pub struct ActorSnapshot {
     pub rotation: f32,
     pub hp: u32,
     pub max_hp: u32,
+    pub class_job: u8,
+    pub target: ObjectId,
 }
 
 impl ActorSnapshot {
@@ -143,7 +263,6 @@ impl AoeShape {
             }
         }
     }
-
 }
 
 /// A pending AoE produced by a Lua `aoe_*`/`raidwide` call. The origin/rotation are captured at the
@@ -152,6 +271,13 @@ impl AoeShape {
 /// tick, so the snapshot lands at the exact activation time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingAoe {
+    pub rules: scripted::HitRules,
+    /// 在排入精确定时任务时绑定生命周期；无凭据的任务不得结算。
+    pub guard: Option<AoeGuard>,
+    pub completes_cast: bool,
+    pub cast_token: Option<u64>,
+    pub omen_caster: Option<ObjectId>,
+    pub omen_token: Option<u64>,
     pub shape: AoeShape,
     pub origin: Position,
     pub rotation: f32,
@@ -171,6 +297,30 @@ pub struct PendingAoe {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LuaDirectorTask {
+    SpawnScriptObject(kawari::ipc::zone::SpawnObject),
+    PlayActorTimelines {
+        actors: [ObjectId; 10],
+        timelines: [u16; 10],
+    },
+    SetLimitBreak(u32),
+    ScriptDirectorEvent {
+        id: u32,
+        args: [u32; 4],
+    },
+    SetupMapEffects {
+        states: Vec<u16>,
+        flag: u16,
+    },
+    SetWeather {
+        id: u8,
+        fade: f32,
+    },
+    EndScriptCast {
+        source: ObjectId,
+        action: u32,
+    },
+    SpawnScriptActor(scripted::ScriptActor),
+    ArmHitTrigger(ObjectId),
     HideEObj {
         base_id: u32,
     },
@@ -208,6 +358,28 @@ pub enum LuaDirectorTask {
         id: u16,
         param: u16,
         duration: f32,
+        source: ObjectId,
+    },
+    RemoveEffect {
+        actor_id: ObjectId,
+        id: u16,
+        source: Option<ObjectId>,
+    },
+    SetTarget {
+        actor_id: ObjectId,
+        target: ObjectId,
+    },
+    ResetEncounter,
+    /// 清理当前轮次并保持停止，条件超时不允许剩余延时任务继续执行。
+    StopEncounter { reason: String },
+    RestoreBoss {
+        actor_id: ObjectId,
+    },
+    CancelPending {
+        actor_id: Option<ObjectId>,
+    },
+    SetResetOnDeaggro {
+        enabled: bool,
     },
     SetBGM {
         id: u32,
@@ -253,8 +425,9 @@ pub enum LuaDirectorTask {
     },
     CompleteDuty {},
     MapEffect {
-        index: u32,
-        timeline_id: u32,
+        index: u8,
+        timeline_id: u16,
+        state: u16,
     },
     /// Spawn a named helper actor (cast/AoE source, telegraph carrier) from a base BNpc id.
     SpawnHelper {
@@ -272,7 +445,10 @@ pub enum LuaDirectorTask {
         source_id: ObjectId,
         action_id: u32,
         cast_time: f32,
+        omen_delay: u8,
         target_id: ObjectId,
+        spell_id: Option<u16>,
+        position: Option<Position>,
     },
     /// Resolve an AoE after a precise delay. Collected by `director_tick` and handed back to the
     /// caller (which owns the `data`/`network` handles) so it can spawn the precise timer.
@@ -314,6 +490,12 @@ pub enum LuaDirectorTask {
         position: Position,
         rotation: f32,
     },
+    /// 脚本连续移动：更新权威坐标并发送移动同步，不使用瞬移包。
+    SlideActor {
+        actor_id: ObjectId,
+        position: Position,
+        rotation: f32,
+    },
     /// Spawn one visible clone actor (BNpcBase `base_id`, hidden until shown) and add it to the clone
     /// pool. Used for mechanics with visible duplicate bosses (e.g. Crimson Cyclone chargers).
     SpawnClone {
@@ -347,6 +529,8 @@ pub enum LuaDirectorTask {
 // TODO: Maybe collapse into DirectorData?
 #[derive(Default, Debug)]
 pub struct LuaDirector {
+    pub effects: HashMap<ObjectId, Vec<kawari::ipc::zone::StatusEffect>>,
+    pub flag: u8,
     pub data: [u8; 10],
     pub tasks: Vec<LuaDirectorTask>,
     pub bosses: HashMap<u32, DirectorBoss>,
@@ -402,6 +586,7 @@ pub struct ScheduledEvent {
 
 impl UserData for LuaDirector {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        scripted::register(methods);
         methods.add_method_mut("hide_eobj", |_, this, base_id: u32| {
             this.tasks.push(LuaDirectorTask::HideEObj { base_id });
             Ok(())
@@ -425,6 +610,10 @@ impl UserData for LuaDirector {
         );
         methods.add_method_mut("set_data", |_, this, (index, data): (u8, u8)| {
             this.data[index as usize] = data;
+            Ok(())
+        });
+        methods.add_method_mut("set_director_flag", |_, this, flag: u8| {
+            this.flag = flag;
             Ok(())
         });
         methods.add_method("data", |_, this, index: u8| Ok(this.data[index as usize]));
@@ -461,12 +650,139 @@ impl UserData for LuaDirector {
         });
         methods.add_method_mut(
             "gain_effect",
-            |_, this, (actor_id, id, param, duration): (u32, u16, u16, f32)| {
+            |_, this, (actor_id, id, param, duration, source): (u32, u16, u16, f32, Option<u32>)| {
+                validate_seconds(duration)?;
+                if id == 0 { return Err(mlua::Error::runtime("状态 ID 不能为 0")); }
                 this.tasks.push(LuaDirectorTask::GainEffect {
                     actor_id: ObjectId(actor_id),
                     id,
                     param,
                     duration,
+                    source: source.map(ObjectId).unwrap_or_default(),
+                });
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
+            "remove_effect",
+            |_, this, (actor, id, source): (u32, u16, Option<u32>)| {
+                this.tasks.push(LuaDirectorTask::RemoveEffect {
+                    actor_id: ObjectId(actor),
+                    id,
+                    source: source.map(ObjectId),
+                });
+                Ok(())
+            },
+        );
+        methods.add_method("has_effect", |_, this, (actor, id): (u32, u16)| {
+            Ok(this
+                .effects
+                .get(&ObjectId(actor))
+                .is_some_and(|effects| effects.iter().any(|e| e.effect_id == id && id != 0)))
+        });
+        methods.add_method(
+            "get_effect",
+            |lua, this, (actor, id): (u32, u16)| match this
+                .effects
+                .get(&ObjectId(actor))
+                .and_then(|effects| effects.iter().find(|e| e.effect_id == id && id != 0))
+            {
+                Some(effect) => {
+                    let t = lua.create_table()?;
+                    t.set("id", effect.effect_id)?;
+                    t.set("param", effect.param)?;
+                    t.set("duration", effect.duration)?;
+                    t.set("source", effect.source_actor_id.0)?;
+                    Ok(Some(t))
+                }
+                None => Ok(None),
+            },
+        );
+        methods.add_method_mut("reset_encounter", |_, this, ()| {
+            this.tasks.push(LuaDirectorTask::ResetEncounter);
+            Ok(())
+        });
+        methods.add_method_mut("stop_encounter", |_, this, reason: Option<String>| {
+            this.tasks.push(LuaDirectorTask::StopEncounter { reason: reason.unwrap_or_else(||"已停止".into()) });
+            Ok(())
+        });
+        methods.add_method_mut("set_reset_on_deaggro", |_, this, enabled: bool| {
+            this.tasks
+                .push(LuaDirectorTask::SetResetOnDeaggro { enabled });
+            Ok(())
+        });
+        methods.add_method_mut("cancel_pending", |_, this, actor: Option<u32>| {
+            this.tasks.push(LuaDirectorTask::CancelPending {
+                actor_id: actor.map(ObjectId),
+            });
+            Ok(())
+        });
+        methods.add_method_mut("set_target", |_, this, (actor, target): (u32, u32)| {
+            this.tasks.push(LuaDirectorTask::SetTarget {
+                actor_id: ObjectId(actor),
+                target: ObjectId(target),
+            });
+            Ok(())
+        });
+        methods.add_method_mut("set_model_state", |_, this, (actor, state): (u32, u8)| {
+            this.tasks.push(LuaDirectorTask::SendActorControl {
+                actor_id: ObjectId(actor),
+                category: ActorControlCategory::SetModelState {
+                    state: state as u32,
+                },
+            });
+            Ok(())
+        });
+        methods.add_method_mut(
+            "set_animation_state",
+            |_, this, (actor, index, state): (u32, u8, u8)| {
+                if index > 1 {
+                    return Err(mlua::Error::runtime("动画组索引仅支持 0 或 1"));
+                }
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::SetAnimationState {
+                        index: index as u32,
+                        state: state as u32,
+                    },
+                });
+                Ok(())
+            },
+        );
+        methods.add_method_mut("set_target_icon", |_, this, (actor, id): (u32, u32)| {
+            this.tasks.push(LuaDirectorTask::SendActorControl {
+                actor_id: ObjectId(actor),
+                category: ActorControlCategory::ShowLockonVfx {
+                    id,
+                    target: ObjectId(0),
+                },
+            });
+            Ok(())
+        });
+        methods.add_method_mut(
+            "tether",
+            |_, this, (actor, target, id, slot): (u32, u32, u32, Option<u32>)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::Tether {
+                        tether_id: slot.unwrap_or(0),
+                        from_actor_id: id,
+                        to_actor_id: target,
+                        progress: 0,
+                    },
+                });
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
+            "tether_cancel",
+            |_, this, (actor, id, slot): (u32, u32, Option<u32>)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::TetherCancel {
+                        tether_id: slot.unwrap_or(0),
+                        target_actor_id: id,
+                    },
                 });
                 Ok(())
             },
@@ -545,42 +861,95 @@ impl UserData for LuaDirector {
         // Play a one-shot ActionTimeline animation on an actor (no cast bar / damage). Used for
         // mechanic flourishes like a boss's jump-away and landing during Crimson Cyclone (retail
         // plays ActionTimeline 0x008C jumping up, 0x008D landing — see parse_boss_timeline PATE).
-        methods.add_method_mut("play_timeline", |_, this, (actor, timeline_id): (u32, u32)| {
+        methods.add_method_mut(
+            "play_timeline",
+            |_, this, (actor, timeline_id): (u32, u32)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::PlayActionTimeline { timeline_id },
+                });
+                Ok(())
+            },
+        );
+        // 客户端 415 添加隐藏标志 13，不能作为移动后的刷新包使用。
+        methods.add_method_mut("hide_actor", |_, this, actor: u32| {
             this.tasks.push(LuaDirectorTask::SendActorControl {
                 actor_id: ObjectId(actor),
-                category: ActorControlCategory::PlayActionTimeline { timeline_id },
+                category: ActorControlCategory::HideActor {},
             });
             Ok(())
         });
-        // Force the client to re-read an actor's transform (position/rotation) and state. Retail sends
-        // this (ActorControl 415) right after a SetPos/move so the client actually applies the new
-        // facing — without it a moved actor (especially a hidden one just shown) keeps its stale
-        // on-screen rotation (the Crimson Cyclone clones charging the wrong way). Call right after
-        // `move_actor`.
-        methods.add_method_mut("force_state_refresh", |_, this, actor: u32| {
-            this.tasks.push(LuaDirectorTask::SendActorControl {
-                actor_id: ObjectId(actor),
-                category: ActorControlCategory::ForceStateRefresh {},
-            });
-            Ok(())
-        });
+        methods.add_method_mut(
+            "play_actor_timelines",
+            |lua, this, value: Value| {
+                let entries: Vec<(u32, u16)> = lua.from_value(value)?;
+                if entries.is_empty() || entries.len() > 10 {
+                    return Err(mlua::Error::runtime("同步动画要求 1～10 名演员"));
+                }
+                let mut actors = [ObjectId::default(); 10];
+                let mut timelines = [0; 10];
+                for (i, (actor, timeline)) in entries.into_iter().enumerate() {
+                    if actor == ObjectId::default().0 || timeline == 0 {
+                        return Err(mlua::Error::runtime("同步动画不能包含空演员或动画 ID"));
+                    }
+                    actors[i] = ObjectId(actor);
+                    timelines[i] = timeline;
+                }
+                this.tasks
+                    .push(LuaDirectorTask::PlayActorTimelines { actors, timelines });
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
+            "set_actor_owner",
+            |_, this, (actor, owner): (u32, Option<u32>)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::SetActorOwner {
+                        owner: owner.map(ObjectId).unwrap_or_default(),
+                    },
+                });
+                Ok(())
+            },
+        );
+        methods.add_method_mut(
+            "actor_presentation",
+            |_, this, (actor, operation, parameter, duration): (u32, u32, u32, u32)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::ActorPresentation {
+                        actor: ObjectId(actor),
+                        operation,
+                        parameter,
+                        duration,
+                    },
+                });
+                Ok(())
+            },
+        );
         // Toggle whether an actor can be targeted (pair with `set_visible` when a boss leaves).
-        methods.add_method_mut("set_targetable", |_, this, (actor, targetable): (u32, bool)| {
-            this.tasks.push(LuaDirectorTask::SendActorControl {
-                actor_id: ObjectId(actor),
-                category: ActorControlCategory::Targetable { targetable },
-            });
-            Ok(())
-        });
+        methods.add_method_mut(
+            "set_targetable",
+            |_, this, (actor, targetable): (u32, bool)| {
+                this.tasks.push(LuaDirectorTask::SendActorControl {
+                    actor_id: ObjectId(actor),
+                    category: ActorControlCategory::Targetable { targetable },
+                });
+                Ok(())
+            },
+        );
         // Pause/resume an NPC's behavior (chase + auto-attack). Use `false` while a boss is off doing
         // a mechanic so it stops hitting players; `true` to resume.
-        methods.add_method_mut("set_ai_enabled", |_, this, (actor, enabled): (u32, bool)| {
-            this.tasks.push(LuaDirectorTask::SetAiPaused {
-                actor_id: ObjectId(actor),
-                paused: !enabled,
-            });
-            Ok(())
-        });
+        methods.add_method_mut(
+            "set_ai_enabled",
+            |_, this, (actor, enabled): (u32, bool)| {
+                this.tasks.push(LuaDirectorTask::SetAiPaused {
+                    actor_id: ObjectId(actor),
+                    paused: !enabled,
+                });
+                Ok(())
+            },
+        );
         // Teleport an actor to a position/rotation (e.g. a clone to its charge start).
         methods.add_method_mut(
             "move_actor",
@@ -663,11 +1032,17 @@ impl UserData for LuaDirector {
             this.tasks.push(LuaDirectorTask::CompleteDuty {});
             Ok(())
         });
-        methods.add_method_mut("map_effect", |_, this, (index, timeline_id): (u32, u32)| {
-            this.tasks
-                .push(LuaDirectorTask::MapEffect { index, timeline_id });
-            Ok(())
-        });
+        methods.add_method_mut(
+            "map_effect",
+            |_, this, (index, timeline_id, state): (u8, u16, Option<u16>)| {
+                this.tasks.push(LuaDirectorTask::MapEffect {
+                    index,
+                    timeline_id,
+                    state: state.unwrap_or(1),
+                });
+                Ok(())
+            },
+        );
         // Schedule a callback at an absolute battle-elapsed time (seconds since battle start).
         methods.add_method_mut("at", |lua, this, (t, f): (f64, Function)| {
             let callback = lua.create_registry_value(f)?;
@@ -953,11 +1328,15 @@ impl UserData for LuaDirector {
                 Option<u32>,
                 Option<Value>,
             )| {
+                validate_seconds(cast_time)?;
                 this.tasks.push(LuaDirectorTask::CastBar {
                     source_id: ObjectId(source),
                     action_id: action,
                     cast_time,
+                    omen_delay: 0,
                     target_id: ObjectId(target.unwrap_or(source)),
+                    spell_id: None,
+                    position: None,
                 });
                 // Send a completing effect when the cast bar finishes, so the caster returns to idle.
                 // Retail sends a DOWN_Effect at cast end; without it the actor is stuck in the cast
@@ -973,6 +1352,12 @@ impl UserData for LuaDirector {
                 };
                 let rotation = this.actor(source).map(|a| a.rotation).unwrap_or(0.0);
                 this.tasks.push(LuaDirectorTask::ResolveAoe(PendingAoe {
+                    rules: Default::default(),
+                    guard: None,
+                    completes_cast: true,
+                    cast_token: None,
+                    omen_caster: None,
+                    omen_token: None,
                     shape: AoeShape::Circle { radius: 0.0 },
                     origin,
                     rotation,
@@ -998,6 +1383,12 @@ impl UserData for LuaDirector {
                 };
                 let rotation = this.actor(actor).map(|a| a.rotation).unwrap_or(0.0);
                 this.tasks.push(LuaDirectorTask::ResolveAoe(PendingAoe {
+                    rules: Default::default(),
+                    guard: None,
+                    completes_cast: false,
+                    cast_token: None,
+                    omen_caster: None,
+                    omen_token: None,
                     shape: AoeShape::Circle { radius: 0.0 },
                     origin,
                     rotation,
@@ -1204,6 +1595,8 @@ impl LuaDirector {
         // telegraph shows for the whole windup). Set to 0 for an instant boss animation with the
         // damage still landing `delay` later (e.g. a no-cast cleave like Incinerate).
         let omen_cast: f32 = params.get("omen_cast").unwrap_or(delay);
+        validate_seconds(delay)?;
+        validate_seconds(omen_cast)?;
 
         // Optional ground telegraph (omen). `omen = true` routes through an off-arena helper from
         // the pool (round-robin) so the boss isn't locked casting and charge actions don't drag it;
@@ -1244,9 +1637,18 @@ impl LuaDirector {
         }
 
         // Animate the resolve from the helper (if one was used and it isn't the boss itself).
-        let effect_source = caster.filter(|c| *c != source_id);
+        let effect_source = params
+            .get::<Option<u32>>("effect_source")?
+            .map(ObjectId)
+            .or_else(|| caster.filter(|c| *c != source_id));
 
         self.tasks.push(LuaDirectorTask::ResolveAoe(PendingAoe {
+            rules: scripted::HitRules::from_lua(&params)?,
+            guard: None,
+            completes_cast: false,
+            cast_token: None,
+            omen_caster: caster.filter(|_| action_id != 0 && delay > 0.0),
+            omen_token: None,
             shape,
             origin,
             rotation,
@@ -1281,6 +1683,9 @@ pub struct DirectorBoss {
 
 #[derive(Debug)]
 pub struct DirectorData {
+    pub external: Option<external::Controller>,
+    pub script_path: Option<String>,
+    pub runtime: EncounterRuntime,
     pub id: HandlerId,
     pub flag: u8,
     pub data: [u8; 10],
@@ -1329,6 +1734,7 @@ pub struct DirectorData {
 
 impl DirectorData {
     pub fn setup(&mut self) {
+        if let Some(controller) = &self.external { self.flag = controller.flag(); return; }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1349,6 +1755,9 @@ impl DirectorData {
     }
 
     pub fn gimmick_accessor(&mut self, actor_id: ObjectId, id: u32, params: &[i32]) {
+        if let Some(controller) = &mut self.external {
+            controller.event(serde_json::json!({"kind":"gimmick","actor":actor_id.0,"id":id,"params":params})); return;
+        }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1369,6 +1778,9 @@ impl DirectorData {
     }
 
     pub fn event_action_cast(&mut self, actor_id: ObjectId, target: ObjectId) {
+        if let Some(controller) = &mut self.external {
+            controller.event(serde_json::json!({"kind":"event_action","actor":actor_id.0,"target":target.0})); return;
+        }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1388,7 +1800,7 @@ impl DirectorData {
         }
     }
 
-    pub fn on_actor_death(&mut self, bnpc_id: u32, position: Position) {
+    pub fn on_actor_death(&mut self, bnpc_id: u32, position: Position, actor_id: ObjectId) {
         // Only unseal a boss arena if one was configured (dungeon bosses). Trial bosses spawned via
         // `spawn_boss_base` have no wall (wall_id == 0); unsealing it would HideEObj(0) and emit a
         // blank "<place> seal lifted" log message.
@@ -1398,6 +1810,9 @@ impl DirectorData {
             self.unseal_boss_wall(boss.wall_id, boss.line_id, boss.place_name);
         }
 
+        if let Some(controller) = &mut self.external {
+            controller.event(serde_json::json!({"kind":"death","base":bnpc_id,"actor":actor_id.0,"pos":position.0.to_array()})); return;
+        }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1405,7 +1820,8 @@ impl DirectorData {
 
                 let func: Function = self.lua.0.globals().get("onActorDeath")?;
 
-                func.call::<()>((data, bnpc_id, position))?;
+                // 保留旧脚本的前三个参数；同种多个演员以实例 ID 区分死亡事件。
+                func.call::<()>((data, bnpc_id, position, actor_id.0))?;
 
                 Ok(())
             });
@@ -1423,6 +1839,13 @@ impl DirectorData {
         self.bosses.values().map(|b| b.actor_id).collect()
     }
 
+    pub fn boss_key(&self, actor: ObjectId) -> Option<u32> {
+        self.bosses
+            .iter()
+            .find(|(_, b)| b.actor_id == actor)
+            .map(|(key, _)| *key)
+    }
+
     pub fn build_var_segment(&self) -> ServerZoneIpcSegment {
         ServerZoneIpcSegment::new(ServerZoneIpcData::DirectorVars {
             handler_id: self.id,
@@ -1438,6 +1861,8 @@ impl DirectorData {
 
     fn create_lua_director(&self) -> LuaDirector {
         LuaDirector {
+            effects: self.runtime.effects.clone(),
+            flag: self.flag,
             data: self.data,
             tasks: Vec::new(),
             bosses: self.bosses.clone(),
@@ -1454,7 +1879,8 @@ impl DirectorData {
     }
 
     fn apply_lua_director(&mut self, lua: LuaDirector) {
-        if self.data != lua.data {
+        if self.data != lua.data || self.flag != lua.flag {
+            self.flag = lua.flag;
             self.data = lua.data;
             self.tasks.push(LuaDirectorTask::SendVariables {});
         }
@@ -1488,6 +1914,7 @@ impl DirectorData {
     /// Run an optional encounter lifecycle callback (`onBattleStart`/`onReset`) that takes only the
     /// director. Silently does nothing if the script doesn't define it.
     fn run_lifecycle_callback(&mut self, name: &str) {
+        if self.external.is_some() { return; }
         if !self.has_callback(name) {
             return;
         }
@@ -1507,6 +1934,9 @@ impl DirectorData {
     /// Begin the encounter timeline. Only the first call takes effect; later calls (e.g. a second
     /// boss aggroing) are ignored so `t = 0` stays anchored to the first pull.
     pub fn start_battle(&mut self) {
+        if self.runtime.hit_trigger.is_some() {
+            return;
+        }
         if self.battle_started_at.is_some() {
             return;
         }
@@ -1520,12 +1950,42 @@ impl DirectorData {
         self.pending_battle_start = true;
     }
 
-    /// Clear all encounter timeline state (wipe/reset/duty complete). Frees scheduled callbacks from
-    /// the Lua registry so they don't leak, fires `onReset`, and re-opens the boss arenas so the next
-    /// pull re-triggers `start_battle`. NOTE: boss HP/position are not restored here yet — a full
-    /// retail-style wipe recovery is a later refinement; the Lua `onReset`/`onBattleStart` can handle
-    /// re-setup in the meantime.
-    pub fn reset_encounter(&mut self) {
+    /// 使旧轮次任务失效，排入状态清理和 Boss 恢复，再执行 onReset 的场景初始化。
+    pub fn reset_encounter(&mut self) { self.reset_encounter_mode(true); }
+
+    fn reset_encounter_mode(&mut self, reinitialize: bool) {
+        self.runtime.hit_trigger = None;
+        self.runtime.cancel_all();
+        self.runtime.status_changes.clear();
+        self.tasks.clear();
+        for ((actor_id, id), source) in self.runtime.owned_effects.drain() {
+            self.tasks.push(LuaDirectorTask::RemoveEffect {
+                actor_id,
+                id,
+                source: Some(source),
+            });
+        }
+        for (actor_id, controls) in self.runtime.controls.drain() {
+            for control in controls {
+                if let ActorControlCategory::Tether {
+                    tether_id,
+                    from_actor_id,
+                    ..
+                } = control
+                {
+                    self.tasks.push(LuaDirectorTask::SendActorControl {
+                        actor_id,
+                        category: ActorControlCategory::TetherCancel {
+                            tether_id,
+                            target_actor_id: from_actor_id,
+                        },
+                    });
+                }
+            }
+        }
+        for actor_id in self.runtime.reset_bosses.drain(..) {
+            self.tasks.push(LuaDirectorTask::RestoreBoss { actor_id });
+        }
         self.battle_started_at = None;
         self.last_tick_at = None;
         self.elapsed_secs = 0.0;
@@ -1547,10 +2007,21 @@ impl DirectorData {
         for event in self.scheduler.drain(..) {
             let _ = self.lua.0.remove_registry_value(event.callback);
         }
+        let walls: Vec<_> = self
+            .bosses
+            .values()
+            .filter(|b| b.state != DirectorBossState::Open && b.wall_id != 0)
+            .map(|b| (b.wall_id, b.line_id, b.place_name))
+            .collect();
+        for (wall, line, place) in walls {
+            self.unseal_boss_wall(wall, line, place);
+        }
         for boss in self.bosses.values_mut() {
             boss.state = DirectorBossState::Open;
         }
-        self.run_lifecycle_callback("onReset");
+        if let Some(controller) = &mut self.external {
+            if reinitialize { controller.reset(); } else { controller.stop(); }
+        } else { self.run_lifecycle_callback(if reinitialize { "onReset" } else { "onStop" }); }
     }
 
     /// Stop the encounter timeline without wipe/reset semantics — used on duty completion so the
@@ -1558,6 +2029,26 @@ impl DirectorData {
     /// boss is dead, without each script having to track a "finished" flag. Frees the Lua registry
     /// values. Does NOT fire `onReset` or reopen the arena (the duty is over, not being retried).
     pub fn stop_timeline(&mut self) {
+        if let Some(controller) = &mut self.external { controller.stop(); }
+        for ((actor_id, id), source) in self.runtime.owned_effects.drain() {
+            self.tasks.push(LuaDirectorTask::RemoveEffect {
+                actor_id,
+                id,
+                source: Some(source),
+            });
+        }
+        for target in self
+            .runtime
+            .casts
+            .keys()
+            .chain(self.runtime.omens.keys())
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+        {
+            self.tasks.push(LuaDirectorTask::InterruptCast { target });
+        }
+        self.runtime.cancel_all();
+        self.runtime.status_changes.clear();
         self.battle_started_at = None;
         self.last_tick_at = None;
         self.pending_battle_start = false;
@@ -1573,9 +2064,50 @@ impl DirectorData {
         self.omen_rr = 0;
     }
 
+    /// 状态回调延后到 tick 执行，避免施加/移除状态时重入 Lua。
+    fn dispatch_status_changes(&mut self) {
+        let changes = std::mem::take(&mut self.runtime.status_changes);
+        for change in changes {
+            if let Some(controller) = &mut self.external {
+                controller.event(serde_json::json!({"kind":"status","gained":change.gained,"actor":change.actor.0,
+                    "id":change.effect.effect_id,"param":change.effect.param,"duration":change.effect.duration,"source":change.effect.source_actor_id.0}));
+                continue;
+            }
+            let name = if change.gained {
+                "onStatusGain"
+            } else {
+                "onStatusLose"
+            };
+            if !self.has_callback(name) {
+                continue;
+            }
+            let mut director = self.create_lua_director();
+            let result = self.lua.0.scope(|scope| {
+                let data = scope.create_userdata_ref_mut(&mut director)?;
+                self.lua.0.globals().get::<Function>(name)?.call::<()>((
+                    data,
+                    change.actor.0,
+                    change.effect.effect_id,
+                    change.effect.param,
+                    change.effect.duration,
+                    change.effect.source_actor_id.0,
+                ))
+            });
+            self.apply_lua_director(director);
+            if let Err(err) = result {
+                tracing::warn!("副本状态回调 {name} 失败: {err:?}");
+            }
+        }
+    }
+
     /// Drive one encounter tick: fire any due scheduled events, then call `onTick(director, dt, t)`.
     /// Does nothing until the battle has started.
     pub fn encounter_advance(&mut self, now: Instant) {
+        if self.external.is_some() {
+            self.elapsed_secs=self.battle_started_at.map(|start|now.saturating_duration_since(start).as_secs_f64()).unwrap_or(0.0);
+            self.last_tick_at=Some(now);
+            self.advance_external(now);return;
+        }
         let Some(started) = self.battle_started_at else {
             return;
         };
@@ -1691,6 +2223,14 @@ impl DirectorData {
     }
 
     pub fn on_actor_aggro(&mut self, id: u32) {
+        // 木桩支持攻击、挑衅或感知开场，用户已确认这些触发方式均可。
+        if self
+            .bosses
+            .get(&id)
+            .is_some_and(|b| Some(b.actor_id) == self.runtime.hit_trigger)
+        {
+            self.runtime.hit_trigger = None;
+        }
         let mut aggroed = false;
         if let Some(boss) = self.bosses.get_mut(&id)
             && boss.state == DirectorBossState::Open
@@ -1722,6 +2262,7 @@ impl DirectorData {
     }
 
     pub fn on_gimmick_rect(&mut self, id: u32) {
+        if let Some(controller) = &mut self.external { controller.event(serde_json::json!({"kind":"gimmick_rect","id":id})); return; }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1742,6 +2283,7 @@ impl DirectorData {
     }
 
     pub fn get_debug_shortcut(&self, id: u32) -> u32 {
+        if let Some(controller) = &self.external { return controller.debug_shortcut(id); }
         let run_script = || {
             self.lua.0.scope(|_| {
                 let func: Function = self.lua.0.globals().get("getDebugShortcut")?;
@@ -1760,6 +2302,7 @@ impl DirectorData {
     }
 
     pub fn variant_vote(&mut self, vote: u32) {
+        if let Some(controller) = &mut self.external { controller.event(serde_json::json!({"kind":"variant_vote","vote":vote})); return; }
         let mut run_script = || {
             let mut lua_director = self.create_lua_director();
             let err = self.lua.0.scope(|scope| {
@@ -1784,9 +2327,38 @@ impl DirectorData {
 /// and call `onTick`. Also performs a minimal wipe/reset check. Queued director task draining is
 /// done separately by `director_tick`.
 pub fn encounter_tick(instance: &mut Instance, now: Instant) {
-    // Cheap early-out unless an encounter is actually running.
+    if let Some(trigger) = instance
+        .director
+        .as_ref()
+        .and_then(|d| d.runtime.hit_trigger)
+        && let Some(dummy) = instance.find_actor(trigger)
+    {
+        let engaged = dummy.npc_hate_list().is_some_and(|h| !h.is_empty())
+            || instance.actors.iter().any(|(id, a)| {
+                instance.commenced_actors.contains(id)
+                    && matches!(a, NetworkedActor::Player { .. })
+                    && a.get_common_spawn().health_points > 0
+                    && a.position().0.distance(dummy.position().0) < 3.0
+            });
+        if engaged {
+            let d = instance.director.as_mut().unwrap();
+            d.runtime.hit_trigger = None;
+            d.start_battle();
+        }
+    }
+    let effects = instance
+        .actors
+        .iter()
+        .filter_map(|(id, actor)| actor.status_effects().map(|s| (*id, s.data())))
+        .collect();
+    if let Some(director) = &mut instance.director {
+        director.runtime.effects = effects;
+    }
+    // C# 在首个快照中生成木桩和入场场景；不能等待木桩开战后才启动它。
+    // Lua 的入场初始化已由 setup 同步执行，仍可在未开战时跳过轮询。
     let running = matches!(&instance.director, Some(d) if d.battle_started_at.is_some());
-    if !running {
+    let external = matches!(&instance.director, Some(d) if d.external.is_some());
+    if !running && !external {
         return;
     }
 
@@ -1832,7 +2404,12 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
             }
         }
     }
-    let deaggro = living_bosses > 0 && deaggroed_bosses == living_bosses;
+    let deaggro = instance
+        .director
+        .as_ref()
+        .is_some_and(|d| d.runtime.reset_on_deaggro)
+        && living_bosses > 0
+        && deaggroed_bosses == living_bosses;
 
     // Build this tick's actor snapshot (players + npcs) before the mutable director borrow, so Lua
     // position/hp queries during `onTick`/scheduled callbacks read a consistent picture.
@@ -1842,6 +2419,7 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
         .iter()
         .filter_map(|(id, actor)| match actor {
             NetworkedActor::Player { spawn, .. } => Some(ActorSnapshot {
+                enmity: vec![],
                 id: *id,
                 is_player: true,
                 is_boss: false,
@@ -1849,8 +2427,19 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
                 rotation: spawn.common.rotation,
                 hp: spawn.common.health_points,
                 max_hp: spawn.common.max_health_points,
+                class_job: spawn.common.class_job,
+                target: spawn.common.target_id.object_id,
             }),
             NetworkedActor::Npc { spawn, .. } => Some(ActorSnapshot {
+                enmity: {
+                    let mut values: Vec<_> = actor
+                        .npc_hate_list()
+                        .into_iter()
+                        .flat_map(|h| h.iter())
+                        .collect();
+                    values.sort_by_key(|(id, value)| (std::cmp::Reverse(**value), id.0));
+                    values.into_iter().map(|(id, _)| *id).collect()
+                },
                 id: *id,
                 is_player: false,
                 is_boss: boss_set.contains(id),
@@ -1858,6 +2447,15 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
                 rotation: spawn.common.rotation,
                 hp: spawn.common.health_points,
                 max_hp: spawn.common.max_health_points,
+                class_job: spawn.common.class_job,
+                target: actor
+                    .npc_hate_list()
+                    .and_then(|h| {
+                        h.iter()
+                            .max_by_key(|(id, value)| (**value, std::cmp::Reverse(id.0)))
+                            .map(|(id, _)| *id)
+                    })
+                    .unwrap_or_default(),
             }),
             _ => None,
         })
@@ -1872,10 +2470,13 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
     // list, which the NPC leash logic can briefly clear and refill (a flicker), so require it to
     // hold for a short grace before resetting, to avoid wiping the timeline mid-fight.
     if no_players || wipe {
-        director.reset_encounter();
+        // 入场加载尚未完成时不创建宿主，也不反复重置未开战的实例。
+        if running {
+            director.reset_encounter();
+        }
         return;
     }
-    if deaggro {
+    if running && deaggro {
         let since = *director.deaggro_since.get_or_insert(now);
         if now.saturating_duration_since(since).as_secs_f64() >= 2.0 {
             director.reset_encounter();
@@ -1888,10 +2489,17 @@ pub fn encounter_tick(instance: &mut Instance, now: Instant) {
     // Fire the deferred onBattleStart now that the snapshot (`current_actors`) is populated, so the
     // script's queries (`alive_players()` etc.) see the players. Runs before the first onTick.
     if director.pending_battle_start {
+        director.runtime.reset_bosses = director
+            .current_actors
+            .iter()
+            .filter(|a| a.is_boss && a.alive())
+            .map(|a| a.id)
+            .collect();
         director.pending_battle_start = false;
         director.run_lifecycle_callback("onBattleStart");
     }
 
+    director.dispatch_status_changes();
     director.encounter_advance(now);
 }
 
@@ -1902,8 +2510,8 @@ pub fn director_tick(
     gamedata: Arc<Mutex<GameData>>,
     instance: &mut Instance,
 ) -> Vec<PendingAoe> {
-    let tasks = if let Some(director) = &instance.director {
-        director.tasks.clone()
+    let tasks = if let Some(director) = &mut instance.director {
+        std::mem::take(&mut director.tasks)
     } else {
         return Vec::new();
     };
@@ -1919,6 +2527,109 @@ pub fn director_tick(
 
     for task in &tasks {
         match task {
+            LuaDirectorTask::SpawnScriptObject(object) => {
+                let mut object = *object;
+                // 带 LGB 绑定的场景物件由练习控制器管理，避免同时保留两个同布局对象。
+                if object.bind_layout_id != 0 {
+                    let previous = instance.actors.iter().find_map(|(id, a)| match a {
+                        NetworkedActor::Object { object: old, .. }
+                            if old.layout_id == object.layout_id && old.base_id == object.base_id => Some(*id),
+                        _ => None,
+                    });
+                    if let Some(id) = previous { network.lock().remove_actor(instance, id); }
+                }
+                object.handler_id = director_id;
+                instance.insert_object(object.entity_id, object, String::new());
+                network.lock().spawn_inserted_object_in_range(instance, object.entity_id);
+            }
+            LuaDirectorTask::PlayActorTimelines { actors, timelines } => {
+                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PlayActorTimelines {
+                    actors: *actors,
+                    timelines: *timelines,
+                });
+                network.lock().send_to_instance(
+                    ObjectId::default(),
+                    instance,
+                    FromServer::PacketSegment(ipc, ObjectId::default()),
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+            LuaDirectorTask::SetupMapEffects { states, flag } => {
+                let maps = kawari::ipc::zone::MapEffects {
+                    handler_id: director_id,
+                    unk_flag: *flag,
+                    states: states.clone(),
+                    unk1: 0,
+                };
+                let runtime = &mut instance.director.as_mut().unwrap().runtime;
+                runtime.map_effects.clear();
+                runtime.map_setup = Some(maps.clone());
+                if let Some(ipc) = maps.package() {
+                    network.lock().send_to_instance(
+                        ObjectId::default(),
+                        instance,
+                        FromServer::PacketSegment(ipc, ObjectId::default()),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
+            }
+            LuaDirectorTask::SetWeather { id, fade } => {
+                instance.weather_id = *id as u16;
+                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::WeatherId(
+                    kawari::ipc::zone::WeatherChange {
+                        weather_id: *id,
+                        unk: 1,
+                        daytime_fade_length: *fade,
+                    },
+                ));
+                network.lock().send_to_instance(
+                    ObjectId::default(),
+                    instance,
+                    FromServer::PacketSegment(ipc, ObjectId::default()),
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+            LuaDirectorTask::SetLimitBreak(value) => {
+                super::limit_break::set_gauge(&mut network.lock(), instance, *value)
+            }
+            LuaDirectorTask::ScriptDirectorEvent { id, args } => {
+                if *id == 0x80000001 {
+                    instance.director.as_mut().unwrap().runtime.bgm = Some(args[0]);
+                }
+                let category = ActorControlCategory::DirectorEvent {
+                    handler_id: director_id,
+                    event: DirectorEvent::Unknown {
+                        id: *id,
+                        arg1: args[0],
+                        arg2: args[1],
+                        arg3: args[2],
+                        arg4: args[3],
+                    },
+                };
+                network.lock().send_to_instance(
+                    ObjectId::default(),
+                    instance,
+                    FromServer::ActorControlSelf(category),
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+            LuaDirectorTask::EndScriptCast { source, action } => {
+                let runtime = &mut instance.director.as_mut().unwrap().runtime;
+                if runtime.casts.get(source).is_some_and(|c| c.1 == *action) {
+                    runtime.casts.remove(source);
+                    if let Some(NetworkedActor::Npc { cast_locked, .. }) =
+                        instance.find_actor_mut(*source)
+                    {
+                        *cast_locked = false;
+                    }
+                }
+            }
+            LuaDirectorTask::SpawnScriptActor(actor) => {
+                scripted::spawn(instance, &gamedata, actor, &mut bosses);
+            }
+            LuaDirectorTask::ArmHitTrigger(actor) => {
+                instance.director.as_mut().unwrap().runtime.hit_trigger = Some(*actor);
+            }
             LuaDirectorTask::HideEObj { base_id } => {
                 let Some(actor_id) = instance.find_object_by_eobj_id(*base_id) else {
                     tracing::warn!("Failed to find eobj {base_id} for HideEObj, it won't despawn!");
@@ -2081,6 +2792,7 @@ pub fn director_tick(
                 id,
                 param,
                 duration,
+                source,
             } => {
                 gain_effect_instance(
                     network.clone(),
@@ -2090,25 +2802,109 @@ pub fn director_tick(
                     *id,
                     *param,
                     *duration,
-                    ObjectId::default(),
-                    false, // Don't need to inform players here
+                    *source,
+                    true,
+                );
+                if instance
+                    .find_actor(*actor_id)
+                    .and_then(|a| a.status_effects())
+                    .and_then(|s| s.get(*id))
+                    .is_some_and(|e| e.source_actor_id == *source)
+                {
+                    instance
+                        .director
+                        .as_mut()
+                        .unwrap()
+                        .runtime
+                        .owned_effects
+                        .insert((*actor_id, *id), *source);
+                }
+            }
+            LuaDirectorTask::RemoveEffect {
+                actor_id,
+                id,
+                source,
+            } => {
+                let status = instance
+                    .find_actor(*actor_id)
+                    .and_then(|a| a.status_effects())
+                    .and_then(|s| s.get(*id));
+                if status.is_some_and(|e| source.is_none_or(|s| s == e.source_actor_id)) {
+                    remove_effect_instance(network.clone(), instance, *actor_id, *id);
+                }
+            }
+            LuaDirectorTask::ResetEncounter => {
+                instance.director.as_mut().unwrap().reset_encounter();
+                bosses = instance.director.as_ref().unwrap().bosses.clone();
+                break;
+            }
+            LuaDirectorTask::StopEncounter { reason } => {
+                let director=instance.director.as_mut().unwrap();
+                director.reset_encounter_mode(false);
+                director.vars.insert("timeline.state".into(),EncounterVar::Str(reason.clone()));
+                bosses=director.bosses.clone();
+                break;
+            }
+            LuaDirectorTask::SetResetOnDeaggro { enabled } => {
+                instance.director.as_mut().unwrap().runtime.reset_on_deaggro = *enabled;
+            }
+            LuaDirectorTask::CancelPending { actor_id } => {
+                let runtime = &instance.director.as_ref().unwrap().runtime;
+                let ids = match actor_id {
+                    Some(id) => vec![*id],
+                    None => runtime
+                        .casts
+                        .keys()
+                        .chain(runtime.omens.keys())
+                        .copied()
+                        .collect(),
+                };
+                for id in ids {
+                    interrupt_actor(network.clone(), instance, id);
+                }
+                if actor_id.is_none() {
+                    instance.director.as_mut().unwrap().runtime.cancel_all();
+                }
+            }
+            LuaDirectorTask::RestoreBoss { actor_id } => {
+                restore_boss(network.clone(), instance, *actor_id);
+            }
+            LuaDirectorTask::SetTarget { actor_id, target } => {
+                let target = ObjectTypeId {
+                    object_id: *target,
+                    object_type: ObjectTypeKind::None,
+                };
+                if let Some(common) = instance
+                    .find_actor_mut(*actor_id)
+                    .and_then(|a| a.common_spawn_mut())
+                {
+                    common.target_id = target;
+                }
+                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlTarget(
+                    kawari::ipc::zone::ActorControlTarget {
+                        category: ActorControlCategory::SetTarget {},
+                        target,
+                    },
+                ));
+                network.lock().send_in_range_inclusive_instance(
+                    *actor_id,
+                    instance,
+                    FromServer::PacketSegment(ipc, *actor_id),
+                    DestinationNetwork::ZoneClients,
                 );
             }
             LuaDirectorTask::SetBGM { id } => {
-                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(
-                    ActorControlSelf {
-                        category: ActorControlCategory::DirectorEvent {
-                            handler_id: director_id,
-                            event: DirectorEvent::SetBGM { bgm: *id },
-                        },
-                    },
-                ));
+                instance.director.as_mut().unwrap().runtime.bgm = Some(*id);
+                let category = ActorControlCategory::DirectorEvent {
+                    handler_id: director_id,
+                    event: DirectorEvent::SetBGM { bgm: *id },
+                };
 
                 let mut network = network.lock();
                 network.send_to_instance(
                     ObjectId::default(),
                     instance,
-                    FromServer::PacketSegment(ipc, ObjectId::default()), // TODO: how do we just send it from the player?
+                    FromServer::ActorControlSelf(category),
                     DestinationNetwork::ZoneClients,
                 );
             }
@@ -2312,13 +3108,21 @@ pub fn director_tick(
                 }
 
                 // TODO: mark duty as completed for each player
+                break;
             }
-            LuaDirectorTask::MapEffect { index, timeline_id } => {
+            LuaDirectorTask::MapEffect {
+                index,
+                timeline_id,
+                state,
+            } => {
+                let maps = &mut instance.director.as_mut().unwrap().runtime.map_effects;
+                maps.retain(|(i, _)| i != index);
+                maps.push((*index, (*state, *timeline_id)));
                 let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::DirectorMapEffect {
                     handler_id: director_id,
-                    state: 1,
-                    timeline_id: *timeline_id as u16,
-                    index: *index as u8,
+                    state: *state,
+                    timeline_id: *timeline_id,
+                    index: *index,
                 });
 
                 let mut network = network.lock();
@@ -2348,6 +3152,16 @@ pub fn director_tick(
                 }
             }
             LuaDirectorTask::DespawnActor { actor_id } => {
+                bosses.retain(|_, boss| boss.actor_id != *actor_id);
+                let runtime = &mut instance.director.as_mut().unwrap().runtime;
+                runtime.initial_bosses.remove(actor_id);
+                runtime.initial_controls.remove(actor_id);
+                instance
+                    .director
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .cancel_actor(*actor_id);
                 instance.cancel_actor_tasks(*actor_id);
                 let mut network = network.lock();
                 network.remove_actor(instance, *actor_id);
@@ -2356,8 +3170,17 @@ pub fn director_tick(
                 source_id,
                 action_id,
                 cast_time,
+                omen_delay,
                 target_id,
+                spell_id,
+                position: cast_position,
             } => {
+                instance
+                    .director
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .begin_cast(*source_id, *action_id);
                 let position = instance
                     .find_actor(*source_id)
                     .map(|a| a.position())
@@ -2376,16 +3199,16 @@ pub fn director_tick(
                 }
 
                 let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorCast {
-                    spell_id: *action_id as u16,
+                    spell_id: spell_id.unwrap_or(*action_id as u16),
                     action_type: ActionType::Action,
-                    omen_delay: 0,
+                    omen_delay: *omen_delay,
                     action_id: *action_id,
                     cast_time: *cast_time,
                     target: *target_id,
                     rotation,
                     interruptible: false,
                     ballista_entity_id: ObjectId::default(),
-                    position,
+                    position: cast_position.unwrap_or(position),
                 });
 
                 let mut network = network.lock();
@@ -2397,7 +3220,28 @@ pub fn director_tick(
                 );
             }
             LuaDirectorTask::ResolveAoe(pending) => {
-                pending_aoes.push(pending.clone());
+                let runtime = &instance.director.as_ref().unwrap().runtime;
+                let mut pending = pending.clone();
+                pending.guard = Some(runtime.guard(
+                    pending.source_id,
+                    pending.effect_source.unwrap_or(pending.source_id),
+                ));
+                if pending.completes_cast {
+                    pending.cast_token = runtime.casts.get(&pending.source_id).map(|c| c.0);
+                }
+                pending.omen_token = pending
+                    .omen_caster
+                    .and_then(|id| runtime.omens.get(&id).map(|c| c.0));
+                if let Some(caster) = pending.omen_caster {
+                    instance
+                        .director
+                        .as_mut()
+                        .unwrap()
+                        .runtime
+                        .omen_sources
+                        .insert(caster, pending.source_id);
+                }
+                pending_aoes.push(pending);
             }
             LuaDirectorTask::OmenCast {
                 caster_id,
@@ -2407,18 +3251,30 @@ pub fn director_tick(
                 rotation,
                 self_targeted,
             } => {
+                instance
+                    .director
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .begin_omen(*caster_id, *action_id);
                 // Move the (parked, off-arena) helper onto the AoE spot first. The resolution effect
                 // animates from this helper, so without the move it would render where the helper was
                 // parked (e.g. arena centre). Retail sends an ActorMove to the helper right after its
                 // cast for exactly this. The helper is hidden (UNK flags) so the move isn't seen.
                 let found = instance.find_actor_mut(*caster_id).is_some();
-                if let Some(NetworkedActor::Npc { spawn, .. }) = instance.find_actor_mut(*caster_id) {
+                if let Some(NetworkedActor::Npc { spawn, .. }) = instance.find_actor_mut(*caster_id)
+                {
                     spawn.common.position = *position;
                     spawn.common.rotation = *rotation;
                 }
                 tracing::info!(
                     "[omen_cast] caster={:?} found={} action={} pos=({:.1},{:.1}) cast={:.1}",
-                    caster_id, found, action_id, position.0.x, position.0.z, cast_time
+                    caster_id,
+                    found,
+                    action_id,
+                    position.0.x,
+                    position.0.z,
+                    cast_time
                 );
 
                 let mut network = network.lock();
@@ -2529,6 +3385,57 @@ pub fn director_tick(
                 }
             }
             LuaDirectorTask::SendActorControl { actor_id, category } => {
+                if instance.find_actor(*actor_id).is_none() {
+                    continue;
+                }
+                if let ActorControlCategory::TetherCancel { tether_id, target_actor_id } = category
+                    && instance.director.as_ref().unwrap().runtime.controls.get(actor_id).is_some_and(|controls| controls.iter().any(|c|
+                        matches!(c, ActorControlCategory::Tether { tether_id: slot, from_actor_id: id, .. } if slot == tether_id && id != target_actor_id))) {
+                    continue;
+                }
+                if let Some(common) = instance
+                    .find_actor_mut(*actor_id)
+                    .and_then(|a| a.common_spawn_mut())
+                {
+                    match category {
+                        ActorControlCategory::SetModelState { state } => {
+                            common.model_state = *state as u8
+                        }
+                        ActorControlCategory::Tether { to_actor_id, .. } => {
+                            common.tether_target_id = ObjectId(*to_actor_id)
+                        }
+                        ActorControlCategory::TetherCancel { .. } => {
+                            common.tether_target_id = ObjectId::default()
+                        }
+                        _ => {}
+                    }
+                }
+                let controls = instance
+                    .director
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .controls
+                    .entry(*actor_id)
+                    .or_default();
+                match category {
+                    ActorControlCategory::SetAnimationState { index, .. } => {
+                        controls.retain(|c| !matches!(c, ActorControlCategory::SetAnimationState { index: i, .. } if i == index));
+                        controls.push(category.clone());
+                    }
+                    ActorControlCategory::Tether { tether_id, .. } => {
+                        controls.retain(|c| !matches!(c, ActorControlCategory::Tether { tether_id: i, .. } if i == tether_id));
+                        controls.push(category.clone());
+                    }
+                    ActorControlCategory::TetherCancel { tether_id, .. } => {
+                        controls.retain(|c| !matches!(c, ActorControlCategory::Tether { tether_id: i, .. } if i == tether_id));
+                    }
+                    ActorControlCategory::EObjAnimation { .. } => {
+                        controls.retain(|c| !matches!(c, ActorControlCategory::EObjAnimation { .. }));
+                        controls.push(category.clone());
+                    }
+                    _ => {}
+                }
                 // Keep the stored `targetable`/`visible` in sync so they survive client re-spawns
                 // (walked-in re-applies them).
                 if let ActorControlCategory::Targetable { targetable } = category
@@ -2544,7 +3451,12 @@ pub fn director_tick(
                     *v = *visible;
                 }
                 let mut network = network.lock();
-                network.send_ac_in_range_instance(instance, *actor_id, category.clone());
+                network.send_in_range_inclusive_instance(
+                    *actor_id,
+                    instance,
+                    FromServer::ActorControl(*actor_id, category.clone()),
+                    DestinationNetwork::ZoneClients,
+                );
             }
             LuaDirectorTask::SetAiPaused { actor_id, paused } => {
                 if let Some(NetworkedActor::Npc {
@@ -2567,24 +3479,39 @@ pub fn director_tick(
                 position,
                 rotation,
             } => {
-                if let Some(NetworkedActor::Npc { spawn, .. }) = instance.find_actor_mut(*actor_id) {
-                    spawn.common.position = *position;
-                    spawn.common.rotation = *rotation;
+                if let Some(common) = instance.find_actor_mut(*actor_id).and_then(NetworkedActor::common_spawn_mut) {
+                    common.position = *position;
+                    common.rotation = *rotation;
                 }
                 let mut network = network.lock();
                 network.send_in_range_inclusive_instance(
                     *actor_id,
                     instance,
-                    FromServer::ActorMove(
+                    FromServer::PacketSegment(
+                        ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(
+                            kawari::ipc::zone::ActorSetPos {
+                                rotation: *rotation,
+                                position: *position,
+                                ..Default::default()
+                            },
+                        )),
                         *actor_id,
-                        *position,
-                        *rotation,
-                        MoveAnimationType::empty(),
-                        MoveAnimationState::empty(),
-                        JumpState::empty(),
                     ),
                     DestinationNetwork::ZoneClients,
                 );
+            }
+            LuaDirectorTask::SlideActor { actor_id, position, rotation } => {
+                if let Some(NetworkedActor::Npc { spawn, ai_paused, .. }) = instance.find_actor_mut(*actor_id) {
+                    *ai_paused = true;
+                    spawn.common.position = *position;
+                    spawn.common.rotation = *rotation;
+                    network.lock().send_in_range_inclusive_instance(
+                        *actor_id, instance,
+                        FromServer::ActorMove(*actor_id, *position, *rotation,
+                            MoveAnimationType::empty(), MoveAnimationState::empty(), JumpState::empty()),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
             }
             LuaDirectorTask::SpawnClone {
                 base_id,
@@ -2656,9 +3583,22 @@ pub fn director_tick(
                 effect,
             } => {
                 let source_id = source.unwrap_or(*target);
-                send_single_effect(network.clone(), instance, *target, source_id, *action_id, *effect);
+                send_single_effect(
+                    network.clone(),
+                    instance,
+                    *target,
+                    source_id,
+                    *action_id,
+                    *effect,
+                );
             }
             LuaDirectorTask::SetActorHp { target, hp } => {
+                if instance
+                    .find_actor(*target)
+                    .is_some_and(NetworkedActor::is_god_mode)
+                {
+                    continue;
+                }
                 let mut applied_hp = *hp;
                 if let Some(actor) = instance.find_actor_mut(*target)
                     && let Some(common) = actor.common_spawn_mut()
@@ -2681,40 +3621,38 @@ pub fn director_tick(
                 update_actor_hp_mp(network.clone(), instance, *target);
             }
             LuaDirectorTask::InterruptCast { target } => {
-                // NOTE (open item — see completion report): nothing in this codebase actually
-                // cancels an NPC's in-progress cast / pending mechanic resolution. `cast_locked`
-                // (set by CastBar) only freezes the caster's *movement*; it's cleared when the
-                // already-scheduled `resolve_aoe` timer fires (see
-                // `schedule_pending_aoes` in servers/world/src/server/mod.rs), and there's no
-                // cancel handle for that timer. So this can only send the client-facing
-                // `Interrupt` effect (cosmetic) — it does NOT stop the mechanic's damage from
-                // landing on time. Real cast cancellation would need a cancel handle threaded
-                // through `schedule_pending_aoes`.
-                tracing::warn!(
-                    "[interrupt_cast] target={target:?}: sending Interrupt effect only \
-                     — server-side cast cancellation is not implemented"
-                );
-                send_single_effect(
-                    network.clone(),
-                    instance,
-                    *target,
-                    *target,
-                    0,
-                    TargetEffectKind::Interrupt {},
-                );
+                interrupt_actor(network.clone(), instance, *target);
             }
         }
     }
 
     if let Some(director) = &mut instance.director {
-        // Remove only the tasks we actually processed (the cloned prefix). A handler can push *new*
-        // tasks while we iterate — e.g. CompleteDuty → stop_timeline queues DespawnActor for the
-        // helper/clone pools — and those must survive to be run next tick, not be cleared here.
-        let processed = tasks.len().min(director.tasks.len());
-        director.tasks.drain(0..processed);
         director.bosses = bosses;
     }
 
+    // 开战前保存脚本配置完成后的 Boss 状态，战斗中不覆盖快照。
+    if instance
+        .director
+        .as_ref()
+        .is_some_and(|d| d.battle_started_at.is_none())
+    {
+        let ids = instance.director.as_ref().unwrap().boss_actor_ids();
+        let snapshots: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| instance.find_actor(id).cloned().map(|a| (id, a)))
+            .collect();
+        let runtime = &mut instance.director.as_mut().unwrap().runtime;
+        for (id, actor) in snapshots {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                runtime.initial_bosses.entry(id)
+            {
+                entry.insert(actor);
+                runtime
+                    .initial_controls
+                    .insert(id, runtime.controls.get(&id).cloned().unwrap_or_default());
+            }
+        }
+    }
     pending_aoes
 }
 
@@ -2730,6 +3668,16 @@ fn send_single_effect(
     action_id: u32,
     effect: TargetEffectKind,
 ) {
+    if instance
+        .find_actor(target)
+        .is_some_and(NetworkedActor::is_god_mode)
+        && matches!(
+            effect,
+            TargetEffectKind::Damage { .. } | TargetEffectKind::SetHP { .. }
+        )
+    {
+        return;
+    }
     let rotation = instance
         .find_actor(source_id)
         .map(|a| a.rotation())
@@ -2770,21 +3718,54 @@ fn send_single_effect(
 /// HP. Called from a precise tokio timer (not the 8Hz tick) so the snapshot lands exactly on time —
 /// a player who walked out before activation is spared, matching retail's reaction window.
 pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, aoe: PendingAoe) {
-    // The action has resolved, so release the caster's cast-lock (set by CastBar). This fires for
-    // the cast's own completing effect too (cast() schedules a radius-0 resolve at cast end), so the
-    // boss returns to chasing/auto-attacking exactly when the cast bar finishes.
-    if let Some(NetworkedActor::Npc { cast_locked, .. }) = instance.find_actor_mut(aoe.source_id) {
-        *cast_locked = false;
+    let visual = aoe.effect_source.unwrap_or(aoe.source_id);
+    if !instance
+        .find_actor(aoe.source_id)
+        .and_then(|a| a.common_spawn())
+        .is_some_and(|s| s.health_points > 0)
+        || instance.find_actor(visual).is_none()
+    {
+        return;
+    }
+    let Some(director) = &mut instance.director else {
+        return;
+    };
+    if !aoe
+        .guard
+        .is_some_and(|g| director.runtime.valid(g, aoe.source_id, visual))
+    {
+        return;
+    }
+    if let (Some(caster), Some(token)) = (aoe.omen_caster, aoe.omen_token) {
+        director.runtime.finish_omen(caster, token);
+    }
+    if aoe.completes_cast {
+        if !aoe
+            .cast_token
+            .is_some_and(|t| director.runtime.finish_cast(aoe.source_id, t))
+        {
+            return;
+        }
+        if let Some(NetworkedActor::Npc { cast_locked, .. }) =
+            instance.find_actor_mut(aoe.source_id)
+        {
+            *cast_locked = false;
+        }
     }
 
     // Find every alive player caught in the shape, reading positions *now*.
     let origin = aoe.origin.0;
-    let hit_players: Vec<ObjectId> = instance
+    let mut hit_players: Vec<ObjectId> = instance
         .actors
         .iter()
         .filter_map(|(id, actor)| match actor {
             NetworkedActor::Player { spawn, .. }
                 if spawn.common.health_points > 0
+                    && aoe
+                        .rules
+                        .targets
+                        .as_ref()
+                        .is_none_or(|targets| targets.contains(id))
                     && aoe
                         .shape
                         .contains(spawn.common.position.0, origin, aoe.rotation) =>
@@ -2794,6 +3775,49 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
             _ => None,
         })
         .collect();
+
+    let tanks = hit_players
+        .iter()
+        .filter(|id| {
+            instance
+                .find_actor(**id)
+                .is_some_and(|a| scripted::is_tank(a.get_common_spawn().class_job))
+        })
+        .count();
+    hit_players.sort_by(|a, b| {
+        let distance = |id| {
+            instance
+                .find_actor(id)
+                .map(|a| a.position().0.distance_squared(origin))
+                .unwrap_or(f32::MAX)
+        };
+        distance(*a).total_cmp(&distance(*b)).then(a.0.cmp(&b.0))
+    });
+    let first_hit = hit_players.first().copied();
+    let front = hit_players
+        .iter()
+        .take(aoe.rules.front_tanks)
+        .copied()
+        .collect::<Vec<_>>();
+    let failed = aoe.rules.failed(hit_players.len(), tanks)
+        || (aoe.rules.front_tanks > 0
+            && (front.len() < aoe.rules.front_tanks
+                || front.iter().any(|id| {
+                    !instance
+                        .find_actor(*id)
+                        .is_some_and(|a| scripted::is_tank(a.get_common_spawn().class_job))
+                })));
+    let split_count = hit_players.len().max(1) as u32;
+    if failed {
+        // 漏塔、超员或角色错误是全队失败，不能因为塔内无人而跳过伤害。
+        hit_players = instance
+            .actors
+            .iter()
+            .filter_map(|(id, a)| matches!(a, NetworkedActor::Player { .. }).then_some((id, a)))
+            .filter_map(|(id, a)| (a.get_common_spawn().health_points > 0).then_some(*id))
+            .collect();
+    }
+    hit_players.sort_by_key(|id| id.0);
 
     // DEBUG: show whether players are actually inside the shape at resolve time. If you're standing
     // in the AoE but `hit=0`, the server's idea of your position differs from where the omen rendered
@@ -2837,18 +3861,67 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     // Apply damage and accumulate enmity onto the source, building the per-target effect list.
     let mut targets: Vec<(ObjectTypeId, TargetEffect)> = Vec::new();
     for target_id in &hit_players {
+        let target = instance.find_actor(*target_id);
+        let punished = (aoe.rules.punish_status != 0
+            && target
+                .and_then(|a| a.status_effects())
+                .is_some_and(|s| s.get(aoe.rules.punish_status).is_some()))
+            || (aoe.rules.requires_dynamis
+                && !target
+                    .and_then(|a| a.status_effects())
+                    .is_some_and(|s| s.get(3446).is_some() || s.get(3448).is_some()))
+            || aoe.rules.extra_statuses.iter().any(|rule| {
+                rule.limit > 0
+                    && target
+                        .and_then(|a| a.status_effects())
+                        .and_then(|s| s.get(rule.id))
+                        .is_some_and(|s| !rule.stacks || s.param >= rule.limit)
+            });
+        let mut damage = if failed || punished {
+            aoe.rules.failure_damage
+        } else if aoe.rules.split {
+            aoe.damage / split_count
+        } else {
+            aoe.damage
+        };
+        if !failed && !punished && front.contains(target_id) {
+            damage = aoe.rules.front_damage;
+        }
+        if !failed && !punished && aoe.rules.falloff > 0.0 {
+            let p = target.unwrap().position().0;
+            let distance = ((p.x - origin.x).powi(2) + (p.z - origin.z).powi(2)).sqrt();
+            damage = (damage as f32 * (1.0 - distance / aoe.rules.falloff).clamp(0.1, 1.0)) as u32;
+        }
+        let damage_type = if aoe.rules.physical {
+            DamageType::Physical
+        } else {
+            DamageType::Magic
+        };
+        if !aoe.rules.unmitigated && !failed && !punished {
+            damage =
+                crate::server::action::apply_target_player_mitigation(damage, target, damage_type);
+            damage = scripted::mitigate(
+                damage,
+                target,
+                instance.find_actor(aoe.source_id),
+                aoe.rules.physical,
+            );
+        }
+        if target.is_some_and(NetworkedActor::is_god_mode) {
+            damage = 0;
+        }
         let effect = TargetEffect(TargetEffectKind::Damage {
             damage_kind: DamageKind::empty(),
-            damage_type: DamageType::Magic,
+            damage_type,
             damage_element: DamageElement::Unaspected,
             bonus_percent: 0,
             unk3: 0,
             unk4: 0,
-            amount: aoe.damage,
+            amount: damage,
         });
 
         if let Some(target) = instance.find_actor_mut(*target_id) {
-            target.apply_damage(aoe.damage);
+            target.apply_damage(damage);
         }
 
         // Give the source enmity for the hit, so it keeps aggro through mechanic damage.
@@ -2895,7 +3968,14 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
         }
 
         let header = ActionEffectHeader {
-            animation_target_id: ObjectTypeId::default(), // no-target (0xE0000000), like retail
+            animation_target_id: aoe
+                .rules
+                .animation_target
+                .map(|object_id| ObjectTypeId {
+                    object_id,
+                    object_type: ObjectTypeKind::None,
+                })
+                .unwrap_or_default(),
             action_id: aoe.action_id,
             global_sequence,
             animation_lock: 0.6,
@@ -2929,15 +4009,14 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     for target_id in hit_players {
         if let Some(actor) = instance.find_actor(target_id) {
             let current_hp = actor.get_common_spawn().health_points;
-            let ipc =
-                ServerZoneIpcSegment::new(ServerZoneIpcData::EffectResultBasic {
-                    unk1: 1,
-                    unk2: global_sequence,
-                    target_id,
-                    current_hp,
-                    unk3: 0,
-                    unk4: 0,
-                });
+            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::EffectResultBasic {
+                unk1: 1,
+                unk2: global_sequence,
+                target_id,
+                current_hp,
+                unk3: 0,
+                unk4: 0,
+            });
             network.lock().send_in_range_inclusive_instance(
                 target_id,
                 instance,
@@ -2946,6 +4025,101 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
             );
         }
         update_actor_hp_mp(network.clone(), instance, target_id);
+        if aoe.rules.death_status != 0
+            && instance.find_actor(target_id).is_some_and(|a|
+                a.get_common_spawn().health_points == 0 && !a.is_god_mode())
+        {
+            gain_effect_instance(network.clone(), ClientId::default(), instance,
+                target_id, aoe.rules.death_status, 0, 0.0, aoe.source_id, true);
+            instance.director.as_mut().unwrap().runtime.owned_effects
+                .insert((target_id, aoe.rules.death_status), aoe.source_id);
+        }
+        if !failed
+            && first_hit == Some(target_id)
+            && aoe.rules.first_status != 0
+            && instance
+                .find_actor(target_id)
+                .is_some_and(|a| a.get_common_spawn().health_points > 0)
+        {
+            gain_effect_instance(
+                network.clone(),
+                ClientId::default(),
+                instance,
+                target_id,
+                aoe.rules.first_status,
+                0,
+                aoe.rules.first_status_duration,
+                aoe.source_id,
+                true,
+            );
+            instance
+                .director
+                .as_mut()
+                .unwrap()
+                .runtime
+                .owned_effects
+                .insert((target_id, aoe.rules.first_status), aoe.source_id);
+        }
+        if !failed
+            && aoe.rules.status != 0
+            && instance
+                .find_actor(target_id)
+                .is_some_and(|a| a.get_common_spawn().health_points > 0)
+        {
+            gain_effect_instance(
+                network.clone(),
+                ClientId::default(),
+                instance,
+                target_id,
+                aoe.rules.status,
+                aoe.rules.status_param,
+                aoe.rules.status_duration,
+                aoe.source_id,
+                true,
+            );
+            instance
+                .director
+                .as_mut()
+                .unwrap()
+                .runtime
+                .owned_effects
+                .insert((target_id, aoe.rules.status), aoe.source_id);
+        }
+        if !failed
+            && instance
+                .find_actor(target_id)
+                .is_some_and(|a| a.get_common_spawn().health_points > 0)
+        {
+            for rule in &aoe.rules.extra_statuses {
+                let param = if rule.stacks {
+                    instance
+                        .find_actor(target_id)
+                        .and_then(|a| a.status_effects())
+                        .and_then(|s| s.get(rule.id))
+                        .map_or(1, |s| s.param.saturating_add(1))
+                } else {
+                    0
+                };
+                gain_effect_instance(
+                    network.clone(),
+                    ClientId::default(),
+                    instance,
+                    target_id,
+                    rule.id,
+                    param,
+                    rule.duration,
+                    aoe.source_id,
+                    true,
+                );
+                instance
+                    .director
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .owned_effects
+                    .insert((target_id, rule.id), aoe.source_id);
+            }
+        }
     }
 }
 

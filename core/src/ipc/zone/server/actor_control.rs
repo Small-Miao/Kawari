@@ -244,8 +244,9 @@ pub enum ActorControlCategory {
 
     #[brw(magic = 35u32)]
     Tether {
-        /// This corresponds to row id from the Channeling sheet.
+        /// 连线槽位（网络参数 1）；保留历史字段名。
         tether_id: u32,
+        /// Channeling 行号（网络参数 2），不是来源实体 ID。
         from_actor_id: u32,
         to_actor_id: u32,
         /// Tether progress (in pct), not sure what does it controls
@@ -279,8 +280,9 @@ pub enum ActorControlCategory {
 
     #[brw(magic = 47u32)]
     TetherCancel {
-        /// This corresponds to row id from the Channeling sheet.
+        /// 连线槽位；保留历史字段名。
         tether_id: u32,
+        /// 要移除的 Channeling 行号，不是目标实体 ID。
         target_actor_id: u32,
     },
 
@@ -293,6 +295,14 @@ pub enum ActorControlCategory {
     /// Plays this character's idle animation, I guess?
     #[brw(magic = 60u32)]
     PlayIdleAnimation {},
+
+    /// 设置动画组及其状态；索引与状态分别占一个参数。
+    #[brw(magic = 62u32)]
+    SetAnimationState { index: u32, state: u32 },
+
+    /// 切换 ModelState，例如活水之手的张开与握拳。
+    #[brw(magic = 63u32)]
+    SetModelState { state: u32 },
 
     /// Toggles whether this actor can be targeted. Retail uses this to make a boss untargetable
     /// while it's off doing a mechanic (e.g. Ifrit jumping away for Crimson Cyclone).
@@ -314,9 +324,22 @@ pub enum ActorControlCategory {
         duration: f32,
     },
 
-    /// Immediately force-refresh the actor's state (pos, rotation etc.).
+    /// 添加渲染隐藏标志 13；此消息不会刷新位置或朝向。
     #[brw(magic = 415u32)]
-    ForceStateRefresh {},
+    HideActor {},
+
+    /// 关联技能 Helper 的拥有者；客户端会据此识别 Boss 部件。
+    #[brw(magic = 417u32)]
+    SetActorOwner { owner: ObjectId },
+
+    /// 控制参数指定演员的淡入、特效或动作。duration 使用百分之一秒。
+    #[brw(magic = 607u32)]
+    ActorPresentation {
+        actor: ObjectId,
+        operation: u32,
+        parameter: u32,
+        duration: u32,
+    },
 
     // Sets the player's HP and seems to deal unique damage(?) Seen while falling off an Eden arena.
     #[brw(magic = 80u32)]
@@ -1480,6 +1503,43 @@ pub struct ActorControlTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encounter_controls_match_recorded_parameter_layouts() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+        for (category, words) in [
+            (
+                ActorControlCategory::SetModelState { state: 20 },
+                [63, 20, 0, 0, 0, 0],
+            ),
+            (
+                ActorControlCategory::SetAnimationState { index: 1, state: 7 },
+                [62, 1, 7, 0, 0, 0],
+            ),
+            (
+                ActorControlCategory::Tether {
+                    tether_id: 0,
+                    from_actor_id: 89,
+                    to_actor_id: 0x12345678,
+                    progress: 0,
+                },
+                [35, 0, 89, 0x12345678, 0, 0],
+            ),
+            (
+                ActorControlCategory::TetherCancel {
+                    tether_id: 0,
+                    target_actor_id: 89,
+                },
+                [47, 0, 89, 0, 0, 0],
+            ),
+        ] {
+            let mut bytes = Cursor::new(Vec::new());
+            ActorControl { category }.write_le(&mut bytes).unwrap();
+            let expected: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            assert_eq!(bytes.into_inner(), expected);
+        }
+    }
 
     /// Cat 23 (`StatusEffectNotification`) tells a recipient that another actor applied a status to
     /// them. The wire layout must match the retail capture: magic 23 followed by

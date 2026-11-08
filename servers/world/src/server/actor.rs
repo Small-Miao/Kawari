@@ -224,6 +224,15 @@ impl NetworkedActor {
         }
     }
 
+    /// 时间牢狱由服务器约束，避免已排队动作或客户端移动越过停止状态。
+    pub fn is_time_stopped(&self) -> bool {
+        self.status_effects().is_some_and(|s| s.get(2165).is_some())
+    }
+
+    pub fn can_be_raised(&self) -> bool {
+        !self.status_effects().is_some_and(|s| s.get(5144).is_some())
+    }
+
     pub fn shield_percent(&self) -> u8 {
         let Some(common) = self.common_spawn() else {
             return 0;
@@ -235,7 +244,14 @@ impl NetworkedActor {
 
     /// Applies incoming damage after consuming any active barrier effects. The returned amount is
     /// the damage that reached HP; callers can still display the original hit amount if desired.
+    pub fn is_god_mode(&self) -> bool {
+        matches!(self, Self::Player { combat_state, .. } if combat_state.god_mode)
+    }
+
     pub fn apply_damage(&mut self, damage: u32) -> u32 {
+        if self.is_god_mode() {
+            return 0;
+        }
         let hp_damage = self
             .status_effects_mut()
             .map(|status_effects| status_effects.absorb_damage(damage))

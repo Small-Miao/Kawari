@@ -1,0 +1,14 @@
+{
+  "definitions": "Definitions",
+  "timeline": "绝凯夫卡P2 1运",
+  "origin": [100, 0, 100],
+  "dummyTrigger": true,
+  "models": {
+    "480": { "base": 9020, "name": 7131, "hp": 1, "model": 480 },
+    "2137": { "base": 19513, "name": 7131, "hp": 188300, "model": 2137 }
+  },
+  "actors": {
+    "3000": { "base": 19506, "name": 7131, "hp": 44109275, "boss": true, "model": 4967 }
+  },
+  "statuses": { "1002": 5083, "9001": 2941 }
+}

@@ -27,3 +27,14 @@ docs/book
 perf.data*
 *.dll
 *.pdb
+
+# 本地编辑器状态、编译缓存和私密环境配置
+.vs/
+**/bin/
+**/obj/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+!.env.sample

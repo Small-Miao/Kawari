@@ -1,0 +1,113 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -16,6 +16,8 @@
+ mod misc_util;
+ mod shader_version;
+ mod vao;
++#[cfg(not(target_arch = "wasm32"))]
++mod compositor;
+ 
+ pub use shader_version::ShaderVersion;
+ 
+@@ -115,6 +117,9 @@
+ /// Configuration for using glow with eframe or the egui-glow winit feature.
+ #[derive(Clone)]
+ pub struct GlowConfiguration {
++    /// 将完整窗口合成到中间缓冲后再提交；默认保持上游呈现路径。
++    #[cfg(not(target_arch = "wasm32"))]
++    pub composited: bool,
+     /// Turn on vertical syncing, limiting the FPS to the display refresh rate.
+     ///
+     /// The default is `true`.
+@@ -139,6 +144,8 @@
+     fn default() -> Self {
+         Self {
+             #[cfg(not(target_arch = "wasm32"))]
++            composited: false,
++            #[cfg(not(target_arch = "wasm32"))]
+             vsync: true,
+             #[cfg(not(target_arch = "wasm32"))]
+             hardware_acceleration: HardwareAcceleration::Preferred,
+--- a/src/painter.rs
++++ b/src/painter.rs
+@@ -80,6 +80,12 @@
+ ///
+ /// NOTE: all egui viewports share the same painter.
+ pub struct Painter {
++    #[cfg(not(target_arch = "wasm32"))]
++    composited: bool,
++    #[cfg(not(target_arch = "wasm32"))]
++    frame_active: bool,
++    #[cfg(not(target_arch = "wasm32"))]
++    target: Option<crate::compositor::Target>,
+     gl: Arc<glow::Context>,
+ 
+     max_texture_side: usize,
+@@ -253,6 +259,12 @@
+             crate::check_for_gl_error_even_in_release!(&gl, "after Painter::new");
+ 
+             Ok(Self {
++                #[cfg(not(target_arch = "wasm32"))]
++                composited: false,
++                #[cfg(not(target_arch = "wasm32"))]
++                frame_active: false,
++                #[cfg(not(target_arch = "wasm32"))]
++                target: None,
+                 gl,
+                 max_texture_side,
+                 program,
+@@ -292,9 +304,45 @@
+     /// `gl.bind_framebuffer(glow::FRAMEBUFFER, painter.intermediate_fbo());`
+     #[expect(clippy::unused_self)]
+     pub fn intermediate_fbo(&self) -> Option<glow::Framebuffer> {
++        #[cfg(not(target_arch = "wasm32"))]
++        if self.frame_active {
++            return self.target.as_ref().map(|target| target.framebuffer);
++        }
+         // We don't currently ever render to an offscreen buffer,
+         // but we may want to start to in order to do anti-aliasing on web, for instance.
+         None
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    pub fn set_composited(&mut self, enabled: bool) {
++        self.composited = enabled;
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    pub fn is_composited(&self) -> bool {
++        self.composited
++    }
++
++    /// 在清屏前绑定整窗缓冲，保持三维回调与 UI 使用相同目标。
++    #[cfg(not(target_arch = "wasm32"))]
++    pub fn begin_composited_frame(&mut self, size: [u32; 2]) -> Result<(), PainterError> {
++        if !self.composited { return Ok(()); }
++        if self.target.as_ref().is_none_or(|target| target.size != size) {
++            let next = crate::compositor::Target::new(&self.gl, size)?;
++            if let Some(old) = self.target.replace(next) { old.destroy(&self.gl); }
++        }
++        self.target.as_ref().unwrap().bind(&self.gl);
++        self.frame_active = true;
++        Ok(())
++    }
++
++    /// 仅复制完整的帧；此时才触碰窗口后缓冲。
++    #[cfg(not(target_arch = "wasm32"))]
++    pub fn present_composited_frame(&mut self) {
++        if self.frame_active {
++            self.target.as_ref().unwrap().present(&self.gl);
++            self.frame_active = false;
++        }
+     }
+ 
+     unsafe fn prepare_painting(
+@@ -696,6 +744,8 @@
+     }
+ 
+     unsafe fn destroy_gl(&self) {
++        #[cfg(not(target_arch = "wasm32"))]
++        if let Some(target) = &self.target { target.destroy(&self.gl); }
+         unsafe {
+             self.gl.delete_program(self.program);
+             #[expect(clippy::iter_over_hash_type)]

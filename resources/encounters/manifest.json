@@ -1,0 +1,41 @@
+{
+  "host": "controllers/EncounterHost/bin/Release/net10.0/EncounterHost.exe",
+  "definitions": "resources/encounters/Definitions",
+  "resource_data": {
+    "1094": "ResourceData/z3oy.json"
+  },
+  "contents": {
+    "r1fz": {
+      "definition": "r1fz",
+      "flag": 1
+    },
+    "n4gw": {
+      "definition": "n4gw",
+      "flag": 1
+    },
+    "z3oz": {
+      "definition": "z3oz",
+      "flag": 1
+    },
+    "d2az": {
+      "definition": "d2az",
+      "flag": 1
+    },
+    "z3oy": {
+      "definition": "z3oy",
+      "flag": 1
+    },
+    "w1fa_2": {
+      "definition": "w1fa_2",
+      "flag": 0
+    },
+    "s1d1_re": {
+      "definition": "s1d1_re",
+      "flag": 0
+    },
+    "m6d1": {
+      "definition": "m6d1",
+      "flag": 0
+    }
+  }
+}

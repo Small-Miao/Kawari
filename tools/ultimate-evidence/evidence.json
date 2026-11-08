@@ -1,0 +1,719 @@
+[
+  {
+    "content": "r1fz",
+    "sha256": "c7b9eb1b081ba62bc660f3e13224181549b7273ecd1fcdc7b2481eac68f274bd",
+    "start_ms": 5664700,
+    "end_ms": 5940943,
+    "initial_maps": [
+      {
+        "index": 8,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 5241521
+      },
+      {
+        "index": 0,
+        "state": 32,
+        "timeline": 64,
+        "recording_ms": 5434706
+      }
+    ],
+    "actors": 20,
+    "objects": 0,
+    "events": 1053,
+    "actions": {
+      "25584": 1,
+      "25587": 2,
+      "25588": 1,
+      "26810": 1,
+      "28049": 2,
+      "28050": 6,
+      "28051": 3,
+      "28052": 12,
+      "28053": 3,
+      "28054": 30,
+      "28055": 15,
+      "28057": 2,
+      "28058": 2,
+      "28059": 3,
+      "28060": 9,
+      "28061": 111,
+      "28062": 16,
+      "28063": 16,
+      "28064": 16,
+      "28065": 16,
+      "28114": 2,
+      "28115": 2,
+      "29050": 2,
+      "29156": 1,
+      "29365": 1,
+      "29452": 3,
+      "29453": 3,
+      "29454": 3,
+      "29752": 1
+    },
+    "control_categories": {
+      "0": 1,
+      "2": 1,
+      "4": 1,
+      "14": 1,
+      "15": 1,
+      "20": 8,
+      "21": 40,
+      "35": 2,
+      "47": 2,
+      "50": 19,
+      "54": 5,
+      "63": 11,
+      "98": 157,
+      "239": 2,
+      "407": 9,
+      "417": 311,
+      "1509": 2,
+      "1541": 94
+    }
+  },
+  {
+    "content": "n4gw",
+    "sha256": "e5ee4c565410cee3b407247538c725fa4f12076bd388764e8ace134979e4422d",
+    "start_ms": 1153400,
+    "end_ms": 1500447,
+    "initial_maps": [
+      {
+        "index": 0,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 574200
+      },
+      {
+        "index": 2,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 648302
+      },
+      {
+        "index": 7,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 658319
+      },
+      {
+        "index": 1,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 658319
+      },
+      {
+        "index": 15,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 16,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 17,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 18,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 19,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 20,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 674746
+      },
+      {
+        "index": 9,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 10,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 11,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 12,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 13,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 14,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 682822
+      },
+      {
+        "index": 22,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 689431
+      },
+      {
+        "index": 21,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 697462
+      },
+      {
+        "index": 24,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 793189
+      },
+      {
+        "index": 25,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 799244
+      },
+      {
+        "index": 23,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 820693
+      },
+      {
+        "index": 26,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 27,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 28,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 29,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 30,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 31,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 32,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 33,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 890284
+      },
+      {
+        "index": 41,
+        "state": 1,
+        "timeline": 8,
+        "recording_ms": 953906
+      },
+      {
+        "index": 46,
+        "state": 1,
+        "timeline": 2,
+        "recording_ms": 998815
+      },
+      {
+        "index": 44,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 1024600
+      },
+      {
+        "index": 45,
+        "state": 4,
+        "timeline": 1,
+        "recording_ms": 1024600
+      },
+      {
+        "index": 42,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1032609
+      },
+      {
+        "index": 43,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1032609
+      },
+      {
+        "index": 40,
+        "state": 1,
+        "timeline": 64,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 34,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 35,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 36,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 37,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 38,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      },
+      {
+        "index": 39,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 1134583
+      }
+    ],
+    "actors": 19,
+    "objects": 18,
+    "events": 2105,
+    "actions": {
+      "39879": 2,
+      "39880": 2,
+      "40114": 26,
+      "40115": 52,
+      "40118": 18,
+      "40119": 8,
+      "40120": 8,
+      "40231": 1,
+      "40232": 1,
+      "40234": 6,
+      "40306": 3,
+      "40307": 18,
+      "40308": 70,
+      "40309": 74,
+      "40310": 3,
+      "40311": 3,
+      "40312": 3,
+      "40313": 2,
+      "40314": 2,
+      "40315": 2,
+      "40316": 2,
+      "40317": 8,
+      "40318": 8,
+      "40319": 2,
+      "40320": 6,
+      "40326": 1,
+      "40327": 1
+    },
+    "control_categories": {
+      "21": 42,
+      "35": 16,
+      "47": 4,
+      "50": 15,
+      "54": 3,
+      "63": 4,
+      "98": 122,
+      "407": 4,
+      "417": 244,
+      "1541": 107
+    }
+  },
+  {
+    "content": "z3oz",
+    "sha256": "92a3e6f260dc446cf241d1c55391c6b0a90ea97d40c0078e67df3ac88254c07e",
+    "start_ms": 4238900,
+    "end_ms": 4569344,
+    "initial_maps": [
+      {
+        "index": 9,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 3559379
+      },
+      {
+        "index": 8,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 3614502
+      },
+      {
+        "index": 10,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 3719246
+      },
+      {
+        "index": 11,
+        "state": 4,
+        "timeline": 2,
+        "recording_ms": 3719246
+      },
+      {
+        "index": 1,
+        "state": 4,
+        "timeline": 1024,
+        "recording_ms": 3721252
+      },
+      {
+        "index": 20,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 3951129
+      },
+      {
+        "index": 5,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 4027285
+      }
+    ],
+    "actors": 44,
+    "objects": 0,
+    "events": 1898,
+    "actions": {
+      "31555": 1,
+      "31623": 1,
+      "31648": 1,
+      "31649": 1,
+      "31650": 2,
+      "31651": 12,
+      "31652": 72,
+      "31654": 2,
+      "31655": 4,
+      "31656": 2,
+      "31657": 2,
+      "31658": 2,
+      "31659": 16,
+      "31660": 2,
+      "31661": 8,
+      "31662": 48,
+      "31663": 96,
+      "31664": 1,
+      "31665": 1,
+      "31666": 8,
+      "31667": 1,
+      "31668": 3,
+      "31670": 2,
+      "31747": 10,
+      "32223": 20,
+      "32337": 12,
+      "32626": 1,
+      "32699": 16
+    },
+    "control_categories": {
+      "2": 8,
+      "14": 8,
+      "20": 1,
+      "21": 43,
+      "39": 8,
+      "50": 28,
+      "54": 2,
+      "63": 2,
+      "98": 319,
+      "239": 1,
+      "417": 612,
+      "1541": 146
+    }
+  },
+  {
+    "content": "z3oy",
+    "sha256": "480b4c2831fd13e562269af7843ed774fc478e8213f95bc51f990afb7ef86a48",
+    "start_ms": 988200,
+    "end_ms": 1242995,
+    "initial_maps": [
+      {
+        "index": 17,
+        "state": 1,
+        "timeline": 2,
+        "recording_ms": 374174
+      },
+      {
+        "index": 18,
+        "state": 1,
+        "timeline": 4,
+        "recording_ms": 375761
+      },
+      {
+        "index": 7,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 401312
+      },
+      {
+        "index": 8,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 411345
+      },
+      {
+        "index": 1,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 422360
+      },
+      {
+        "index": 2,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 432380
+      },
+      {
+        "index": 5,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 443421
+      },
+      {
+        "index": 3,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 443421
+      },
+      {
+        "index": 6,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 453403
+      },
+      {
+        "index": 4,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 453403
+      },
+      {
+        "index": 19,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 481806
+      },
+      {
+        "index": 0,
+        "state": 512,
+        "timeline": 1024,
+        "recording_ms": 525949
+      },
+      {
+        "index": 34,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 856769
+      }
+    ],
+    "actors": 18,
+    "objects": 9,
+    "events": 621,
+    "actions": {
+      "47925": 1,
+      "47926": 3,
+      "47927": 8,
+      "47928": 4,
+      "47929": 4,
+      "47931": 1,
+      "47932": 12,
+      "47933": 72,
+      "47934": 1,
+      "47935": 8,
+      "47936": 2,
+      "47937": 8,
+      "47938": 1,
+      "47939": 4,
+      "47940": 4,
+      "47941": 4,
+      "47947": 2,
+      "47951": 4,
+      "47952": 2,
+      "47953": 2,
+      "47954": 4,
+      "47955": 2,
+      "47956": 12,
+      "47957": 2,
+      "47958": 2,
+      "49471": 1,
+      "49539": 8,
+      "49738": 1,
+      "49743": 2,
+      "49769": 8,
+      "50770": 10,
+      "50771": 10,
+      "50772": 10,
+      "50773": 10
+    },
+    "control_categories": {
+      "20": 1,
+      "21": 43,
+      "50": 7,
+      "54": 2,
+      "70": 4,
+      "98": 16,
+      "239": 1,
+      "417": 22,
+      "1509": 2,
+      "1541": 121
+    }
+  },
+  {
+    "content": "d2az",
+    "sha256": "8bf97c7cc6a3b5855845c155cf4c0fb633c20550f980df0ff62548b56091390d",
+    "start_ms": 611300,
+    "end_ms": 999371,
+    "initial_maps": [
+      {
+        "index": 7,
+        "state": 4,
+        "timeline": 2,
+        "recording_ms": 331029
+      },
+      {
+        "index": 2,
+        "state": 1,
+        "timeline": 32,
+        "recording_ms": 355365
+      },
+      {
+        "index": 1,
+        "state": 1,
+        "timeline": 2,
+        "recording_ms": 355365
+      },
+      {
+        "index": 3,
+        "state": 4,
+        "timeline": 8,
+        "recording_ms": 552489
+      }
+    ],
+    "actors": 40,
+    "objects": 0,
+    "events": 1377,
+    "actions": {
+      "18528": 1,
+      "18529": 3,
+      "18530": 2,
+      "18531": 2,
+      "18553": 1,
+      "18554": 1,
+      "18555": 1,
+      "18556": 1,
+      "18557": 1,
+      "18558": 1,
+      "18559": 1,
+      "18565": 3,
+      "18566": 1,
+      "18569": 3,
+      "18570": 1,
+      "18571": 1,
+      "18572": 16,
+      "18573": 2,
+      "18574": 2,
+      "18575": 50,
+      "18576": 50,
+      "18577": 3,
+      "18578": 3,
+      "18579": 9,
+      "18580": 2,
+      "18581": 3,
+      "18582": 1,
+      "18584": 1,
+      "18585": 4,
+      "18587": 2,
+      "18588": 2,
+      "18589": 3,
+      "18590": 1,
+      "18591": 3,
+      "18592": 1,
+      "18594": 2,
+      "18596": 1,
+      "18597": 3,
+      "18598": 2,
+      "18858": 1,
+      "18859": 2,
+      "18861": 1,
+      "19034": 1,
+      "19039": 24,
+      "19040": 8,
+      "19083": 20,
+      "19213": 8,
+      "19219": 1,
+      "19220": 1
+    },
+    "control_categories": {
+      "2": 16,
+      "14": 16,
+      "15": 1,
+      "20": 8,
+      "21": 44,
+      "35": 2,
+      "39": 16,
+      "47": 2,
+      "50": 5,
+      "54": 6,
+      "63": 5,
+      "98": 162,
+      "239": 9,
+      "407": 38,
+      "417": 321,
+      "1509": 2,
+      "1541": 112
+    }
+  }
+]

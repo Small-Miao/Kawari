@@ -37,7 +37,9 @@ impl EventHandler for InstanceContentEventHandler {
                     | SceneFlags::INVIS_AOE
                     | SceneFlags::UNK1,
                 vec![
-                    0, // BGM, according to sapphire?
+                    // 正常录像此处为 InstanceContent.BGM（欧米茄 962）。
+                    // 传 0 会使原生过场结束后没有待恢复曲目，事件音乐持续压住副本音乐。
+                    player.content_data.bgm as u32,
                     0,
                     0,
                     5,

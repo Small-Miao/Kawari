@@ -1,0 +1,164 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4095de1..aefaaba 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1884,8 +1884,6 @@ dependencies = [
+ [[package]]
+ name = "eframe"
+ version = "0.35.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8dc8234e2f681b2afd2b2e8c332fa614de2fddbdcb28d0acf5c420449682ea90"
+ dependencies = [
+  "ahash",
+  "bytemuck",
+@@ -2003,8 +2001,6 @@ dependencies = [
+ [[package]]
+ name = "egui_glow"
+ version = "0.35.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "52274b9bfb8d8e252cd0f00c9f6214f360d75a0962baa77a2d62ddb002fe99d4"
+ dependencies = [
+  "bytemuck",
+  "egui",
+diff --git a/Cargo.toml b/Cargo.toml
+index b77a873..869af96 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -9,6 +9,8 @@ repository = "https://github.com/WorkingRobot/XIViewer"
+ edition = "2024"
+ 
+ [patch.crates-io]
++eframe = { path = "deps/eobject-eframe" }
++egui_glow = { path = "deps/eobject-egui_glow" }
+ dxbc = { path = "deps/d3dasm/crates/dxbc" }
+ hlsl = { path = "deps/d3dasm/crates/hlsl" }
+ ironworks = { path = "deps/ironworks/ironworks" }
+diff --git a/viewer/Cargo.toml b/viewer/Cargo.toml
+index e8b9666..70af627 100644
+--- a/viewer/Cargo.toml
++++ b/viewer/Cargo.toml
+@@ -10,6 +10,10 @@ edition.workspace = true
+ name = "worker"
+ path = "src/worker/runner.rs"
+ 
++[[bin]]
++name = "EObjectBrowser"
++path = "src/eobject_main.rs"
++
+ [dependencies]
+ half = "2"
+ crc = "3"
+diff --git a/viewer/src/assets/viewers/layer/mod.rs b/viewer/src/assets/viewers/layer/mod.rs
+index 83f03db..61bbdf9 100644
+--- a/viewer/src/assets/viewers/layer/mod.rs
++++ b/viewer/src/assets/viewers/layer/mod.rs
+@@ -78,6 +78,11 @@ pub fn level_scene(path: &str, file: LevelFile) -> scene::Scene {
+     scene::Scene::new(path, &Source::Level(file))
+ }
+ 
++/// 离线物件浏览器使用与区域预览相同的独立渲染器。
++pub fn shared_scene(path: &str, file: SharedGroupFile) -> scene::Scene {
++    scene::Scene::new(path, &Source::Shared(file))
++}
++
+ /// The files a scene names. A field the scene left empty is dropped rather than listed blank.
+ fn files(scene: &Scene) -> Vec<(&'static str, String)> {
+     let mut files: Vec<(&'static str, String)> = scene
+diff --git a/viewer/src/assets/viewers/layer/scene/mod.rs b/viewer/src/assets/viewers/layer/scene/mod.rs
+index d2c23cc..b3e3ecf 100644
+--- a/viewer/src/assets/viewers/layer/scene/mod.rs
++++ b/viewer/src/assets/viewers/layer/scene/mod.rs
+@@ -1007,6 +1007,7 @@ pub struct Scene {
+     /// motion at all can still have.
+     cycling: bool,
+     clock: f32,
++    manual_clock: bool,
+     /// Placements the last rebuild would have drawn had their model arrived.
+     absent: usize,
+ }
+@@ -1242,6 +1243,42 @@ fn looking_at(center: Vec3, reach: f32) -> Camera {
+ }
+ 
+ impl Scene {
++    /// 物件预览的时间由外部播放条驱动；不会影响磁盘资源。
++    pub fn eobject_time(&mut self, seconds: f32) {
++        self.manual_clock=true;
++        self.clock=seconds.max(0.0)*TICKS;
++        self.dirty=true;
++    }
++
++    pub fn eobject_fit(&mut self) {
++        // 物件需要按实际几何范围取景，区域浏览器的实例中位数会裁掉高模型。
++        let mut min = Vec3::splat(f32::INFINITY);
++        let mut max = Vec3::splat(f32::NEG_INFINITY);
++        for p in &self.placements {
++            if let Some((lo, hi)) = self.models[p.model].bounds {
++                for x in [lo.x, hi.x] { for y in [lo.y, hi.y] { for z in [lo.z, hi.z] {
++                    let point = p.transform.transform_point3(Vec3::new(x,y,z));
++                    min = min.min(point); max = max.max(point);
++                }}}
++            }
++        }
++        let (center, reach) = if min.is_finite() && max.is_finite() {
++            ((min+max)*0.5, ((max-min).length()*0.6).max(2.0))
++        } else { (Vec3::ZERO, 10.0) };
++        self.home = looking_at(center, reach);
++        self.camera = self.home;
++        self.fitted = self.placements.len().max(1);
++        self.dirty = true;
++    }
++
++    pub fn eobject_diagnostics(&self) -> (usize,usize,String) {
++        (self.effect_files.len(), self.effect_files.iter().filter(|e|matches!(e.state,EffectState::Ready(..))).count(), self.passes())
++    }
++
++    pub fn eobject_counts(&self) -> (usize,usize,usize,usize) {
++        (self.models.len(),self.models.iter().filter(|m|m.bounds.is_some()).count(),self.placements.len(),self.effects.len())
++    }
++
+     pub(super) fn new(path: &str, source: &Source) -> Self {
+         // Both files a zone is entered through sit in its `level` directory, and its ground sits in
+         // `bgplate` beside that. A shared group states a zone root of its own but has no ground.
+@@ -1345,6 +1382,7 @@ impl Scene {
+             motions: Vec::new(),
+             cycling: false,
+             clock: 0.0,
++            manual_clock: false,
+             absent: 0,
+         };
+         match source.scene() {
+@@ -4327,7 +4365,7 @@ impl Scene {
+         let animated = !self.motions.is_empty() || self.cycling;
+         // An effect steps off the same clock but never touches a placement, so it asks for the
+         // clock and a repaint without asking for the whole scene's placements to be redone.
+-        if animated || !self.effects.is_empty() {
++        if !self.manual_clock && (animated || !self.effects.is_empty()) {
+             self.clock += ui.input(|input| input.stable_dt).min(0.25) * TICKS;
+             ui.ctx().request_repaint();
+         }
+diff --git a/viewer/src/data/sqpack.rs b/viewer/src/data/sqpack.rs
+index 493217b..51672f4 100644
+--- a/viewer/src/data/sqpack.rs
++++ b/viewer/src/data/sqpack.rs
+@@ -70,6 +70,7 @@ impl FileProvider for SqpackFileProvider {
+     }
+ 
+     async fn path_index(&self, api_base: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
++        if api_base.is_empty() { anyhow::bail!("离线模式不请求远程资源索引"); }
+         let paths = with_list_id(api_base, |id| fetch_url(list_url(api_base, id))).await?;
+         let sqpack = self.sqpack.clone();
+         unblock(move || {
+diff --git a/viewer/src/lib.rs b/viewer/src/lib.rs
+index 2233b98..5967ed6 100644
+--- a/viewer/src/lib.rs
++++ b/viewer/src/lib.rs
+@@ -22,6 +22,9 @@
+ )]
+ 
+ mod about;
++pub mod eobject;
++#[cfg(not(target_arch = "wasm32"))]
++mod render_probe;
+ mod app;
+ mod assets;
+ pub mod audio;

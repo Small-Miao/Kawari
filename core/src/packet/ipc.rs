@@ -62,6 +62,11 @@ pub trait IpcSegmentHeader<T> {
 }
 
 pub trait HasUnknownData {
+    /// 已知变长协议的实际负载长度；固定长度协议返回 None。
+    fn variable_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Returns the size of the unknown variant, if any.
     fn unknown_size(&self) -> Option<usize>;
 
@@ -253,7 +258,9 @@ where
 
     fn calc_size(&self) -> u32 {
         IPC_HEADER_SIZE
-            + if self.get_name() == "Unknown" {
+            + if let Some(size) = self.data.variable_size() {
+                size as u32
+            } else if self.get_name() == "Unknown" {
                 self.data.unknown_size().expect("Expected Unknown?") as u32
             } else {
                 self.header.opcode().calc_size()

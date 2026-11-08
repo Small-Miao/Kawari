@@ -266,6 +266,22 @@ impl ZoneConnection {
             self.send_ipc_self(ipc).await;
         }
 
+        // 资源解码必须先于 Director、模型及技能初始化，且每个入场连接都需要收到。
+        match super::resource_data::load(
+            std::path::Path::new("resources/encounters"),
+            content_finder_condition_id,
+        ) {
+            Ok(packets) => {
+                if !packets.is_empty() {
+                    tracing::info!(content_finder_condition_id, count = packets.len(), "下发副本 RSV/RSF 资源");
+                }
+                for packet in packets {
+                    self.send_ipc_self(packet).await;
+                }
+            }
+            Err(error) => tracing::error!(content_finder_condition_id, %error, "副本资源预加载失败"),
+        }
+
         let level;
         {
             let mut game_data = self.gamedata.lock();
@@ -505,6 +521,10 @@ impl ZoneConnection {
 
                 {
                     let mut game_data = self.gamedata.lock();
+                    lua_content.bgm = game_data
+                        .instance_content_sheet
+                        .row(content_id as u32)
+                        .map_or(0, |row| row.BGM);
                     lua_content.duration = game_data
                         .find_content_time_limit(content_id)
                         .unwrap_or_default()

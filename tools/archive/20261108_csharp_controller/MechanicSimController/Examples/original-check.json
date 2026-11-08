@@ -1,0 +1,6 @@
+{
+  "definitions": "D:/Code/MechanicSim-Master/Script/Definitions",
+  "timeline": "Debug 测试时间轴",
+  "models": { "2137": { "base": 18475, "name": 0, "hp": 1000000, "boss": true } },
+  "statuses": { "9000": 0 }
+}

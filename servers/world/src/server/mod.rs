@@ -68,6 +68,7 @@ mod director;
 mod effect;
 mod instance;
 mod jobs;
+mod limit_break;
 mod linkshell;
 mod network;
 mod party;
@@ -390,7 +391,12 @@ impl WorldServer {
         let file_name =
             FilesystemConfig::locate_script_file(&format!("content/{content_short_name}.lua"));
 
-        let result = std::fs::read(&file_name);
+        let external = match director::external::Controller::for_content(&content_short_name) {
+            Ok(controller) => controller,
+            Err(error) => { tracing::error!("C# 副本加载失败: {error}"); Some(director::external::Controller::disabled(error)) }
+        };
+        // C# 已登记的入口不读取 Lua 副本脚本，也不在宿主故障时回退旧实现。
+        let result = if external.is_some() { Ok(Vec::new()) } else { std::fs::read(&file_name) };
         if let Err(err) = result {
             tracing::warn!(
                 "Failed to load {}: {:?} instance content won't be scripted!",
@@ -399,6 +405,12 @@ impl WorldServer {
             );
         } else {
             let file = result.unwrap();
+            let content_dir = std::path::Path::new(&file_name)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            lua.0.globals().set("CONTENT_DIR", content_dir).unwrap();
 
             if let Err(err) = lua
                 .0
@@ -413,6 +425,9 @@ impl WorldServer {
                 );
             } else {
                 let mut director = DirectorData {
+                    external,
+                    script_path: Some(file_name.clone()),
+                    runtime: Default::default(),
                     id,
                     flag: 0,
                     data: [0; 10],
@@ -579,6 +594,13 @@ fn set_character_mode(
     mode: CharacterMode,
     mode_arg: u8,
 ) {
+    if mode == CharacterMode::Dead
+        && instance
+            .find_actor(from_actor_id)
+            .is_some_and(NetworkedActor::is_god_mode)
+    {
+        return;
+    }
     // Update internal data model for new spawns
     {
         let Some(actor) = instance.find_actor_mut(from_actor_id) else {
@@ -896,6 +918,13 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
     if !tick_popups.is_empty() {
         let mut net = network.lock();
         for (status_id, source_id, target_id, amount, is_heal) in tick_popups {
+            if !is_heal
+                && instance
+                    .find_actor(target_id)
+                    .is_some_and(NetworkedActor::is_god_mode)
+            {
+                continue;
+            }
             let category = if is_heal {
                 ActorControlCategory::TickHeal {
                     status_id,
@@ -1268,7 +1297,10 @@ fn server_logic_tick(
                         let msg = FromServer::ActorControlSelf(ActorControlCategory::LogMessage {
                             log_message,
                             param1: 0,
-                            param2: 0, param3: 0, param4: 0, param5: 0,
+                            param2: 0,
+                            param3: 0,
+                            param4: 0,
+                            param5: 0,
                         });
                         if handle.send(msg).is_err() {
                             // TODO: remove as needed
@@ -1373,14 +1405,13 @@ fn server_logic_tick(
                                     *other_id,
                                     ActorControlCategory::SetBattle { battle: true },
                                 ));
-                                let ipc = ServerZoneIpcSegment::new(
-                                    ServerZoneIpcData::FirstAttack {
+                                let ipc =
+                                    ServerZoneIpcSegment::new(ServerZoneIpcData::FirstAttack {
                                         unk1: 1,
                                         unk2: 0,
                                         combat_tagger: target_id,
                                         unk3: 0,
-                                    },
-                                );
+                                    });
                                 let _ = handle.send(FromServer::PacketSegment(ipc, *other_id));
                             }
 
@@ -1408,6 +1439,16 @@ fn server_logic_tick(
                                         duration: 0.0,
                                     },
                                 ));
+                            }
+                            if let Some(controls) = instance
+                                .director
+                                .as_ref()
+                                .and_then(|d| d.runtime.controls.get(other_id))
+                            {
+                                for control in controls {
+                                    let _ = handle
+                                        .send(FromServer::ActorControl(*other_id, control.clone()));
+                                }
                             }
                         } else {
                             // Early exit if the client refuses to spawn any more actors
@@ -1725,6 +1766,18 @@ pub async fn server_main_loop(
                                 effect_param,
                                 effect_source_actor_id,
                             } => {
+                                if *effect_id == 3532 {
+                                    let mut world = data.lock();
+                                    if let Some(instance) =
+                                        world.find_actor_instance_mut(task.from_actor_id)
+                                    {
+                                        limit_break::expire_magic_number(
+                                            network.clone(),
+                                            instance,
+                                            task.from_actor_id,
+                                        );
+                                    }
+                                }
                                 remove_effect(
                                     network.clone(),
                                     data.clone(),
@@ -1802,8 +1855,7 @@ pub async fn server_main_loop(
                             QueuedTaskData::BroadcastPacketSegment { segment } => {
                                 let data = data.lock();
                                 let mut network = network.lock();
-                                if let Some(instance) =
-                                    data.find_actor_instance(task.from_actor_id)
+                                if let Some(instance) = data.find_actor_instance(task.from_actor_id)
                                 {
                                     network.send_in_range_instance(
                                         task.from_actor_id,
@@ -2189,6 +2241,21 @@ pub async fn server_main_loop(
                     let mut data = data.lock();
 
                     if let Some(instance) = data.find_actor_instance_mut(actor_id) {
+                        if let Some(actor) = instance.find_actor(actor_id).filter(|a| a.is_time_stopped()) {
+                            network.lock().send_to_by_actor_id(
+                                actor_id,
+                                FromServer::PacketSegment(
+                                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(
+                                        kawari::ipc::zone::ActorSetPos {
+                                            position: actor.position(),
+                                            rotation: actor.get_common_spawn().rotation,
+                                            ..Default::default()
+                                        },
+                                    )), actor_id,
+                                ), DestinationNetwork::ZoneClients,
+                            );
+                            continue;
+                        }
                         let mut moved = false;
                         if let Some((_, spawn)) = instance
                             .actors
@@ -2622,8 +2689,7 @@ pub async fn server_main_loop(
                             let slot_idx = *slot as usize;
                             let mut data = data.lock();
                             if slot_idx < 2
-                                && let Some(instance) =
-                                    data.find_actor_instance_mut(from_actor_id)
+                                && let Some(instance) = data.find_actor_instance_mut(from_actor_id)
                                 && let Some(actor) = instance.find_actor_mut(from_actor_id)
                             {
                                 match actor {
@@ -3206,7 +3272,11 @@ pub async fn server_main_loop(
                         DestinationNetwork::ZoneClients,
                     );
                 }
-                ToServer::ExamineRequest(_requester_client_id, requester_actor_id, target_actor_id) => {
+                ToServer::ExamineRequest(
+                    _requester_client_id,
+                    requester_actor_id,
+                    target_actor_id,
+                ) => {
                     // Route the examine request to the target's connection. It will build the IPC
                     // from its live player_data and send back a ToServer::ExamineResponse.
                     let mut network = network.lock();
@@ -3700,6 +3770,61 @@ pub async fn server_main_loop(
                             continue;
                         };
                         instance.commenced_actors.insert(from_actor_id);
+                        // 初始化时没有客户端在线；开场和重新进入时恢复当前场景状态。
+                        if let Some(director) = &instance.director {
+                            network.send_to_by_actor_id(
+                                from_actor_id,
+                                FromServer::PacketSegment(
+                                    ServerZoneIpcSegment::new(ServerZoneIpcData::WeatherId(
+                                        kawari::ipc::zone::WeatherChange {
+                                            weather_id: instance.weather_id as u8,
+                                            unk: 1,
+                                            daytime_fade_length: 0.0,
+                                        },
+                                    )),
+                                    from_actor_id,
+                                ),
+                                DestinationNetwork::ZoneClients,
+                            );
+                            if let Some(maps) = &director.runtime.map_setup
+                                && let Some(ipc) = maps.package()
+                            {
+                                network.send_to_by_actor_id(
+                                    from_actor_id,
+                                    FromServer::PacketSegment(ipc, from_actor_id),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+                            if let Some(bgm) = director.runtime.bgm {
+                                network.send_to_by_actor_id(
+                                    from_actor_id,
+                                    FromServer::ActorControlSelf(
+                                        ActorControlCategory::DirectorEvent {
+                                            handler_id: director.id,
+                                            event: DirectorEvent::SetBGM { bgm },
+                                        },
+                                    ),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+                            for (index, (state, timeline_id)) in &director.runtime.map_effects {
+                                network.send_to_by_actor_id(
+                                    from_actor_id,
+                                    FromServer::PacketSegment(
+                                        ServerZoneIpcSegment::new(
+                                            ServerZoneIpcData::DirectorMapEffect {
+                                                handler_id: director.id,
+                                                state: *state,
+                                                timeline_id: *timeline_id,
+                                                index: *index,
+                                            },
+                                        ),
+                                        from_actor_id,
+                                    ),
+                                    DestinationNetwork::ZoneClients,
+                                );
+                            }
+                        }
                         commence_duty_for_all(instance, &mut network)
                     };
                     if fired
@@ -3707,6 +3832,41 @@ pub async fn server_main_loop(
                     {
                         broadcast_party_portraits(&mut network, &data, party_id, from_actor_id);
                     }
+                }
+                ToServer::TimelineCommand(actor, action, reply) => {
+                    let result = data.lock().find_actor_instance_mut(actor)
+                        .and_then(|instance|instance.director.as_mut())
+                        .map(|director|director.timeline_command(&action))
+                        .unwrap_or_else(||"当前不在脚本副本中。".into());
+                    let _ = reply.send(result);
+                }
+                ToServer::GodMode(from_actor_id, enabled, reply) => {
+                    let mut data = data.lock();
+                    let result = data
+                        .find_actor_instance_mut(from_actor_id)
+                        .and_then(|instance| {
+                            let Some(NetworkedActor::Player { combat_state, .. }) =
+                                instance.find_actor_mut(from_actor_id)
+                            else {
+                                return None;
+                            };
+                            if let Some(value) = enabled {
+                                combat_state.god_mode = value;
+                            }
+                            let active = combat_state.god_mode;
+                            if active && enabled.is_some() {
+                                set_character_mode(
+                                    instance,
+                                    &mut network.lock(),
+                                    from_actor_id,
+                                    CharacterMode::Normal,
+                                    0,
+                                );
+                                update_actor_hp_mp(network.clone(), instance, from_actor_id);
+                            }
+                            Some(active)
+                        });
+                    let _ = reply.send(result);
                 }
                 ToServer::Kill(_from_id, from_actor_id) => {
                     let mut data = data.lock();
@@ -3725,7 +3885,9 @@ pub async fn server_main_loop(
                         continue;
                     };
 
-                    actor.get_common_spawn_mut().health_points = hp;
+                    if !actor.is_god_mode() {
+                        actor.get_common_spawn_mut().health_points = hp;
+                    }
 
                     update_actor_hp_mp(network.clone(), instance, from_actor_id);
                 }

@@ -23,6 +23,8 @@ use super::{LuaTask, LuaZone, QueueSegments, create_ipc_self};
 
 #[derive(Default, Clone, Copy)]
 pub struct LuaContent {
+    /// 入场过场结束后恢复的副本 BGM，0 表示没有指定曲目。
+    pub bgm: u16,
     /// Duration in seconds.
     pub duration: u16,
     /// Duty finder settings. See ContentRegistrationFlags.

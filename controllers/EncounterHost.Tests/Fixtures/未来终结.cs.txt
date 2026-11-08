@@ -1,0 +1,29 @@
+﻿using MechanicSim_Server.Definition;
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace Script.Definitions.Actions.UKFKP2
+{
+    public class 未来终结 : IActionDefinition
+    {
+        public static int DefinitionId => 1004;
+
+        public MechanicSim_Server.Struct.Action Build()
+        {
+            return new MechanicSim_Server.Struct.Action()
+            {
+                ActionId = DefinitionId,
+                Id = Guid.NewGuid(),
+                ActionName = "未来终结",
+                ActionCastTime = TimeSpan.FromSeconds(6.4),
+                IsDisplayActionOnGame = true,
+                GameActionId = 47831,
+                OnActionCastEnd = (castInfo, raidManager) =>
+                {
+                    castInfo.Execute();
+                },
+            };
+        }
+    }
+}

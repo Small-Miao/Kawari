@@ -1,0 +1,54 @@
+diff --git a/ironworks/src/file/layer/scene.rs b/ironworks/src/file/layer/scene.rs
+index cc81aa0..58b3c04 100644
+--- a/ironworks/src/file/layer/scene.rs
++++ b/ironworks/src/file/layer/scene.rs
+@@ -405,6 +405,14 @@ pub struct Scene {
+ }
+ 
+ impl Scene {
++	/// 预览选择不改变磁盘上的 SGB，也不改变时间线内容。
++	pub fn preview_timeline(&mut self, index: usize) -> bool {
++		if index >= self.timelines.len() { return false; }
++		for (i, timeline) in self.timelines.iter_mut().enumerate() {
++			timeline.auto_play = i == index;
++		}
++		true
++	}
+ 	/// The layer groups written into the file itself, in the order the header names them.
+ 	pub fn layer_groups(&self) -> &[LayerGroup] {
+ 		&self.layer_groups
+diff --git a/ironworks/src/file/sgb.rs b/ironworks/src/file/sgb.rs
+index 15e0aad..495b9c2 100644
+--- a/ironworks/src/file/sgb.rs
++++ b/ironworks/src/file/sgb.rs
+@@ -13,6 +13,11 @@ impl SharedGroupFile {
+ 	pub fn scene(&self) -> &Scene {
+ 		&self.0
+ 	}
++
++	/// 仅修改已解析的内存副本，用于离线预览指定时间线。
++	pub fn preview_timeline(&mut self, index: usize) -> bool {
++		self.0.preview_timeline(index)
++	}
+ }
+ 
+ impl File for SharedGroupFile {
+@@ -224,6 +229,18 @@ mod test {
+ 		assert_eq!((duration(first), duration(second)), (Some(480), Some(120)));
+ 	}
+ 
++	#[test]
++	fn preview_selection_is_local_and_invalid_index_preserves_state() {
++		let bytes = build(b"SGB1", 0);
++		let mut file = SharedGroupFile::read(Cursor::new(bytes.clone())).unwrap();
++		assert!(file.preview_timeline(1));
++		assert_eq!(file.scene().timelines().iter().map(|t| t.auto_play()).collect::<Vec<_>>(), [false, true]);
++		assert!(!file.preview_timeline(99));
++		assert_eq!(file.scene().timelines().iter().map(|t| t.auto_play()).collect::<Vec<_>>(), [false, true]);
++		let original = SharedGroupFile::read(Cursor::new(bytes)).unwrap();
++		assert_eq!(original.scene().timelines().iter().map(|t| t.auto_play()).collect::<Vec<_>>(), [true, false]);
++	}
++
+ 	#[test]
+ 	fn reads_a_scene_and_what_it_is_drawn_with() {
+ 		let file = SharedGroupFile::read(Cursor::new(build(b"SGB1", 0))).unwrap();

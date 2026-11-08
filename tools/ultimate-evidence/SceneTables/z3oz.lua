@@ -1,0 +1,30 @@
+-- 可编辑的场景轨道：从录像初始化，提取器不会覆盖本文件。
+-- t 为素材时间（秒），order 只用于同一时刻与演员动作保持先后顺序。
+return {
+map_setup={["flag"]=1,["states"]={1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}},
+initial_maps={{["index"]=9,["state"]=4,["timeline"]=8,["recording_ms"]=3559379},{["index"]=8,["state"]=4,["timeline"]=8,["recording_ms"]=3614502},{["index"]=10,["state"]=4,["timeline"]=8,["recording_ms"]=3719246},{["index"]=11,["state"]=4,["timeline"]=2,["recording_ms"]=3719246},{["index"]=1,["state"]=4,["timeline"]=1024,["recording_ms"]=3721252},{["index"]=20,["state"]=4,["timeline"]=8,["recording_ms"]=3951129},{["index"]=5,["state"]=4,["timeline"]=8,["recording_ms"]=4027285}},
+bgm=964,
+weather=174,
+initial_objects={},
+events={
+{["t"]=0.054,["kind"]="map",["index"]=0,["state"]=4,["timeline"]=8,["order"]=1},
+{["t"]=13.485,["kind"]="director",["id"]=2147483674,["args"]={1,1,0,0},["order"]=17},
+{["t"]=14.17,["kind"]="director",["id"]=2147483649,["args"]={1,0,0,0},["order"]=19},
+{["t"]=26.17,["kind"]="director",["id"]=2147483683,["args"]={35823,50,0,0},["order"]=20},
+{["t"]=48.664,["kind"]="director",["id"]=2147483683,["args"]={35825,60,0,0},["order"]=21},
+{["t"]=57.477,["kind"]="director",["id"]=2147483649,["args"]={951,0,0,0},["order"]=22},
+{["t"]=58.194,["kind"]="director",["id"]=2147483683,["args"]={35827,60,0,0},["order"]=23},
+{["t"]=59.037,["kind"]="weather",["id"]=175,["fade"]=1.0,["order"]=24},
+{["t"]=67.265,["kind"]="director",["id"]=2147483675,["args"]={1,0,0,0},["order"]=25},
+{["t"]=67.329,["kind"]="director",["id"]=2147483678,["args"]={686,0,0,0},["order"]=32},
+{["t"]=67.329,["kind"]="map",["index"]=0,["state"]=1,["timeline"]=2,["order"]=33},
+{["t"]=247.938,["kind"]="map",["index"]=12,["state"]=4,["timeline"]=2,["order"]=1785},
+{["t"]=247.938,["kind"]="map",["index"]=13,["state"]=4,["timeline"]=2,["order"]=1786},
+{["t"]=247.938,["kind"]="map",["index"]=14,["state"]=4,["timeline"]=2,["order"]=1787},
+{["t"]=247.938,["kind"]="map",["index"]=15,["state"]=4,["timeline"]=2,["order"]=1788},
+{["t"]=247.938,["kind"]="map",["index"]=16,["state"]=4,["timeline"]=2,["order"]=1789},
+{["t"]=247.938,["kind"]="map",["index"]=17,["state"]=4,["timeline"]=2,["order"]=1790},
+{["t"]=247.938,["kind"]="map",["index"]=18,["state"]=4,["timeline"]=2,["order"]=1791},
+{["t"]=247.938,["kind"]="map",["index"]=19,["state"]=4,["timeline"]=2,["order"]=1792},
+{["t"]=248.361,["kind"]="map",["index"]=21,["state"]=1,["timeline"]=2,["order"]=1801},
+}}

@@ -1,0 +1,71 @@
+using System;
+using System.Collections.Generic;
+using System.Numerics;
+using MechanicSim_Server.Definition;
+using MechanicSim_Server.Manager;
+using MechanicSim_Server.Struct;
+
+public class OriginalStyle : ITimeLineDefinition
+{
+    public string DefinitionId => "original-style";
+    public TimeLineDef Build()
+    {
+        var timeline = new TimeLineDef
+        {
+            TimeLineName = "原工程写法回归",
+            TimeLineDescription = "验证累计等待、动作回调、状态与场景接口",
+            TimeLineAuthor = "Kawari",
+        };
+        timeline.OnTimeLineInit = () =>
+        {
+            timeline.TimeLineVars["reset"] = false;
+            _ = new GameObject("凯夫卡", 1001, true, true, new Vector3(100, 0, 100), 0, 6, Vector3.One, 5, 4967);
+            RaidManager.Instance.Players[0].AddStatus(1002);
+        };
+        timeline.OnTimeLineReset = () =>
+        {
+            timeline.TimeLineVars["reset"] = true;
+            RaidManager.Instance.DestoryAllObject();
+        };
+        timeline.TimeLinePhaseList = new List<TimeLinePhase>
+        {
+            new TimeLinePhase
+            {
+                PhaseName = "P2",
+                TimeLineNodes = new List<TimeLineNode>
+                {
+                    new TimeLineNode
+                    {
+                        NodeName = "未来终结",
+                        Duration = TimeSpan.FromSeconds(2),
+                        OnTimeLineEvent = () =>
+                        {
+                            RaidManager.Instance.GetObjectByGameObjectId(1001)?.TryCast(1004);
+                            RaidManager.Instance.MapEffect(17, 1, 2);
+                        },
+                    },
+                    new TimeLineNode
+                    {
+                        NodeName = "后续场景",
+                        Duration = TimeSpan.FromSeconds(10),
+                        OnTimeLineEvent = () => RaidManager.Instance.PlayBgm(533),
+                    },
+                },
+            },
+        };
+        return timeline;
+    }
+}
+public class NativeStatus : IStatusDefinition
+{
+    public static int DefinitionId => 1002;
+    public Status Build() => new Status
+    {
+        StatusId = DefinitionId,
+        NativeStatusId = 5083,
+        CurrentStack = 4,
+        CanStack = true,
+        Duration = TimeSpan.FromSeconds(30),
+        OnStatusRemove = (_, player, _) => player.PlayerVar["removed"] = true,
+    };
+}

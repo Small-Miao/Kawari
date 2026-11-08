@@ -1,2 +1,5 @@
 servers/world/migrations/current_world/up.sql linguist-generated
 servers/login/migrations/current_login/up.sql linguist-generated
+
+# 统一差异补丁的上下文行包含语法必需的空格。
+tools/EObjectBrowser/*.patch -whitespace

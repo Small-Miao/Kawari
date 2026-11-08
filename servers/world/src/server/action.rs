@@ -194,9 +194,15 @@ pub(crate) fn apply_target_player_mitigation(
     target: Option<&NetworkedActor>,
     damage_type: DamageType,
 ) -> u32 {
+    if target.is_some_and(NetworkedActor::is_god_mode) {
+        return 0;
+    }
     if let Some(NetworkedActor::Player { parameters, .. }) = target {
         let mitigation = parameters.mitigation_against(damage_type == DamageType::Magic);
-        return ((amount as f64) * (1.0 - mitigation)).floor() as u32;
+        let lb = target
+            .and_then(|a| a.status_effects())
+            .is_some_and(|s| [196, 863, 864, 1931].iter().any(|id| s.get(*id).is_some()));
+        return ((amount as f64) * (1.0 - mitigation) * if lb { 0.2 } else { 1.0 }).floor() as u32;
     }
 
     amount
@@ -703,6 +709,11 @@ fn resolve_player_action_id(
     };
 
     let class_job = actor.get_common_spawn().class_job;
+    if request.action_type == ActionType::Action
+        && let Some((job, _)) = super::limit_break::specification(request.action_id)
+    {
+        return (class_job == job).then_some(request.action_id);
+    }
     let level = actor.get_common_spawn().level;
     let resolved_action_id = if request.action_type == ActionType::Action
         && let Some(job) = job_for(class_job)
@@ -763,6 +774,26 @@ fn resolve_player_action_id(
     Some(resolved_action_id)
 }
 
+fn reject_time_stopped_action(
+    data: &Arc<Mutex<WorldServer>>,
+    network: &Arc<Mutex<NetworkState>>,
+    actor_id: ObjectId,
+    request: &ActionRequest,
+) -> bool {
+    let world = data.lock();
+    let Some(instance) = world.find_actor_instance(actor_id) else { return false; };
+    if !instance.find_actor(actor_id).is_some_and(NetworkedActor::is_time_stopped) {
+        return false;
+    }
+    network.lock().send_ac_in_range_inclusive_instance(
+        instance, actor_id,
+        ActorControlCategory::CancelCast {
+            log_message_id: 0, action_type: 1, action_id: request.action_id, interrupted: true,
+        },
+    );
+    true
+}
+
 /// Process action-related messages.
 pub fn handle_action_messages(
     data: Arc<Mutex<WorldServer>>,
@@ -772,6 +803,33 @@ pub fn handle_action_messages(
     msg: &ToServer,
 ) -> bool {
     if let ToServer::ActionRequest(from_id, from_actor_id, request) = msg {
+        if reject_time_stopped_action(&data, &network, *from_actor_id, request) {
+            return true;
+        }
+        if request.action_type == ActionType::Action
+            && super::limit_break::specification(request.action_id).is_some()
+        {
+            let world = data.lock();
+            if let Some(instance) = world.find_actor_instance(*from_actor_id)
+                && instance
+                    .director
+                    .as_ref()
+                    .is_some_and(|d| d.runtime.limit_break_gauge.is_some())
+                && !super::limit_break::allowed(instance, *from_actor_id, request.action_id)
+            {
+                network.lock().send_ac_in_range_inclusive_instance(
+                    instance,
+                    *from_actor_id,
+                    ActorControlCategory::CancelCast {
+                        log_message_id: 0,
+                        action_type: 1,
+                        action_id: request.action_id,
+                        interrupted: true,
+                    },
+                );
+                return true;
+            }
+        }
         let mut resolved_request = request.clone();
 
         if request.action_type == ActionType::Action {
@@ -869,6 +927,12 @@ pub fn handle_action_messages(
         let Some(instance) = world.find_actor_instance_mut(*from_actor_id) else {
             return true;
         };
+        if let Some(director) = instance.director.as_mut() {
+            use super::director::EncounterVar;
+            let value = director.player_vars.entry(*from_actor_id).or_default()
+                .entry("__action_count".into()).or_insert(EncounterVar::Int(0));
+            if let EncounterVar::Int(count) = value { *count = count.saturating_add(1); }
+        }
 
         if cast_centisec > 0 {
             let Some(actor) = instance.find_actor(*from_actor_id) else {
@@ -971,6 +1035,9 @@ pub fn execute_action(
     from_actor_id: ObjectId,
     request: ActionRequest,
 ) {
+    if reject_time_stopped_action(&data, &network, from_actor_id, &request) {
+        return;
+    }
     if request.action_type == ActionType::Mount {
         {
             let mut data = data.lock();
@@ -1025,6 +1092,16 @@ pub fn execute_action(
     }
 
     let resolved_request = request.clone();
+    if request.action_type == ActionType::Action
+        && super::limit_break::specification(request.action_id).is_some()
+    {
+        let mut world = data.lock();
+        if let Some(instance) = world.find_actor_instance_mut(from_actor_id)
+            && super::limit_break::execute(network.clone(), instance, from_actor_id, &request)
+        {
+            return;
+        }
+    }
     let mut lua_player = LuaPlayer {
         player_data: PlayerData::default(),
         status_effects: StatusEffects::default(),
@@ -1334,6 +1411,12 @@ pub fn execute_action(
                             return;
                         };
                         actor.apply_damage(*amount);
+                        super::director::notify_attack_hit(
+                            instance,
+                            from_actor_id,
+                            resolved_request.target.object_id,
+                            *amount,
+                        );
 
                         let mut game_data = game_data.lock();
                         *damage_element =
@@ -1834,6 +1917,12 @@ pub fn execute_action(
                         } else {
                             continue;
                         }
+                        super::director::notify_attack_hit(
+                            instance,
+                            from_actor_id,
+                            target_id,
+                            rolled,
+                        );
 
                         secondary_targets.push((
                             ObjectTypeId {
@@ -2297,6 +2386,10 @@ pub fn execute_enemy_action(
                     ..
                 } = &mut effect.0
                 {
+                    if actor.is_god_mode() {
+                        *amount = 0;
+                        continue;
+                    }
                     let mitigation = if *damage_type == DamageType::Magic {
                         mitigation_magic
                     } else {
@@ -2321,6 +2414,16 @@ pub fn execute_enemy_action(
             }
         }
 
+        for effect in &effects_builder.effects {
+            if let TargetEffectKind::Damage { amount, .. } = effect.0 {
+                super::director::notify_attack_hit(
+                    instance,
+                    from_actor_id,
+                    request.target.object_id,
+                    amount,
+                );
+            }
+        }
         update_actor_hp_mp(network.clone(), instance, request.target.object_id);
 
         // Quoted by the `EffectResult` below so the status changes are tied to this action. See the
@@ -2616,6 +2719,20 @@ pub fn kill_actor(
     instance: &mut Instance,
     from_actor_id: ObjectId,
 ) {
+    if instance
+        .find_actor(from_actor_id)
+        .is_some_and(NetworkedActor::is_god_mode)
+    {
+        return;
+    }
+    if matches!(
+        instance.find_actor(from_actor_id),
+        Some(NetworkedActor::Player { .. })
+    ) {
+        for status in [3444, 3446, 3448] {
+            super::effect::remove_effect_instance(network.clone(), instance, from_actor_id, status);
+        }
+    }
     let mut network = network.lock();
 
     set_character_mode(
@@ -2637,7 +2754,13 @@ pub fn kill_actor(
     if let Some(actor) = instance.find_actor(from_actor_id)
         && let Some(npc) = actor.get_npc_spawn()
     {
-        npc_id = Some(npc.common.layout_id);
+        npc_id = Some(
+            instance
+                .director
+                .as_ref()
+                .and_then(|d| d.boss_key(from_actor_id))
+                .unwrap_or(npc.common.layout_id),
+        );
     }
 
     if let Some(actor) = instance.find_actor_mut(from_actor_id)
@@ -2657,7 +2780,7 @@ pub fn kill_actor(
     if let Some(npc_id) = npc_id
         && let Some(director) = &mut instance.director
     {
-        director.on_actor_death(npc_id, position.unwrap());
+        director.on_actor_death(npc_id, position.unwrap(), from_actor_id);
     }
 
     instance.cancel_actor_tasks(from_actor_id);
@@ -2703,6 +2826,12 @@ pub fn update_actor_hp_mp(
     instance: &mut Instance,
     target_actor_id: ObjectId,
 ) {
+    if let Some(actor) = instance.find_actor_mut(target_actor_id)
+        && actor.is_god_mode()
+    {
+        let common = actor.get_common_spawn_mut();
+        common.health_points = common.max_health_points.max(1);
+    }
     let mut send_kill_actor = false;
 
     {

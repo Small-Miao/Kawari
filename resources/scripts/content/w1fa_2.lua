@@ -210,9 +210,8 @@ function runCycle(director, n)
             end
         end)
 
-        -- t0:分身显形 → 播 008D 落地动画 → SetPos 到本次冲锋点+朝向 → 紧接着 force_state_refresh(415)。
-        -- retail 就是 SetPos 之后发 415 让客户端**强制刷新**实体的位置/朝向 —— 没有它,move 的旋转在
-        -- 客户端不生效(冲刺方向就偏)。有了它,re-position + rotation 才会被客户端真正应用上。
+        -- t0:分身显形 → 播 008D 落地动画 → SetPos 到本次冲锋点及朝向。
+        -- 415 实际会隐藏实体；位置与朝向由 move_actor 的 SetPos 包同步。
         for i = 1, CYCLONE_N do
             local pos, rot = clone_spot(i, base)
             local c = d:clone(i)
@@ -220,7 +219,6 @@ function runCycle(director, n)
                 d:set_visible(c, true)
                 d:play_timeline(c, CYCLONE_LAND)
                 d:move_actor(c, pos, rot)
-                d:force_state_refresh(c)
             end
         end
 

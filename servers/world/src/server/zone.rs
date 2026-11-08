@@ -1008,14 +1008,13 @@ pub fn take_combat_state_and_despawn_pets(
     network: &mut NetworkState,
     actor_id: ObjectId,
 ) -> Option<PlayerCombatState> {
-    let mut carried_combat_state =
-        if let Some(NetworkedActor::Player { combat_state, .. }) =
-            current_instance.find_actor(actor_id)
-        {
-            Some(combat_state.clone())
-        } else {
-            None
-        };
+    let mut carried_combat_state = if let Some(NetworkedActor::Player { combat_state, .. }) =
+        current_instance.find_actor(actor_id)
+    {
+        Some(combat_state.clone())
+    } else {
+        None
+    };
 
     // Snapshot the first pet this player owns so it can be re-instated with the SAME object id in
     // the destination (no re-summon / birth animation — see `reinstate_carried_pet`). Position is
@@ -1974,6 +1973,24 @@ mod tests {
         assert!(carried.summoner.carried_pet.is_none());
     }
 
+    #[test]
+    fn god_mode_survives_zone_transfer_but_new_login_defaults_off() {
+        let owner = ObjectId(1);
+        let mut source = Instance::default();
+        let mut destination = Instance::default();
+        let mut network = NetworkState::default();
+        source.insert_empty_actor(owner);
+        destination.insert_empty_actor(owner);
+        assert!(!destination.find_actor(owner).unwrap().is_god_mode());
+        let Some(NetworkedActor::Player { combat_state, .. }) = source.find_actor_mut(owner) else {
+            panic!()
+        };
+        combat_state.god_mode = true;
+        let carried = take_combat_state_and_despawn_pets(&mut source, &mut network, owner).unwrap();
+        restore_carried_combat_state(&mut destination, owner, Some(carried));
+        assert!(destination.find_actor(owner).unwrap().is_god_mode());
+    }
+
     /// A Dead owned pet (the fading carbuncle after a summon/demi cast) is never carried; with no
     /// live pet present the carry stays `None`.
     #[test]
@@ -1993,7 +2010,11 @@ mod tests {
 
     /// Builds a PopRange InstanceObject at `translation` with the given pop type. Mirrors the
     /// minimal shape `find_first_pc_pop_range` inspects (pop_type + object translation).
-    fn make_pop_range(instance_id: u32, pop_type: PopType, translation: [f32; 3]) -> InstanceObject {
+    fn make_pop_range(
+        instance_id: u32,
+        pop_type: PopType,
+        translation: [f32; 3],
+    ) -> InstanceObject {
         InstanceObject {
             instance_id,
             transform: Transformation {

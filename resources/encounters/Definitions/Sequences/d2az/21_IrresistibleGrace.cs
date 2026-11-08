@@ -1,0 +1,96 @@
+using Kawari.Encounters;
+// 株连 [18580]：演员 / 读条 / 技能 / 状态。
+// At 为节点相对秒数，Order 保留同帧顺序。
+using MechanicSim_Server.Manager;
+namespace Script.Definitions.d2az;
+public static class Sequence21IrresistibleGrace
+{
+    public static void Execute()
+    {
+        var raid = RaidManager.Instance;
+        raid.Schedule(TimeSpan.FromSeconds(0.0), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.TryCast(18580, TimeSpan.FromSeconds(4.7), new Params { ["spell"] = 18580, ["omen_delay"] = 0, ["cast_pos"] = new Position(107.9271, -0.0153, 100.3586), ["pos"] = new Position(99.9924, -0.0153, 99.9924), ["rotation"] = 1.5237 }); }, order: 1289);
+        raid.Schedule(TimeSpan.FromSeconds(0.134), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 1.5237); }, order: 1290);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetOwner(null); }, order: 1291);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetOwner(ActorDefinitions.Boss); }, order: 1292);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetPosition(new Position(100.0, 0.0, 84.0), -5e-05); }, order: 1293);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetOwner(null); }, order: 1294);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetOwner(ActorDefinitions.Boss); }, order: 1295);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetPosition(new Position(84.0, 0.0, 92.0), -5e-05); }, order: 1296);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetOwner(null); }, order: 1297);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetOwner(ActorDefinitions.Boss); }, order: 1298);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetPosition(new Position(92.0, 0.0, 92.0), -5e-05); }, order: 1299);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetOwner(null); }, order: 1300);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetOwner(ActorDefinitions.Boss); }, order: 1301);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetPosition(new Position(116.0, 0.0, 100.0), -5e-05); }, order: 1302);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetOwner(null); }, order: 1303);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetOwner(ActorDefinitions.Boss); }, order: 1304);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetPosition(new Position(84.0, 0.0, 108.0), -5e-05); }, order: 1305);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetOwner(null); }, order: 1306);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetOwner(ActorDefinitions.Boss); }, order: 1307);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetPosition(new Position(100.0, 0.0, 108.0), -5e-05); }, order: 1308);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetOwner(null); }, order: 1309);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetOwner(ActorDefinitions.Boss); }, order: 1310);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetPosition(new Position(92.0, 0.0, 116.0), -5e-05); }, order: 1311);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetOwner(null); }, order: 1312);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetOwner(ActorDefinitions.Boss); }, order: 1313);
+        raid.Schedule(TimeSpan.FromSeconds(1.848), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetPosition(new Position(108.0, 0.0, 116.0), -5e-05); }, order: 1314);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.ExecuteAction(18576, new Params { ["pos"] = new Position(84.0, 0.0, 108.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper08 }); }, order: 1315);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.ExecuteAction(18576, new Params { ["pos"] = new Position(116.0, 0.0, 100.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper09 }); }, order: 1316);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.ExecuteAction(18576, new Params { ["pos"] = new Position(92.0, 0.0, 92.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper10 }); }, order: 1317);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.ExecuteAction(18576, new Params { ["pos"] = new Position(84.0, 0.0, 92.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper11 }); }, order: 1318);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.ExecuteAction(18576, new Params { ["pos"] = new Position(100.0, 0.0, 84.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper12 }); }, order: 1319);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.ExecuteAction(18576, new Params { ["pos"] = new Position(108.0, 0.0, 116.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper05 }); }, order: 1320);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.ExecuteAction(18576, new Params { ["pos"] = new Position(92.0, 0.0, 116.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper06 }); }, order: 1321);
+        raid.Schedule(TimeSpan.FromSeconds(1.947), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.ExecuteAction(18576, new Params { ["pos"] = new Position(100.0, 0.0, 108.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper07 }); }, order: 1322);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetOwner(null); }, order: 1323);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetOwner(ActorDefinitions.Boss); }, order: 1324);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.SetPosition(new Position(84.0, 0.0, 84.0), -5e-05); }, order: 1325);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetOwner(null); }, order: 1326);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetOwner(ActorDefinitions.Boss); }, order: 1327);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.SetPosition(new Position(116.0, 0.0, 84.0), -5e-05); }, order: 1328);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetOwner(null); }, order: 1329);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetOwner(ActorDefinitions.Boss); }, order: 1330);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.SetPosition(new Position(108.0, 0.0, 92.0), -5e-05); }, order: 1331);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetOwner(null); }, order: 1332);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetOwner(ActorDefinitions.Boss); }, order: 1333);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.SetPosition(new Position(92.0, 0.0, 100.0), -5e-05); }, order: 1334);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetOwner(null); }, order: 1335);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetOwner(ActorDefinitions.Boss); }, order: 1336);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.SetPosition(new Position(100.0, 0.0, 100.0), -5e-05); }, order: 1337);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetOwner(null); }, order: 1338);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetOwner(ActorDefinitions.Boss); }, order: 1339);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.SetPosition(new Position(108.0, 0.0, 100.0), -5e-05); }, order: 1340);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetOwner(null); }, order: 1341);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetOwner(ActorDefinitions.Boss); }, order: 1342);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.SetPosition(new Position(92.0, 0.0, 108.0), -5e-05); }, order: 1343);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetOwner(null); }, order: 1344);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetOwner(ActorDefinitions.Boss); }, order: 1345);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.SetPosition(new Position(84.0, 0.0, 116.0), -5e-05); }, order: 1346);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper04)?.SetOwner(null); }, order: 1347);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper04)?.SetOwner(ActorDefinitions.Boss); }, order: 1348);
+        raid.Schedule(TimeSpan.FromSeconds(3.825), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper04)?.SetPosition(new Position(116.0, 0.0, 116.0), -5e-05); }, order: 1349);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper08)?.ExecuteAction(18576, new Params { ["pos"] = new Position(100.0, 0.0, 100.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper08 }); }, order: 1350);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper09)?.ExecuteAction(18576, new Params { ["pos"] = new Position(92.0, 0.0, 100.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper09 }); }, order: 1351);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper10)?.ExecuteAction(18576, new Params { ["pos"] = new Position(108.0, 0.0, 92.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper10 }); }, order: 1352);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper11)?.ExecuteAction(18576, new Params { ["pos"] = new Position(116.0, 0.0, 84.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper11 }); }, order: 1353);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper12)?.ExecuteAction(18576, new Params { ["pos"] = new Position(84.0, 0.0, 84.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper12 }); }, order: 1354);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper04)?.ExecuteAction(18576, new Params { ["pos"] = new Position(116.0, 0.0, 116.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper04 }); }, order: 1355);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper05)?.ExecuteAction(18576, new Params { ["pos"] = new Position(84.0, 0.0, 116.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper05 }); }, order: 1356);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper06)?.ExecuteAction(18576, new Params { ["pos"] = new Position(92.0, 0.0, 108.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper06 }); }, order: 1357);
+        raid.Schedule(TimeSpan.FromSeconds(3.881), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Helper07)?.ExecuteAction(18576, new Params { ["pos"] = new Position(108.0, 0.0, 100.0), ["rotation"] = -5e-05, ["target"] = ActorDefinitions.Helper07 }); }, order: 1358);
+        raid.Schedule(TimeSpan.FromSeconds(4.948), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.ExecuteAction(18580, new Params { ["pos"] = new Position(99.9924, -0.0153, 99.9924), ["rotation"] = 1.5237 }); }, order: 1359);
+        raid.Schedule(TimeSpan.FromSeconds(8.252), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 0.56178); }, order: 1360);
+        raid.Schedule(TimeSpan.FromSeconds(8.462), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 0.50291); }, order: 1361);
+        raid.Schedule(TimeSpan.FromSeconds(8.773), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 0.53062); }, order: 1362);
+        raid.Schedule(TimeSpan.FromSeconds(9.122), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 0.69975); }, order: 1363);
+        raid.Schedule(TimeSpan.FromSeconds(9.415), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 1.38353); }, order: 1364);
+        raid.Schedule(TimeSpan.FromSeconds(9.967), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 2.70632); }, order: 1365);
+        raid.Schedule(TimeSpan.FromSeconds(10.131), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 3.03738); }, order: 1366);
+        raid.Schedule(TimeSpan.FromSeconds(10.434), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 3.13201); }, order: 1367);
+        raid.Schedule(TimeSpan.FromSeconds(10.756), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), -3.05348); }, order: 1368);
+        raid.Schedule(TimeSpan.FromSeconds(11.064), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 3.12807); }, order: 1369);
+        raid.Schedule(TimeSpan.FromSeconds(12.198), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.ExecuteAction(18581, new Params { ["pos"] = new Position(99.9924, -0.0153, 99.9924), ["rotation"] = 3.12807, ["dest"] = new Position(99.9924, -0.0153, 99.9924) }); }, order: 1370);
+        raid.Schedule(TimeSpan.FromSeconds(12.85), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 3.12807); }, order: 1371);
+        raid.Schedule(TimeSpan.FromSeconds(14.698), () => { raid.GetObjectByGameObjectId(ActorDefinitions.Boss)?.SetPosition(new Position(99.9924, -0.0153, 99.9924), 1.44412); }, order: 1372);
+    }
+}

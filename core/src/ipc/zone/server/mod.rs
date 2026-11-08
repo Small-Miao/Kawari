@@ -3,6 +3,8 @@ use kawari_core_macro::opcode_data;
 use physis::savedata::chardat::CustomizeData;
 
 use super::OnlineStatusMask;
+mod resource_data;
+pub use resource_data::{RsfData, RsvData};
 pub use super::social_list::{SocialList, SocialListUIFlags, SocialListUILanguages};
 
 mod chara_info;
@@ -518,6 +520,12 @@ pub struct RecruitingPartyDetail {
 #[br(import(magic: &ServerZoneIpcType, size: &u32))]
 #[derive(Debug, Clone)]
 pub enum ServerZoneIpcData {
+    /// 等待整组演员加载完成后同步播放 ActionTimeline，最多十名演员。
+    PlayActorTimelines {
+        actors: [ObjectId; 10],
+        #[brw(pad_after = 4)]
+        timelines: [u16; 10],
+    },
     InitResponse {
         /// The actor id of the player logging in.
         #[brw(pad_before = 8, pad_after = 4)] // empty
@@ -1151,6 +1159,9 @@ pub enum ServerZoneIpcData {
     PortraitsInformation {
         unk: [u8; 56],
     },
+    #[ipc_variable_size(52 + data.value.len())]
+    RsvData(RsvData),
+    RsfData(RsfData),
     InitializeObfuscation {
         unk_before: [u8; 6],
         /// Zero means "no obsfucation" (not really, but functionally yes.)
@@ -2086,6 +2097,28 @@ mod tests {
     use crate::common::test_opcodes;
 
     use super::*;
+
+    #[test]
+    fn actor_timelines_match_recorded_parallel_arrays() {
+        use binrw::{BinRead, BinWrite};
+        use std::io::Cursor;
+        let mut wire = vec![0u8; 64];
+        for i in 0..10 {
+            let actor = if i < 3 { 0x40000001u32 + i as u32 } else { 0xE0000000 };
+            wire[i*4..i*4+4].copy_from_slice(&actor.to_le_bytes());
+        }
+        for (i, timeline) in [4574u16, 4573, 4561].into_iter().enumerate() {
+            wire[40+i*2..42+i*2].copy_from_slice(&timeline.to_le_bytes());
+        }
+        let parsed = ServerZoneIpcData::read_le_args(&mut Cursor::new(&wire), (&ServerZoneIpcType::PlayActorTimelines, &64)).unwrap();
+        let ServerZoneIpcData::PlayActorTimelines { actors, timelines } = &parsed else { panic!("动画包类型错误") };
+        assert_eq!(actors[2], ObjectId(0x40000003));
+        assert_eq!(actors[3], ObjectId::default());
+        assert_eq!(timelines[..3], [4574, 4573, 4561]);
+        let mut out = Cursor::new(Vec::new());
+        parsed.write_le(&mut out).unwrap();
+        assert_eq!(out.into_inner(), wire);
+    }
 
     // Ensure that the IPC data size as reported matches up with what we write
     #[test]

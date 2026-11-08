@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <MechanicSimRoot Condition="'$(MechanicSimRoot)' == ''">D:/Code/MechanicSim-Master</MechanicSimRoot>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <!-- 只读链接原工程，避免复制后产生两套机制定义接口。 -->
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Struct/*.cs" Link="Original/Struct/%(Filename)%(Extension)" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Definition/*.cs" Link="Original/Definition/%(Filename)%(Extension)" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Enum/*.cs" Link="Original/Enum/%(Filename)%(Extension)" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Util/*.cs" Link="Original/Util/%(Filename)%(Extension)" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Manager/RaidManager.cs" Link="Original/RaidManager.cs" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Manager/TcpClientSessions.cs" Link="Original/TcpClientSessions.cs" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSim-Server/Debug/DebugSnapshot.cs;$(MechanicSimRoot)/MechanicSim-Server/Debug/DebugLogStore.cs;$(MechanicSimRoot)/MechanicSim-Server/Debug/NetworkMetrics.cs" Link="Original/Debug/%(Filename)%(Extension)" />
+    <Compile Include="$(MechanicSimRoot)/MechanicSimProtocol/Message/*.cs;$(MechanicSimRoot)/MechanicSimProtocol/Net/PacketType.cs" Link="Original/Protocol/%(Filename)%(Extension)" />
+    <PackageReference Include="MessagePack.Annotations" Version="3.1.7" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+  </ItemGroup>
+</Project>

@@ -18,10 +18,20 @@ pub fn opcode_data(_metadata: TokenStream, input: TokenStream) -> TokenStream {
 
     let mut variant_idents = Vec::new();
     let mut default_pat_structs = Vec::new();
+    let mut variable_sizes = Vec::new();
 
     // TODO: add doc comments
     for variant in &mut input.variants {
         let variant_name = variant.ident.clone();
+        // 变长元组包显式声明负载尺寸，不影响既有固定长度包。
+        variant.attrs.retain(|attr| {
+            if !attr.path().is_ident("ipc_variable_size") {
+                return true;
+            }
+            let size = attr.parse_args::<syn::Expr>().expect("无效的变长包尺寸");
+            variable_sizes.push(quote! { Self::#variant_name(data) => Some(#size), });
+            false
+        });
         let variant_tokens = variant.to_token_stream();
         let new_field_token_stream = if variant_name != "Unknown" {
             quote! {
@@ -116,6 +126,13 @@ pub fn opcode_data(_metadata: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             impl crate::packet::HasUnknownData for #data_ident {
+                fn variable_size(&self) -> Option<usize> {
+                    match self {
+                        #(#variable_sizes)*
+                        _ => None,
+                    }
+                }
+
                 fn unknown_size(&self) -> Option<usize> {
                     match self {
                         Self::Unknown { unk } => Some(unk.len()),

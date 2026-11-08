@@ -10,16 +10,22 @@ use crate::{
 
 #[binrw]
 #[brw(little)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct SpawnObject {
     /// The object's spawn index. Note that this is a completely separate index from actors.
     pub spawn_index: u8,
     /// What kind of object this is.
     pub kind: ObjectKind,
-    /// Whether this object should be targetable or not.
-    #[br(map = read_bool_from::<u8>)]
-    #[bw(map = write_bool_as::<u8>)]
+    #[br(temp)]
+    #[bw(calc = u8::from(*not_targetable) | (*extra_flags & !1))]
+    flags: u8,
+    /// 是否不可选中；保留同一字节中的其他客户端标志。
+    #[br(calc = flags & 1 != 0)]
+    #[bw(ignore)]
     pub not_targetable: bool,
+    #[br(calc = flags & !1)]
+    #[bw(ignore)]
+    pub extra_flags: u8,
     /// Whether this object is initially hidden or not.
     #[br(map = read_bool_from::<u8>)]
     #[bw(map = write_bool_as::<u8>)]
@@ -67,5 +73,38 @@ impl mlua::FromLua for SpawnObject {
             mlua::Value::UserData(ud) => Ok(*ud.borrow::<Self>()?),
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binrw::{BinRead, BinWrite};
+    use std::io::Cursor;
+
+    #[test]
+    fn fulgent_blade_object_preserves_flags_and_effect_parameters() {
+        // 原录像 opcode 403：匿名化 entity_id，保留光尘之剑的方向、位置与效果参数。
+        let mut bytes = [0_u8; 64];
+        bytes[1] = 7;
+        bytes[2] = 5;
+        bytes[4..8].copy_from_slice(&0x1EBBF7_u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&0x40000001_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&0x800375BF_u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&0xE0000000_u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&1_f32.to_le_bytes());
+        bytes[34..36].copy_from_slice(&0x1FFF_u16.to_le_bytes());
+        bytes[44..48].copy_from_slice(&4_u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&0x00450003_u32.to_le_bytes());
+        bytes[52..56].copy_from_slice(&89.3934_f32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&89.3934_f32.to_le_bytes());
+        let object = SpawnObject::read_le(&mut Cursor::new(bytes)).unwrap();
+        assert!(object.not_targetable);
+        assert_eq!(object.extra_flags, 4);
+        assert_eq!(object.args1, 4);
+        assert_eq!(object.args2, 0x00450003);
+        let mut written = Cursor::new(Vec::new());
+        object.write_le(&mut written).unwrap();
+        assert_eq!(written.into_inner(), bytes);
     }
 }

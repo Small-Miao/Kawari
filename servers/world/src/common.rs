@@ -530,6 +530,14 @@ pub enum ToServer {
     CommenceDuty(ObjectId),
     /// (Temporary) Signal to the server to kill this actor.
     Kill(ClientId, ObjectId),
+    /// GM 自身会话无敌；None 查询状态，回复 None 表示角色尚未就绪。
+    GodMode(
+        ObjectId,
+        Option<bool>,
+        tokio::sync::oneshot::Sender<Option<bool>>,
+    ),
+    /// GM 查询/停止/重置当前实例原生 Lua 时间轴，不接受任意程序路径。
+    TimelineCommand(ObjectId, String, tokio::sync::oneshot::Sender<String>),
     /// Inform the server to update our HP to this value.
     SetHP(ClientId, ObjectId, u32),
     /// Inform the server to update our MP to this value.
@@ -692,6 +700,8 @@ impl ToServer {
             Self::UpdateConditions(..) => "UpdateConditions",
             Self::CommenceDuty(..) => "CommenceDuty",
             Self::Kill(..) => "Kill",
+            Self::GodMode(..) => "GodMode",
+            Self::TimelineCommand(..) => "TimelineCommand",
             Self::SetHP(..) => "SetHP",
             Self::SetMP(..) => "SetMP",
             Self::NewLocationDiscovered(..) => "NewLocationDiscovered",

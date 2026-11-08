@@ -1,0 +1,24 @@
+{
+  "client_sha256": "958b78e278ad896493c484eb313ff605ab41edefef74f92b0ee078e69b281bf9",
+  "replay_sha256": "480b4c2831fd13e562269af7843ed774fc478e8213f95bc51f990afb7ef86a48",
+  "replay_resource_opcodes": {
+    "rsv": "0xF001",
+    "rsf": "0xF002"
+  },
+  "network_opcodes": {
+    "rsv": {
+      "opcode": 274,
+      "case_rva": "0x18d9c7c"
+    },
+    "rsf": {
+      "opcode": 921,
+      "case_rva": "0x18d9c8a"
+    }
+  },
+  "dispatch_table_rva": "0x18DB3C8",
+  "opcode_bias": 101,
+  "resource_counts": {
+    "rsv": 386,
+    "rsf": 220
+  }
+}

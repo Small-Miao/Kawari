@@ -1,0 +1,33 @@
+{
+  "Name": "国服 2026.10 / build 14101351",
+  "Builds": [
+    14101351
+  ],
+  "Opcodes": {
+    "SpawnNpc": 276,
+    "SpawnObject": 403,
+    "DeleteObject": 722,
+    "DeleteActor": 476,
+    "ActorMove": 535,
+    "ActorSetPos": 992,
+    "ActorCast": 769,
+    "ActionEffect1": 189,
+    "ActionEffect8": 319,
+    "ActionEffect16": 912,
+    "ActionEffect24": 158,
+    "ActionEffect32": 630,
+    "ActorControl": 408,
+    "ActorControlSelf": 486,
+    "ActorControlTarget": 200,
+    "MapEffect": 422,
+    "MapEffects64": 106,
+    "MapEffects128": 764,
+    "Weather": 596,
+    "DirectorVars": 225,
+    "ActorTimelines": 333,
+    "Status30": 718,
+    "Status60": 923,
+    "Rsv": 61441,
+    "Rsf": 61442
+  }
+}

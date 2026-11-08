@@ -1,0 +1,32 @@
+[
+  {
+    "Sha256": "c7b9eb1b081ba62bc660f3e13224181549b7273ecd1fcdc7b2481eac68f274bd",
+    "Name": "P7 最终阶段",
+    "StartMs": 5664700,
+    "EndMs": 5940943
+  },
+  {
+    "Sha256": "e5ee4c565410cee3b407247538c725fa4f12076bd388764e8ace134979e4422d",
+    "Name": "P5 最终阶段",
+    "StartMs": 1153400,
+    "EndMs": 1500447
+  },
+  {
+    "Sha256": "92a3e6f260dc446cf241d1c55391c6b0a90ea97d40c0078e67df3ac88254c07e",
+    "Name": "P6 最终阶段",
+    "StartMs": 4238900,
+    "EndMs": 4569344
+  },
+  {
+    "Sha256": "480b4c2831fd13e562269af7843ed774fc478e8213f95bc51f990afb7ef86a48",
+    "Name": "P5 最终阶段",
+    "StartMs": 988200,
+    "EndMs": 1242995
+  },
+  {
+    "Sha256": "8bf97c7cc6a3b5855845c155cf4c0fb633c20550f980df0ff62548b56091390d",
+    "Name": "P4 最终阶段",
+    "StartMs": 611300,
+    "EndMs": 999371
+  }
+]

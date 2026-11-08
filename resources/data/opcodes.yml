@@ -1,4 +1,16 @@
 ServerZoneIpcType:
+- name: RsvData
+  comment: RSV 字符串资源，52 字节头部后跟 UTF-8 变长内容。
+  opcode: 274
+  size: 52
+- name: RsfData
+  comment: RSF 资源参数，8 字节索引及 64 字节数据。
+  opcode: 921
+  size: 72
+- name: PlayActorTimelines
+  comment: Wait for up to ten actors to load, then play their ActionTimelines together.
+  opcode: 333
+  size: 64
 - name: ZoneInit
   comment: Inform the client which zone to load, along with some other miscellaneous information.
   opcode: 716

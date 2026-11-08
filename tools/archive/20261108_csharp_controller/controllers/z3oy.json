@@ -1,0 +1,4 @@
+{
+  "executable": "D:/Code/GitClone/GitHub/KawariYarukon/tools/MechanicSimController/bin/Debug/net10.0/MechanicSimController.exe",
+  "args": ["--config", "D:/Code/GitClone/GitHub/KawariYarukon/resources/controllers/umad-p2/profile.json"]
+}

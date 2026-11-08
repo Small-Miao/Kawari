@@ -154,6 +154,48 @@ impl ZoneConnection {
         let parts: Vec<&str> = chat_message.split(' ').collect();
 
         match parts[0] {
+            "!timeline" | "!controller" => {
+                let action = match parts.as_slice() {
+                    [_] | [_, "status"] => "status",
+                    [_, "reset"] => "reset",
+                    [_, "reload"] => "reload",
+                    [_, "stop"] => "stop",
+                    _ => { self.send_notice("用法：!timeline status / reset / reload / stop").await; return true; }
+                };
+                let (reply, response) = tokio::sync::oneshot::channel();
+                self.handle.send(crate::ToServer::TimelineCommand(
+                    self.player_data.character.actor_id, action.to_string(), reply)).await;
+                let message = response.await.unwrap_or_else(|_|"控制器查询失败。".into());
+                self.send_notice(&message).await;
+                true
+            }
+            "!godmode" => {
+                let value = match parts.as_slice() {
+                    [_] | [_, "status"] => None,
+                    [_, "on"] => Some(true),
+                    [_, "off"] => Some(false),
+                    _ => {
+                        self.send_notice("用法：!godmode on 开启，off 关闭，status 查询。")
+                            .await;
+                        return true;
+                    }
+                };
+                let (reply, response) = tokio::sync::oneshot::channel();
+                self.handle
+                    .send(crate::ToServer::GodMode(
+                        self.player_data.character.actor_id,
+                        value,
+                        reply,
+                    ))
+                    .await;
+                let message = match response.await {
+                    Ok(Some(true)) => "无敌模式：已开启。免疫伤害和死亡；重新登录后关闭。",
+                    Ok(Some(false)) => "无敌模式：已关闭。",
+                    _ => "角色尚未就绪，无法设置无敌模式，请加载完成后重试。",
+                };
+                self.send_notice(message).await;
+                true
+            }
             "!equip" => {
                 if let Some((_, name)) = chat_message.split_once(' ') {
                     let item_info;
@@ -241,8 +283,8 @@ impl ZoneConnection {
                             let new_item;
                             {
                                 let mut gamedata = self.gamedata.lock();
-                                new_item = gamedata.get_item_info(ItemInfoQuery::ById(id)).map(
-                                    |info| {
+                                new_item =
+                                    gamedata.get_item_info(ItemInfoQuery::ById(id)).map(|info| {
                                         let mut item = Item::new(&info, quantity);
                                         // Bit 0 of item_flags is the HQ flag. An item with no HQ
                                         // version silently stays normal quality; that is reported
@@ -255,8 +297,7 @@ impl ZoneConnection {
                                             }
                                         }
                                         item
-                                    },
-                                );
+                                    });
                             }
 
                             match new_item {
@@ -566,10 +607,14 @@ mod tests {
     /// its only job here is to prove an HQ-marked id is still recognised as the id form.
     fn looks_like_id_list(args: &str) -> bool {
         args.contains(',')
-            || split_hq_marker(args.split_once('*').map(|(id, _)| id.trim()).unwrap_or(args))
-                .0
-                .parse::<u32>()
-                .is_ok()
+            || split_hq_marker(
+                args.split_once('*')
+                    .map(|(id, _)| id.trim())
+                    .unwrap_or(args),
+            )
+            .0
+            .parse::<u32>()
+            .is_ok()
     }
 
     #[test]

@@ -218,6 +218,8 @@ fn duration_to_centisec(duration: Duration) -> u32 {
 
 #[derive(Debug, Clone, Default)]
 pub struct PlayerCombatState {
+    /// GM 会话无敌；随区域迁移保留，不写入角色数据库。
+    pub god_mode: bool,
     pub cooldowns: Vec<Option<CooldownState>>,
     pub summoner: SummonerState,
     pub bard: BardState,
