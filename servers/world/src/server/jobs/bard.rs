@@ -18,8 +18,8 @@ use kawari::{common::ObjectId, ipc::zone::ActionRequest};
 
 /// ClassJob row id for Bard (BRD). NOTE: 5 is Archer (ARC); Bard is 23.
 const CLASSJOB_BARD: u8 = 23;
-/// Some data paths carry the Bard ClassJobCategory row instead of the ClassJob row.
-const CLASSJOB_CATEGORY_BARD: u8 = 24;
+/// 弓箭手的 ClassJob ID；职业分类表的 24 实际对应白魔法师职业，不能用于调度。
+const CLASSJOB_ARCHER: u8 = 5;
 
 // ==================== Action IDs ====================
 
@@ -711,18 +711,18 @@ pub(crate) fn update_bard_state_after_action(
         // Song activations
         ACTION_MAGES_BALLAD => {
             start_song(&mut combat_state.bard, BardSong::MagesBallad, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
-                | remove_song_statuses(status_effects);
+            action_update.status_timer_refreshed =
+                remove_repertoire_status(status_effects) | remove_song_statuses(status_effects);
         }
         ACTION_ARMYS_PAEON => {
             start_song(&mut combat_state.bard, BardSong::ArmysPaeon, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
-                | remove_song_statuses(status_effects);
+            action_update.status_timer_refreshed =
+                remove_repertoire_status(status_effects) | remove_song_statuses(status_effects);
         }
         ACTION_WANDERERS_MINUET => {
             start_song(&mut combat_state.bard, BardSong::WanderersMinuet, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
-                | remove_song_statuses(status_effects);
+            action_update.status_timer_refreshed =
+                remove_repertoire_status(status_effects) | remove_song_statuses(status_effects);
         }
 
         // DoT applications
@@ -1164,17 +1164,17 @@ mod tests {
 
         // Stand in for the Lua-applied status of the song that is already running.
         match &mut actor {
-            NetworkedActor::Player { status_effects, .. } => status_effects.add_with_source(
-                STATUS_MAGES_BALLAD,
-                0,
-                45.0,
-                ObjectId::default(),
-            ),
+            NetworkedActor::Player { status_effects, .. } => {
+                status_effects.add_with_source(STATUS_MAGES_BALLAD, 0, 45.0, ObjectId::default())
+            }
             _ => unreachable!("expected a Player actor"),
         }
 
-        let update =
-            update_bard_state_after_action(ACTION_WANDERERS_MINUET, &mut actor, ObjectId::default());
+        let update = update_bard_state_after_action(
+            ACTION_WANDERERS_MINUET,
+            &mut actor,
+            ObjectId::default(),
+        );
 
         assert!(
             status_effects_of(&actor).get(STATUS_MAGES_BALLAD).is_none(),
@@ -1444,7 +1444,7 @@ impl From<BardCooldownUpdate> for JobCooldownUpdate {
 
 impl Job for Bard {
     fn class_jobs(&self) -> &'static [u8] {
-        &[CLASSJOB_BARD, CLASSJOB_CATEGORY_BARD]
+        &[CLASSJOB_BARD, CLASSJOB_ARCHER]
     }
 
     fn gauge_class_job_id(&self, _dispatch_class_job: u8) -> u8 {

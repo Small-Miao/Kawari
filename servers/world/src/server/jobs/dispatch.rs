@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn job_for_resolves_known_classes_and_rejects_unknown() {
-        // Bard answers to both its class id (23) and the ARCHER category id (24).
+        // 吟游诗人和弓箭手使用 ClassJob ID，不混入职业分类表的 ID。
         for cj in Bard.class_jobs() {
             let job = job_for(*cj).expect("bard class id should resolve");
             assert!(job.class_jobs().contains(cj));
@@ -270,5 +270,29 @@ mod tests {
         // An unhandled class id resolves to nothing.
         assert!(job_for(0).is_none());
         assert!(job_for(19).is_none()); // Paladin — not yet implemented.
+    }
+
+    #[test]
+    fn merged_caster_jobs_do_not_overlap_bard_or_each_other() {
+        use crate::server::jobs::{black_mage, white_mage};
+
+        for class_job in [5, 23] {
+            assert!(job_for(class_job).is_some());
+            assert!(!black_mage::is_black_mage(class_job));
+            assert!(!white_mage::is_white_mage(class_job));
+        }
+        for class_job in [6, 24] {
+            assert!(job_for(class_job).is_none());
+            assert!(white_mage::is_white_mage(class_job));
+            assert!(!black_mage::is_black_mage(class_job));
+        }
+        for class_job in [7, 25] {
+            assert!(job_for(class_job).is_none());
+            assert!(black_mage::is_black_mage(class_job));
+            assert!(!white_mage::is_white_mage(class_job));
+        }
+        // 秘术师不应因职业分类表 ID 冲突而走黑魔法师逻辑。
+        assert!(!black_mage::is_black_mage(26));
+        assert!(!white_mage::is_white_mage(26));
     }
 }

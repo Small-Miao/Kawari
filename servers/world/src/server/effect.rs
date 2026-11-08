@@ -83,6 +83,16 @@ pub fn send_effects_list(
     instance: &Instance,
     from_actor_id: ObjectId,
 ) {
+    let mut network = network.lock();
+    send_effects_list_with(&mut network, instance, from_actor_id);
+}
+
+/// [`send_effects_list`] variant for callers that already hold the network lock.
+pub(crate) fn send_effects_list_with(
+    network: &mut NetworkState,
+    instance: &Instance,
+    from_actor_id: ObjectId,
+) {
     let Some(actor) = instance.find_actor(from_actor_id) else {
         return;
     };
@@ -109,7 +119,6 @@ pub fn send_effects_list(
         ..Default::default()
     }));
 
-    let mut network = network.lock();
     network.send_in_range_inclusive_instance(
         from_actor_id,
         instance,

@@ -20,8 +20,9 @@ use crate::{
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
         jobs::{
+            black_mage,
             dispatch::{Job, JobActionUpdate, job_for, send_job_gauge_update},
-            summoner,
+            summoner, white_mage,
         },
         network::{DestinationNetwork, NetworkState},
         set_character_mode, set_shared_group_timeline_state,
@@ -109,6 +110,9 @@ pub(crate) struct ActionDamageModifiers {
     raging_strikes: bool,
     mages_ballad: bool,
     radiant_finale_bonus_percent: u8,
+    /// BLM elemental stance multiplier in percent (100 = no change, 0 = not a BLM cast).
+    /// Set per-action because it depends on the action's element, not just the caster.
+    black_mage_damage_percent: u32,
 }
 
 impl ActionDamageModifiers {
@@ -123,6 +127,9 @@ impl ActionDamageModifiers {
         if self.radiant_finale_bonus_percent > 0 {
             amount =
                 apply_damage_percent(amount, 100 + u32::from(self.radiant_finale_bonus_percent));
+        }
+        if self.black_mage_damage_percent > 0 {
+            amount = apply_damage_percent(amount, self.black_mage_damage_percent);
         }
         amount
     }
@@ -202,7 +209,12 @@ pub(crate) fn apply_target_player_mitigation(
         let lb = target
             .and_then(|a| a.status_effects())
             .is_some_and(|s| [196, 863, 864, 1931].iter().any(|id| s.get(*id).is_some()));
-        return ((amount as f64) * (1.0 - mitigation) * if lb { 0.2 } else { 1.0 }).floor() as u32;
+        let white_mage_multiplier = white_mage::white_mage_mitigation_multiplier(target);
+        return ((amount as f64)
+            * (1.0 - mitigation)
+            * white_mage_multiplier
+            * if lb { 0.2 } else { 1.0 })
+        .floor() as u32;
     }
 
     amount
@@ -438,6 +450,16 @@ fn aoe_secondary_falloff_base(action_id: u32, base_damage: u32) -> u32 {
     let fraction = match action_id {
         // Bard 50%-falloff finishers/procs.
         7404 | 25784 | 36976 | 36977 => 0.5_f32,
+        // BLM: Flare "对目标之外的敌人威力降低30%".
+        162 => 0.7_f32,
+        // BLM: Foul -25%.
+        7422 => 0.75_f32,
+        // BLM: Flare Star -65%.
+        36989 => 0.35_f32,
+        // WHM: Afflatus Misery -50%.
+        16535 => 0.5_f32,
+        // WHM: Glare IV -40%.
+        37009 => 0.6_f32,
         _ => 1.0_f32,
     };
     if fraction >= 1.0 {
@@ -469,6 +491,12 @@ fn action_cooldown_rejections(
     action_id: u32,
     level: u8,
 ) -> Vec<(usize, Duration)> {
+    // The bell's detonate action uses no sheet-driven cooldown (its sheet row is an unrelated
+    // Viper action); its 1s lock is started explicitly in start_action_cooldowns.
+    if action_id == white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE {
+        return Vec::new();
+    }
+
     let primary_group = game_data.get_action_cooldown_group(action_id);
     let max_charges = game_data.get_action_max_charges_at_level(action_id, level);
 
@@ -511,6 +539,10 @@ fn start_action_cooldowns(
     action_id: u32,
 ) -> Vec<StartedCooldown> {
     let level = actor.get_common_spawn().level;
+    // Ley Lines haste shortens spell recasts too; snapshot before the mutable destructure.
+    let in_ley_lines = actor_has_status(actor, black_mage::STATUS_CIRCLE_OF_POWER);
+    // Presence of Mind (WHM) does the same.
+    let has_pom = actor_has_status(actor, white_mage::STATUS_PRESENCE_OF_MIND);
     let NetworkedActor::Player {
         combat_state,
         parameters,
@@ -524,6 +556,18 @@ fn start_action_cooldowns(
     // GM cheat: never put anything on cooldown so actions can be spammed.
     if *remove_cooldowns {
         return Vec::new();
+    }
+
+    // Bell detonation: retail starts a bare 1s lock on wire group 0 (captured
+    // SetCooldownTimerMax{group: 0, action: 28507, 100cs}) instead of any sheet-driven cooldown —
+    // the Action-sheet row for 28507 is an unrelated Viper action whose groups would be wrong.
+    if action_id == white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE {
+        combat_state.start_cooldown(0, action_id, Duration::from_secs(1), 1, COOLDOWN_TOLERANCE);
+        return vec![StartedCooldown {
+            cooldown_group: 0,
+            action_id,
+            duration_centisec: 100,
+        }];
     }
 
     let recast_100ms = u32::from(game_data.get_action_recast(action_id));
@@ -569,7 +613,13 @@ fn start_action_cooldowns(
             || (group_id == primary_group
                 && matches!(game_data.get_action_category(action_id), 2 | 3))
         {
-            parameters.apply_speed(base_centisec)
+            white_mage::apply_pom_haste(
+                black_mage::apply_ley_lines_haste(
+                    parameters.apply_speed(base_centisec),
+                    in_ley_lines,
+                ),
+                has_pom,
+            )
         } else {
             base_centisec
         };
@@ -732,6 +782,40 @@ fn resolve_player_action_id(
             return None;
         }
         resolved
+    } else if request.action_type == ActionType::Action && black_mage::is_black_mage(class_job) {
+        let resolved = black_mage::resolve_black_mage_action(request, combat_state, level);
+        let empty_status_effects = StatusEffects::default();
+        let status_effects = actor.status_effects().unwrap_or(&empty_status_effects);
+        if !black_mage::can_execute_black_mage_action(resolved, combat_state, status_effects, level)
+        {
+            tracing::warn!(
+                ?actor_id,
+                action_id = request.action_id,
+                resolved_action_id = resolved,
+                level,
+                state = ?combat_state.black_mage,
+                "Rejected Black Mage action because the current job state does not allow it",
+            );
+            return None;
+        }
+        resolved
+    } else if request.action_type == ActionType::Action && white_mage::is_white_mage(class_job) {
+        let resolved = white_mage::resolve_white_mage_action(request, level);
+        let empty_status_effects = StatusEffects::default();
+        let status_effects = actor.status_effects().unwrap_or(&empty_status_effects);
+        if !white_mage::can_execute_white_mage_action(resolved, combat_state, status_effects, level)
+        {
+            tracing::warn!(
+                ?actor_id,
+                action_id = request.action_id,
+                resolved_action_id = resolved,
+                level,
+                state = ?combat_state.white_mage,
+                "Rejected White Mage action because the current job state does not allow it",
+            );
+            return None;
+        }
+        resolved
     } else {
         request.action_id
     };
@@ -756,9 +840,37 @@ fn resolve_player_action_id(
     }
 
     if request.action_type == ActionType::Action {
-        let mp_cost = game_data.get_action_mp_cost(resolved_action_id);
+        // BLM rewrites the sheet MP cost with its elemental stance rules (AF doubles fire
+        // cost unless an Umbral Heart pays, ice/fire are free in the opposite stance, Flare
+        // and Despair consume all MP, Firestarter makes Fire III free).
+        let mp_cost = if black_mage::is_black_mage(class_job) {
+            let aspect = game_data.get_action_aspect(resolved_action_id);
+            let sheet_cost = game_data.get_action_mp_cost(resolved_action_id);
+            let common = actor.get_common_spawn();
+            black_mage::effective_mp_cost(
+                &combat_state.black_mage,
+                resolved_action_id,
+                sheet_cost,
+                aspect,
+                u32::from(common.resource_points),
+                u32::from(common.max_resource_points),
+                actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
+            )
+        } else if white_mage::is_white_mage(class_job) {
+            // WHM: Freecure makes Cure II free, Thin Air makes the next action free.
+            white_mage::effective_mp_cost(
+                resolved_action_id,
+                game_data.get_action_mp_cost(resolved_action_id),
+                actor_has_status(actor, white_mage::STATUS_FREECURE),
+                actor_has_status(actor, white_mage::STATUS_THIN_AIR),
+            )
+        } else {
+            game_data.get_action_mp_cost(resolved_action_id)
+        };
         let current_mp = actor.get_common_spawn().resource_points;
-        if mp_cost > u32::from(current_mp) {
+        if mp_cost > u32::from(current_mp)
+            || u32::from(current_mp) < black_mage::min_mp_requirement(resolved_action_id)
+        {
             tracing::warn!(
                 ?actor_id,
                 action_id = request.action_id,
@@ -781,14 +893,23 @@ fn reject_time_stopped_action(
     request: &ActionRequest,
 ) -> bool {
     let world = data.lock();
-    let Some(instance) = world.find_actor_instance(actor_id) else { return false; };
-    if !instance.find_actor(actor_id).is_some_and(NetworkedActor::is_time_stopped) {
+    let Some(instance) = world.find_actor_instance(actor_id) else {
+        return false;
+    };
+    if !instance
+        .find_actor(actor_id)
+        .is_some_and(NetworkedActor::is_time_stopped)
+    {
         return false;
     }
     network.lock().send_ac_in_range_inclusive_instance(
-        instance, actor_id,
+        instance,
+        actor_id,
         ActorControlCategory::CancelCast {
-            log_message_id: 0, action_type: 1, action_id: request.action_id, interrupted: true,
+            log_message_id: 0,
+            action_type: 1,
+            action_id: request.action_id,
+            interrupted: true,
         },
     );
     true
@@ -802,8 +923,29 @@ pub fn handle_action_messages(
     lua: Arc<Mutex<KawariLua>>,
     msg: &ToServer,
 ) -> bool {
-    if let ToServer::ActionRequest(from_id, from_actor_id, request) = msg {
-        if reject_time_stopped_action(&data, &network, *from_actor_id, request) {
+    let (from_id, from_actor_id, request, ground_position) = match msg {
+        ToServer::ActionRequest(from_id, from_actor_id, request) => {
+            (from_id, from_actor_id, request.clone(), None)
+        }
+        ToServer::ActionRequestGroundTargeted(from_id, from_actor_id, request) => {
+            // Ground-targeted actions have no target actor; normalize to a regular
+            // ActionRequest whose target is the self-alias (0xE0000000), matching retail's
+            // ActionResult for these actions.
+            let base_request = ActionRequest {
+                action_id: request.action_id,
+                unk1: request.unk1,
+                action_type: request.action_type,
+                sequence: request.sequence,
+                rotation1: request.rotation1,
+                rotation2: request.rotation2,
+                ..Default::default()
+            };
+            (from_id, from_actor_id, base_request, Some(request.position))
+        }
+        _ => return false,
+    };
+    {
+        if reject_time_stopped_action(&data, &network, *from_actor_id, &request) {
             return true;
         }
         if request.action_type == ActionType::Action
@@ -843,7 +985,7 @@ pub fn handle_action_messages(
                 };
 
                 let mut game_data = game_data.lock();
-                resolve_player_action_id(actor, *from_actor_id, request, &mut game_data, true)
+                resolve_player_action_id(actor, *from_actor_id, &request, &mut game_data, true)
             };
 
             let Some(resolved_action_id) = resolved_action_id else {
@@ -892,7 +1034,7 @@ pub fn handle_action_messages(
         let cast_centisec = if resolved_request.action_type == ActionType::Mount {
             MOUNT_CAST_CENTISEC
         } else {
-            let (cast_time_100ms, is_spell) = {
+            let (cast_time_100ms, is_spell, action_aspect) = {
                 let mut game_data = game_data.lock();
                 (
                     game_data
@@ -900,6 +1042,7 @@ pub fn handle_action_messages(
                         .unwrap_or_default(),
                     resolved_request.action_type == ActionType::Action
                         && is_spell_action(&mut game_data, resolved_request.action_id),
+                    game_data.get_action_aspect(resolved_request.action_id),
                 )
             };
             let base_centisec = u32::from(cast_time_100ms) * 10;
@@ -907,14 +1050,50 @@ pub fn handle_action_messages(
             data.find_actor_instance(*from_actor_id)
                 .and_then(|instance| instance.find_actor(*from_actor_id))
                 .and_then(|actor| match actor {
-                    NetworkedActor::Player { parameters, .. } => {
+                    NetworkedActor::Player {
+                        parameters,
+                        combat_state,
+                        ..
+                    } => {
                         if base_centisec > 0
                             && is_spell
                             && actor_has_status(actor, STATUS_SWIFTCAST)
                         {
                             Some(0)
+                        } else if is_spell
+                            && black_mage::is_black_mage(actor.get_common_spawn().class_job)
+                        {
+                            // BLM cast rules: Firestarter/Triplecast/Lv100 Despair are instant,
+                            // opposite-element casts are halved under max stance, and standing in
+                            // Ley Lines shaves another 15% off both cast and recast.
+                            if black_mage::requires_no_cast_time(
+                                &combat_state.black_mage,
+                                resolved_request.action_id,
+                                base_centisec,
+                                actor.get_common_spawn().level,
+                                actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
+                            ) {
+                                Some(0)
+                            } else {
+                                let mut centisec = parameters.apply_speed(base_centisec);
+                                if black_mage::cast_time_halved(
+                                    &combat_state.black_mage,
+                                    action_aspect,
+                                ) {
+                                    centisec /= 2;
+                                }
+                                Some(black_mage::apply_ley_lines_haste(
+                                    centisec,
+                                    actor_has_status(actor, black_mage::STATUS_CIRCLE_OF_POWER),
+                                ))
+                            }
                         } else {
-                            Some(parameters.apply_speed(base_centisec))
+                            // Presence of Mind (神速咏唱) shaves 20% off WHM spell casts.
+                            Some(white_mage::apply_pom_haste(
+                                parameters.apply_speed(base_centisec),
+                                is_spell
+                                    && actor_has_status(actor, white_mage::STATUS_PRESENCE_OF_MIND),
+                            ))
                         }
                     }
                     _ => None,
@@ -929,9 +1108,15 @@ pub fn handle_action_messages(
         };
         if let Some(director) = instance.director.as_mut() {
             use super::director::EncounterVar;
-            let value = director.player_vars.entry(*from_actor_id).or_default()
-                .entry("__action_count".into()).or_insert(EncounterVar::Int(0));
-            if let EncounterVar::Int(count) = value { *count = count.saturating_add(1); }
+            let value = director
+                .player_vars
+                .entry(*from_actor_id)
+                .or_default()
+                .entry("__action_count".into())
+                .or_insert(EncounterVar::Int(0));
+            if let EncounterVar::Int(count) = value {
+                *count = count.saturating_add(1);
+            }
         }
 
         if cast_centisec > 0 {
@@ -1004,6 +1189,7 @@ pub fn handle_action_messages(
                     from_id,
                     from_actor_id,
                     request,
+                    ground_position,
                 );
             });
             return true;
@@ -1016,13 +1202,12 @@ pub fn handle_action_messages(
             QueuedTaskData::CastAction {
                 request: resolved_request,
                 interruptible,
+                ground_position,
             },
         );
 
         return true;
     }
-
-    false
 }
 
 /// Executes an action, and returns a list of Tasks that must be executed by the client.
@@ -1034,6 +1219,7 @@ pub fn execute_action(
     from_id: ClientId,
     from_actor_id: ObjectId,
     request: ActionRequest,
+    ground_position: Option<kawari::common::Position>,
 ) {
     if reject_time_stopped_action(&data, &network, from_actor_id, &request) {
         return;
@@ -1216,20 +1402,29 @@ pub fn execute_action(
         // Unified per-job gauge send: `Some((gauge_class_job_id, gauge_data))` or `None`.
         let job_gauge_data;
         let bard_action_update;
-        // Sampled inside the data block below, read by the LoseEffect loop further down.
         let lost_statuses: Vec<u16>;
-        let action_mp_cost = if resolved_request.action_type == ActionType::Action {
+        let black_mage_gauge_data;
+        let black_mage_action_update;
+        let white_mage_gauge_data;
+        let white_mage_action_update;
+        let (sheet_mp_cost, action_aspect) = if resolved_request.action_type == ActionType::Action {
             let mut game_data = game_data.lock();
-            game_data.get_action_mp_cost(resolved_request.action_id)
+            (
+                game_data.get_action_mp_cost(resolved_request.action_id),
+                game_data.get_action_aspect(resolved_request.action_id),
+            )
         } else {
-            0
+            (0, 0)
         };
         // Captured inside the data block below, used by the AoE fan-out further down.
         let aoe_base_damage: u32;
         let aoe_damage_type: DamageType;
         let aoe_radius: f32;
         let consume_swiftcast: bool;
-        let source_damage_modifiers: ActionDamageModifiers;
+        let consume_triplecast: bool;
+        let mut source_damage_modifiers: ActionDamageModifiers;
+        // Base heal amount for WHM AoE heals, captured before per-target multipliers are applied.
+        let mut white_mage_aoe_heal_base: Option<u32> = None;
         // Whether this action summons a generic carbuncle; the spawn is deferred until after the
         // result packet so the client plays the summon animation before the pet appears.
         let mut summon_pet_after = false;
@@ -1241,6 +1436,31 @@ pub fn execute_action(
             let mut data = data.lock();
             let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                 return;
+            };
+
+            // BLM rewrites the sheet MP cost with its elemental stance rules, mirroring the
+            // request-time check in resolve_player_action_id (AF doubles fire cost unless an
+            // Umbral Heart pays, ice/fire are free in the opposite stance, Flare and Despair
+            // consume all MP, Firestarter makes Fire III free).
+            let action_mp_cost = if resolved_request.action_type == ActionType::Action
+                && black_mage::is_black_mage(class_job)
+                && let Some(actor) = instance.find_actor(from_actor_id)
+            {
+                let common = actor.get_common_spawn();
+                let NetworkedActor::Player { combat_state, .. } = actor else {
+                    return;
+                };
+                black_mage::effective_mp_cost(
+                    &combat_state.black_mage,
+                    resolved_request.action_id,
+                    sheet_mp_cost,
+                    action_aspect,
+                    u32::from(common.resource_points),
+                    u32::from(common.max_resource_points),
+                    actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
+                )
+            } else {
+                sheet_mp_cost
             };
 
             if action_mp_cost > 0 {
@@ -1373,7 +1593,37 @@ pub fn execute_action(
                         .find_actor(from_actor_id)
                         .is_some_and(|actor| actor_has_status(actor, STATUS_SWIFTCAST))
             };
+            // BLM Triplecast: a spell with a real cast time eats one stack (unless Swiftcast
+            // already made this cast instant — retail consumes Swiftcast first).
+            consume_triplecast = !consume_swiftcast
+                && black_mage::is_black_mage(class_job)
+                && resolved_request.action_type == ActionType::Action
+                && {
+                    let mut game_data = game_data.lock();
+                    is_spell_action(&mut game_data, resolved_request.action_id)
+                        && game_data
+                            .get_casttime(resolved_request.action_id)
+                            .unwrap_or_default()
+                            > 0
+                }
+                && instance.find_actor(from_actor_id).is_some_and(|actor| {
+                    matches!(actor, NetworkedActor::Player { combat_state, .. } if combat_state.black_mage.triplecast_stacks > 0)
+                });
             source_damage_modifiers = action_damage_modifiers(instance.find_actor(from_actor_id));
+            // BLM elemental stance multiplier (AF boosts fire / weakens ice, UI weakens fire;
+            // also rolls Scathe's 20% double damage).
+            if black_mage::is_black_mage(class_job)
+                && let Some(NetworkedActor::Player { combat_state, .. }) =
+                    instance.find_actor(from_actor_id)
+            {
+                source_damage_modifiers.black_mage_damage_percent =
+                    black_mage::element_damage_percent(
+                        &combat_state.black_mage,
+                        resolved_request.action_id,
+                        action_aspect,
+                        common_spawn.level,
+                    );
+            }
 
             for effect in &mut effects_builder.effects {
                 match &mut effect.0 {
@@ -1424,6 +1674,23 @@ pub fn execute_action(
                     }
                     TargetEffectKind::Heal { amount, .. } => {
                         let heal_target = resolved_request.target.object_id;
+
+                        // Capture the unmultiplied base for WHM AoE heals so secondary targets can
+                        // have their own incoming-heal multipliers applied.
+                        if white_mage::is_white_mage(class_job)
+                            && white_mage::aoe_heal_profile(resolved_request.action_id).is_some()
+                        {
+                            white_mage_aoe_heal_base = Some(*amount);
+                        }
+
+                        // Apply WHM healing multipliers (Temperance self outgoing, Asylum
+                        // incoming) to direct heals before restoring HP.
+                        let heal_multiplier = white_mage::outgoing_heal_multiplier(
+                            instance.find_actor(from_actor_id),
+                        ) * white_mage::incoming_heal_multiplier(
+                            instance.find_actor(heal_target),
+                        );
+                        *amount = ((*amount as f64) * heal_multiplier) as u32;
 
                         // Actually restore the target's HP, clamped to their maximum.
                         if let Some(actor) = instance.find_actor_mut(heal_target) {
@@ -1483,6 +1750,105 @@ pub fn execute_action(
                             !summoner::is_elemental_primal_summon(resolved_request.action_id);
                     }
                     _ => {}
+                }
+            }
+
+            // WHM-specific fan-outs and special-case actions that Lua cannot resolve on its own
+            // (party-wide heals/buffs, Raise, Benediction).
+            if white_mage::is_white_mage(class_job) {
+                if let Some((radius, centered_on_caster)) =
+                    white_mage::aoe_heal_profile(resolved_request.action_id)
+                {
+                    if let Some(base_amount) = white_mage_aoe_heal_base {
+                        let center_actor_id = if centered_on_caster {
+                            from_actor_id
+                        } else {
+                            resolved_request.target.object_id
+                        };
+                        let center = instance
+                            .find_actor(center_actor_id)
+                            .map(|actor| actor.position().0)
+                            .unwrap_or_default();
+                        let outgoing_multiplier = white_mage::outgoing_heal_multiplier(
+                            instance.find_actor(from_actor_id),
+                        );
+                        let healed = {
+                            let network_guard = network.lock();
+                            white_mage::fan_out_aoe_heal(
+                                &network_guard,
+                                instance,
+                                from_actor_id,
+                                resolved_request.action_id,
+                                center,
+                                radius,
+                                base_amount,
+                                outgoing_multiplier,
+                            )
+                        };
+                        for (member_id, _) in healed {
+                            if member_id != resolved_request.target.object_id {
+                                update_actor_hp_mp(network.clone(), instance, member_id);
+                            }
+                        }
+                    }
+                }
+
+                if let Some((radius, status_id, duration, param)) =
+                    white_mage::party_buff_profile(resolved_request.action_id)
+                {
+                    let center = instance
+                        .find_actor(from_actor_id)
+                        .map(|actor| actor.position().0)
+                        .unwrap_or_default();
+                    let buffed = {
+                        let network_guard = network.lock();
+                        white_mage::fan_out_party_status(
+                            &network_guard,
+                            instance,
+                            from_actor_id,
+                            center,
+                            radius,
+                            status_id,
+                            param,
+                            duration,
+                        )
+                    };
+                    for member_id in buffed {
+                        send_dirty_status_effects(network.clone(), instance, member_id);
+                    }
+                }
+
+                if let Some(radius) = white_mage::divine_caress_radius(resolved_request.action_id) {
+                    let center = instance
+                        .find_actor(from_actor_id)
+                        .map(|actor| actor.position().0)
+                        .unwrap_or_default();
+                    let buffed = {
+                        let network_guard = network.lock();
+                        white_mage::fan_out_divine_caress(
+                            &network_guard,
+                            instance,
+                            from_actor_id,
+                            center,
+                            radius,
+                            &lua_player.base_parameters,
+                        )
+                    };
+                    for member_id in buffed {
+                        send_dirty_status_effects(network.clone(), instance, member_id);
+                    }
+                }
+
+                if resolved_request.action_id == white_mage::ACTION_RAISE {
+                    white_mage::apply_raise(instance, resolved_request.target.object_id);
+                }
+
+                if resolved_request.action_id == white_mage::ACTION_BENEDICTION {
+                    if let Some(actor) = instance.find_actor_mut(resolved_request.target.object_id)
+                    {
+                        let max_hp = actor.get_common_spawn().max_health_points;
+                        actor.get_common_spawn_mut().health_points = max_hp;
+                    }
                 }
             }
 
@@ -1727,6 +2093,184 @@ pub fn execute_action(
                 }
             }
 
+            black_mage_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
+                && black_mage::is_black_mage(class_job)
+            {
+                let action_update = black_mage::update_black_mage_state_after_action(
+                    resolved_request.action_id,
+                    actor,
+                    from_actor_id,
+                    sheet_mp_cost,
+                    action_aspect,
+                );
+                let level = actor.get_common_spawn().level;
+                let gauge_data = if let NetworkedActor::Player { combat_state, .. } = actor {
+                    Some(black_mage::build_black_mage_gauge_data(combat_state, level))
+                } else {
+                    None
+                };
+                black_mage_action_update = action_update;
+                gauge_data
+            } else {
+                black_mage_action_update = black_mage::BlackMageActionUpdate::default();
+                None
+            };
+
+            white_mage_gauge_data = if white_mage::is_white_mage(class_job) {
+                // Detonate the active bell: a re-cast replaces it, and the dedicated detonate
+                // action (28507, which the client sends when the bell button is pressed while a
+                // bell is active) only detonates. The heal resolves before the new bell state is
+                // written by the after-action hook.
+                if matches!(
+                    resolved_request.action_id,
+                    white_mage::ACTION_LITURGY_OF_THE_BELL
+                        | white_mage::ACTION_LITURGY_OF_THE_BELL_DETONATE
+                ) {
+                    let detonation = instance
+                        .find_actor_mut(from_actor_id)
+                        .and_then(white_mage::take_bell_detonation);
+                    if let Some((bell_center, total_potency, bell_actor_id)) = detonation {
+                        let (base, outgoing_multiplier) = instance
+                            .find_actor(from_actor_id)
+                            .map(|caster| {
+                                let base = match caster {
+                                    NetworkedActor::Player { parameters, .. } => {
+                                        parameters.calc_heal_amount(total_potency)
+                                    }
+                                    _ => 0,
+                                };
+                                (base, white_mage::outgoing_heal_multiplier(Some(caster)))
+                            })
+                            .unwrap_or((0, 1.0));
+                        let mut network_guard = network.lock();
+                        let healed = white_mage::fan_out_aoe_heal(
+                            &network_guard,
+                            instance,
+                            from_actor_id,
+                            0,
+                            bell_center,
+                            white_mage::BELL_RADIUS,
+                            base,
+                            outgoing_multiplier,
+                        );
+                        white_mage::send_bell_heal_effects(
+                            &mut network_guard,
+                            instance,
+                            bell_actor_id.unwrap_or(from_actor_id),
+                            &healed,
+                            white_mage::BELL_HEAL_SPELL_MANUAL,
+                        );
+                        for &(member_id, _) in &healed {
+                            white_mage::send_hp_mp(&mut network_guard, instance, member_id);
+                        }
+                        white_mage::despawn_bell_actor(
+                            &mut network_guard,
+                            instance,
+                            from_actor_id,
+                            bell_actor_id,
+                        );
+                    }
+                }
+
+                let gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id) {
+                    let action_update = white_mage::update_white_mage_state_after_action(
+                        resolved_request.action_id,
+                        actor,
+                        from_actor_id,
+                        sheet_mp_cost,
+                        ground_position,
+                    );
+                    let level = actor.get_common_spawn().level;
+                    let gauge_data = if let NetworkedActor::Player { combat_state, .. } = actor {
+                        Some(white_mage::build_white_mage_gauge_data(combat_state, level))
+                    } else {
+                        None
+                    };
+                    white_mage_action_update = action_update;
+                    gauge_data
+                } else {
+                    white_mage_action_update = white_mage::WhiteMageActionUpdate::default();
+                    None
+                };
+
+                // Spawn/replace the ground actors for the freshly-written state: the bell NPC
+                // (re-cast only — detonation already despawned the old one above) and the
+                // Asylum VFX object.
+                let mut network_guard = network.lock();
+                if resolved_request.action_id == white_mage::ACTION_LITURGY_OF_THE_BELL {
+                    let position = ground_position.unwrap_or_else(|| {
+                        instance
+                            .find_actor(from_actor_id)
+                            .map(|actor| actor.position())
+                            .unwrap_or_default()
+                    });
+                    if let Some(bell_actor_id) = white_mage::spawn_bell_actor(
+                        &mut network_guard,
+                        instance,
+                        from_actor_id,
+                        position,
+                    ) && let Some(NetworkedActor::Player { combat_state, .. }) =
+                        instance.find_actor_mut(from_actor_id)
+                    {
+                        combat_state.white_mage.bell_actor_id = Some(bell_actor_id);
+                    }
+                } else if resolved_request.action_id == white_mage::ACTION_ASYLUM {
+                    let position = ground_position.unwrap_or_else(|| {
+                        instance
+                            .find_actor(from_actor_id)
+                            .map(|actor| actor.position())
+                            .unwrap_or_default()
+                    });
+                    let old_object_id = match instance.find_actor_mut(from_actor_id) {
+                        Some(NetworkedActor::Player { combat_state, .. }) => {
+                            combat_state.white_mage.asylum_object_id.take()
+                        }
+                        _ => None,
+                    };
+                    let object_id = white_mage::spawn_asylum_object(
+                        &mut network_guard,
+                        instance,
+                        from_actor_id,
+                        position,
+                        old_object_id,
+                    );
+                    if let Some(NetworkedActor::Player { combat_state, .. }) =
+                        instance.find_actor_mut(from_actor_id)
+                    {
+                        combat_state.white_mage.asylum_object_id = Some(object_id);
+                    }
+                }
+                drop(network_guard);
+
+                gauge_data
+            } else {
+                white_mage_action_update = white_mage::WhiteMageActionUpdate::default();
+                None
+            };
+
+            // Thunder DoTs are mutually exclusive per caster and target ("自身对目标附加的雷系
+            // 魔法持续伤害效果同时只能存在一种"): a new thunder DoT drops all the others.
+            if black_mage::thunder_dot_status(resolved_request.action_id).is_some()
+                && let Some(target) = instance.find_actor_mut(resolved_request.target.object_id)
+                && let Some(status_effects) = target.status_effects_mut()
+            {
+                let new_dot = black_mage::thunder_dot_status(resolved_request.action_id).unwrap();
+                for dot in black_mage::THUNDER_DOT_STATUSES {
+                    if dot != new_dot {
+                        status_effects.remove(dot);
+                    }
+                }
+            }
+
+            // Ley Lines / Retrace: (re)place the ground circle at the requested position.
+            black_mage::register_ley_lines_after_action(
+                network.clone(),
+                instance,
+                from_actor_id,
+                resolved_request.action_id,
+                ground_position,
+            );
+
             if remove_cooldowns {
                 if let Some(actor) = instance.find_actor_mut(from_actor_id) {
                     let mut game_data = game_data.lock();
@@ -1742,7 +2286,11 @@ pub fn execute_action(
             }
 
             update_actor_hp_mp(network.clone(), instance, resolved_request.target.object_id);
-            if from_actor_id != resolved_request.target.object_id && action_mp_cost > 0 {
+            if from_actor_id != resolved_request.target.object_id
+                && (action_mp_cost > 0
+                    || black_mage_action_update.mp_changed
+                    || white_mage_action_update.mp_changed)
+            {
                 update_actor_hp_mp(network.clone(), instance, from_actor_id);
             }
             if let Some(actors) = job_for(class_job).and_then(Job::persistent_actors) {
@@ -1755,6 +2303,9 @@ pub fn execute_action(
             }
             if consume_swiftcast {
                 remove_status_from_actor_instance(instance, from_actor_id, STATUS_SWIFTCAST);
+            }
+            if consume_triplecast && let Some(actor) = instance.find_actor_mut(from_actor_id) {
+                black_mage::consume_triplecast_stack(actor, from_actor_id);
             }
             send_dirty_status_effects(network.clone(), instance, from_actor_id);
         }
@@ -1924,6 +2475,52 @@ pub fn execute_action(
                             rolled,
                         );
 
+                        // AoE DoTs (e.g. BLM Thunder II/IV) land on every secondary too — the
+                        // primary got its tick earlier during effect registration.
+                        for tick_action in &effects_builder.tick_actions {
+                            if tick_action.on_self {
+                                continue;
+                            }
+                            let kind = match tick_action.kind {
+                                TickKind::DamageMagic => TickEffectKind::DamageMagic,
+                                TickKind::DamagePhysical => TickEffectKind::DamagePhysical,
+                                TickKind::Heal => TickEffectKind::Heal,
+                                TickKind::RestoreMp => TickEffectKind::RestoreMp,
+                            };
+                            let damage_snapshot = match tick_action.kind {
+                                TickKind::DamageMagic => Some(TickDamageSnapshot {
+                                    base_amount: source_damage_modifiers.apply_base_damage(
+                                        lua_player
+                                            .base_parameters
+                                            .calc_magical_damage(tick_action.potency as u32),
+                                    ),
+                                    roll_modifiers: source_damage_modifiers.roll,
+                                }),
+                                TickKind::DamagePhysical => Some(TickDamageSnapshot {
+                                    base_amount: source_damage_modifiers.apply_base_damage(
+                                        lua_player
+                                            .base_parameters
+                                            .calc_physical_damage(tick_action.potency as u32),
+                                    ),
+                                    roll_modifiers: source_damage_modifiers.roll,
+                                }),
+                                TickKind::Heal | TickKind::RestoreMp => None,
+                            };
+                            if let Some(actor) = instance.find_actor_mut(target_id)
+                                && let Some(status_effects) = actor.status_effects_mut()
+                            {
+                                status_effects.add_tick(
+                                    tick_action.effect_id,
+                                    tick_action.param,
+                                    tick_action.duration,
+                                    kind,
+                                    tick_action.potency,
+                                    damage_snapshot,
+                                    from_actor_id,
+                                );
+                            }
+                        }
+
                         secondary_targets.push((
                             ObjectTypeId {
                                 object_id: target_id,
@@ -2039,6 +2636,26 @@ pub fn execute_action(
         if let Some((gauge_class_job_id, data)) = job_gauge_data {
             let mut network = network.lock();
             send_job_gauge_update(&mut network, from_actor_id, gauge_class_job_id, data);
+        }
+
+        if let Some(data) = black_mage_gauge_data {
+            let mut network = network.lock();
+            send_job_gauge_update(
+                &mut network,
+                from_actor_id,
+                black_mage::gauge_class_job_id(),
+                data,
+            );
+        }
+
+        if let Some(data) = white_mage_gauge_data {
+            let mut network = network.lock();
+            send_job_gauge_update(
+                &mut network,
+                from_actor_id,
+                white_mage::gauge_class_job_id(),
+                data,
+            );
         }
 
         if has_summoner_pet_transition
@@ -2377,6 +2994,7 @@ pub fn execute_enemy_action(
                 } else {
                     (0.0, 0.0)
                 };
+            let white_mage_multiplier = white_mage::white_mage_mitigation_multiplier(Some(&*actor));
 
             // Apply ±5% variance and the target's defense mitigation to each hit.
             for effect in &mut effects_builder.effects {
@@ -2401,9 +3019,12 @@ pub fn execute_enemy_action(
                         source_has_addle,
                         *damage_type,
                     );
-                    *amount =
-                        ((*amount as f64) * variance * outgoing_multiplier * (1.0 - mitigation))
-                            .floor() as u32;
+                    *amount = ((*amount as f64)
+                        * variance
+                        * outgoing_multiplier
+                        * (1.0 - mitigation)
+                        * white_mage_multiplier)
+                        .floor() as u32;
                 }
             }
 
@@ -2424,6 +3045,21 @@ pub fn execute_enemy_action(
                 );
             }
         }
+        // Liturgy of the Bell trigger: the WHM target took damage.
+        if white_mage::is_white_mage(
+            instance
+                .find_actor(request.target.object_id)
+                .map(|actor| actor.get_common_spawn().class_job)
+                .unwrap_or_default(),
+        ) {
+            let mut network_guard = network.lock();
+            white_mage::on_white_mage_took_damage(
+                &mut network_guard,
+                instance,
+                request.target.object_id,
+            );
+        }
+
         update_actor_hp_mp(network.clone(), instance, request.target.object_id);
 
         // Quoted by the `EffectResult` below so the status changes are tied to this action. See the

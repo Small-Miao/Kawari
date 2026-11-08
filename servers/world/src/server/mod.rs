@@ -26,7 +26,7 @@ use crate::{
         },
         effect::{handle_effect_messages, remove_effect, send_effects_list},
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{dispatch::job_for, summoner},
+        jobs::{black_mage, dispatch::job_for, summoner, white_mage},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -67,7 +67,7 @@ pub(crate) mod combat_state;
 mod director;
 mod effect;
 mod instance;
-mod jobs;
+pub(crate) mod jobs;
 mod limit_break;
 mod linkshell;
 mod network;
@@ -240,6 +240,47 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
     let mut refreshed = Vec::new();
 
     for actor_id in actor_ids {
+        let class_job = {
+            let Some(actor) = instance.find_actor(actor_id) else {
+                continue;
+            };
+            let Some(common) = actor.common_spawn() else {
+                continue;
+            };
+            common.class_job
+        };
+
+        if white_mage::is_white_mage(class_job) {
+            let result =
+                white_mage::refresh_white_mage_runtime_state_on_actor(network, instance, actor_id);
+            if result.changed {
+                let level = {
+                    let Some(actor) = instance.find_actor(actor_id) else {
+                        continue;
+                    };
+                    actor.common_spawn().map(|common| common.level).unwrap_or(0)
+                };
+                if let Some(NetworkedActor::Player { combat_state, .. }) =
+                    instance.find_actor(actor_id)
+                {
+                    let gauge_data = white_mage::build_white_mage_gauge_data(combat_state, level);
+                    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
+                        classjob_id: white_mage::gauge_class_job_id(),
+                        data: gauge_data,
+                    });
+                    network.send_to_by_actor_id(
+                        actor_id,
+                        FromServer::PacketSegment(ipc, actor_id),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
+            }
+            if result.status_changed {
+                refreshed.push(actor_id);
+            }
+            continue;
+        }
+
         let Some(actor) = instance.find_actor_mut(actor_id) else {
             continue;
         };
@@ -298,6 +339,35 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             }
 
             if result.status_timer_refreshed {
+                refreshed.push(actor_id);
+            }
+        } else if black_mage::is_black_mage(class_job) {
+            let result = black_mage::refresh_black_mage_runtime_state_on_actor(actor_id, actor);
+            let level = actor
+                .common_spawn()
+                .expect("black_mage runtime actor has common spawn")
+                .level;
+            if result.changed
+                && let NetworkedActor::Player { combat_state, .. } = actor
+            {
+                let gauge_data = black_mage::build_black_mage_gauge_data(combat_state, level);
+                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
+                    classjob_id: black_mage::gauge_class_job_id(),
+                    data: gauge_data,
+                });
+                network.send_to_by_actor_id(
+                    actor_id,
+                    FromServer::PacketSegment(ipc, actor_id),
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+
+            // The Ley Lines circle expired this tick: despawn its VFX object.
+            if let Some(object_id) = result.despawn_object_id {
+                network.remove_actor(instance, object_id);
+            }
+
+            if result.status_changed {
                 refreshed.push(actor_id);
             }
         }
@@ -393,10 +463,17 @@ impl WorldServer {
 
         let external = match director::external::Controller::for_content(&content_short_name) {
             Ok(controller) => controller,
-            Err(error) => { tracing::error!("C# 副本加载失败: {error}"); Some(director::external::Controller::disabled(error)) }
+            Err(error) => {
+                tracing::error!("C# 副本加载失败: {error}");
+                Some(director::external::Controller::disabled(error))
+            }
         };
         // C# 已登记的入口不读取 Lua 副本脚本，也不在宿主故障时回退旧实现。
-        let result = if external.is_some() { Ok(Vec::new()) } else { std::fs::read(&file_name) };
+        let result = if external.is_some() {
+            Ok(Vec::new())
+        } else {
+            std::fs::read(&file_name)
+        };
         if let Err(err) = result {
             tracing::warn!(
                 "Failed to load {}: {:?} instance content won't be scripted!",
@@ -858,7 +935,15 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
             };
             hp_delta += (max_hp as f32 * frac).ceil() as i64;
         }
-        if is_player && cur_mp < max_mp {
+        // Astral Fire halts natural MP recovery entirely ("魔力不会自然恢复").
+        let black_mage_no_mp_regen = match actor {
+            NetworkedActor::Player { combat_state, .. } => {
+                black_mage::is_black_mage(common.class_job)
+                    && combat_state.black_mage.in_astral_fire()
+            }
+            _ => false,
+        };
+        if is_player && cur_mp < max_mp && !black_mage_no_mp_regen {
             mp_delta += (max_mp as f32 * MP_REGEN).ceil() as i64;
         }
 
@@ -1738,7 +1823,11 @@ pub async fn server_main_loop(
 
                     for (instance_index, task) in &tasks_to_execute {
                         match &task.data {
-                            QueuedTaskData::CastAction { request, .. } => {
+                            QueuedTaskData::CastAction {
+                                request,
+                                ground_position,
+                                ..
+                            } => {
                                 execute_action(
                                     network.clone(),
                                     data.clone(),
@@ -1747,6 +1836,7 @@ pub async fn server_main_loop(
                                     task.from_id,
                                     task.from_actor_id,
                                     request.clone(),
+                                    *ground_position,
                                 );
                             }
                             QueuedTaskData::CastEnemyAction { request, .. } => {
@@ -2241,7 +2331,10 @@ pub async fn server_main_loop(
                     let mut data = data.lock();
 
                     if let Some(instance) = data.find_actor_instance_mut(actor_id) {
-                        if let Some(actor) = instance.find_actor(actor_id).filter(|a| a.is_time_stopped()) {
+                        if let Some(actor) = instance
+                            .find_actor(actor_id)
+                            .filter(|a| a.is_time_stopped())
+                        {
                             network.lock().send_to_by_actor_id(
                                 actor_id,
                                 FromServer::PacketSegment(
@@ -2251,8 +2344,10 @@ pub async fn server_main_loop(
                                             rotation: actor.get_common_spawn().rotation,
                                             ..Default::default()
                                         },
-                                    )), actor_id,
-                                ), DestinationNetwork::ZoneClients,
+                                    )),
+                                    actor_id,
+                                ),
+                                DestinationNetwork::ZoneClients,
                             );
                             continue;
                         }
@@ -3834,10 +3929,12 @@ pub async fn server_main_loop(
                     }
                 }
                 ToServer::TimelineCommand(actor, action, reply) => {
-                    let result = data.lock().find_actor_instance_mut(actor)
-                        .and_then(|instance|instance.director.as_mut())
-                        .map(|director|director.timeline_command(&action))
-                        .unwrap_or_else(||"当前不在脚本副本中。".into());
+                    let result = data
+                        .lock()
+                        .find_actor_instance_mut(actor)
+                        .and_then(|instance| instance.director.as_mut())
+                        .map(|director| director.timeline_command(&action))
+                        .unwrap_or_else(|| "当前不在脚本副本中。".into());
                     let _ = reply.send(result);
                 }
                 ToServer::GodMode(from_actor_id, enabled, reply) => {

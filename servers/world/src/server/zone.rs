@@ -21,6 +21,7 @@ use crate::{
         combat_state::{CarriedPet, PlayerCombatState},
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{Job, job_for},
+        jobs::{black_mage, white_mage},
         network::{DestinationNetwork, NetworkState},
     },
     zone_connection::BaseParameters,
@@ -1448,10 +1449,32 @@ pub fn handle_zone_messages(
                 );
             }
             let class_job = player_spawn.common.class_job;
-            let gauge_data = job_for(class_job).and_then(|job| {
-                job.build_gauge_data(&combat_state, player_spawn.common.level)
-                    .map(|data| (job.gauge_class_job_id(class_job), data))
-            });
+            let gauge_data = job_for(class_job)
+                .and_then(|job| {
+                    job.build_gauge_data(&combat_state, player_spawn.common.level)
+                        .map(|data| (job.gauge_class_job_id(class_job), data))
+                })
+                .or_else(|| {
+                    if black_mage::is_black_mage(class_job) {
+                        Some((
+                            black_mage::gauge_class_job_id(),
+                            black_mage::build_black_mage_gauge_data(
+                                &combat_state,
+                                player_spawn.common.level,
+                            ),
+                        ))
+                    } else if white_mage::is_white_mage(class_job) {
+                        Some((
+                            white_mage::gauge_class_job_id(),
+                            white_mage::build_white_mage_gauge_data(
+                                &combat_state,
+                                player_spawn.common.level,
+                            ),
+                        ))
+                    } else {
+                        None
+                    }
+                });
 
             *instance.find_actor_mut(*from_actor_id).unwrap() = NetworkedActor::Player {
                 spawn: player_spawn.clone(),

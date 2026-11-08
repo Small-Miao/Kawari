@@ -6,7 +6,10 @@ use parking_lot::Mutex;
 use crate::{
     GameData, PlayerData, RemakeMode, StatusEffects,
     inventory::{CrystalKind, CurrencyKind},
-    server::combat_state::{PlayerCombatState, SummonerAttunement, SummonerDemiPhase},
+    server::{
+        combat_state::{PlayerCombatState, SummonerAttunement, SummonerDemiPhase},
+        jobs::white_mage,
+    },
     zone_connection::BaseParameters,
 };
 use kawari::{
@@ -1020,6 +1023,33 @@ impl UserData for LuaPlayer {
         });
         methods.add_method("bard_radiant_encore_coda", |_, this, _: ()| {
             Ok(this.combat_state.bard.radiant_encore_coda)
+        });
+        methods.add_method("black_mage_element_stance", |_, this, _: ()| {
+            Ok(this.combat_state.black_mage.element_stance)
+        });
+        methods.add_method("black_mage_umbral_hearts", |_, this, _: ()| {
+            Ok(this.combat_state.black_mage.umbral_hearts)
+        });
+        methods.add_method("black_mage_polyglot_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.black_mage.polyglot_stacks)
+        });
+        methods.add_method("black_mage_paradox_active", |_, this, _: ()| {
+            Ok(this.combat_state.black_mage.paradox_active)
+        });
+        methods.add_method("black_mage_astral_soul_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.black_mage.astral_soul_stacks)
+        });
+        methods.add_method("white_mage_lily_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.white_mage.lily_stacks)
+        });
+        methods.add_method("white_mage_blood_lily_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.white_mage.blood_lily_stacks)
+        });
+        methods.add_method("white_mage_glare_iv_stacks", |_, this, _: ()| {
+            Ok(this.combat_state.white_mage.glare_iv_stacks)
+        });
+        methods.add_method("white_mage_divine_caress_ready", |_, this, _: ()| {
+            Ok(this.status_effects.get(white_mage::STATUS_DIVINE_CARESS_READY).is_some())
         });
         methods.add_method_mut("start_talk_event", |_, this, _: ()| {
             this.start_talk_event();

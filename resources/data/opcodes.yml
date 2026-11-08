@@ -868,6 +868,10 @@ ClientZoneIpcType:
   comment: Sent by the client when a character performs an action.
   opcode: 176
   size: 32
+- name: ActionRequestGroundTargeted
+  comment: Sent by the client when a character performs a ground-targeted action.
+  opcode: 490
+  size: 24
 - name: PingSync
   comment: Occasionally sent by the client, purpose is unknown.
   opcode: 137

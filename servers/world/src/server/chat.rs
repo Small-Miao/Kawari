@@ -381,6 +381,7 @@ fn process_debug_commands(
                         action_type: ActionType::Mount,
                         ..Default::default()
                     },
+                    None,
                 );
             }
 
