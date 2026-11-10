@@ -1273,6 +1273,10 @@ impl BaseParameters {
 
     /// Calculates amount of healing to apply based on potency.
     pub fn calc_heal_amount(&self, potency: u32) -> u32 {
+        self.calc_heal_amount_with_critical(potency, false)
+    }
+
+    pub(crate) fn calc_heal_amount_with_critical(&self, potency: u32, force_critical: bool) -> u32 {
         if potency == 0 {
             return 0;
         }
@@ -1292,7 +1296,7 @@ impl BaseParameters {
             heal = apply_factor(heal, self.damage_trait_factor(), 100);
         }
         // Roll a critical heal (heals can crit but never direct-hit) plus ±5% variance.
-        if fastrand::f64() < self.expected_crit_rate(level_modifier) {
+        if force_critical || fastrand::f64() < self.expected_crit_rate(level_modifier) {
             heal = apply_factor(heal, self.crit_damage_factor(level_modifier), 1000);
         }
         heal = apply_factor(heal, 95 + fastrand::u32(0..11), 100);
@@ -1427,11 +1431,19 @@ fn class_info_levels(synced_level: Option<u8>, true_level: u16) -> (u16, u16) {
 impl ZoneConnection {
     pub async fn update_class_info(&mut self) {
         let ipc;
+        let gauge_data;
         {
             let game_data = self.gamedata.lock();
 
             let true_level = self.current_level(&game_data);
             let (current_level, class_level) = class_info_levels(self.synced_level, true_level);
+            gauge_data = if self.player_data.classjob.current_class as u8
+                == crate::server::jobs::astrologian::CLASSJOB_ASTROLOGIAN
+            {
+                crate::server::jobs::astrologian::initial_gauge(current_level as u8)
+            } else {
+                0
+            };
 
             ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateClassInfo(UpdateClassInfo {
                 class_id: self.player_data.classjob.current_class as u8,
@@ -1453,7 +1465,7 @@ impl ZoneConnection {
         // Send this too, otherwise actions dependent on the gauge won't function
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
             classjob_id: self.player_data.classjob.current_class as u8,
-            data: 0,
+            data: gauge_data,
         });
         self.send_ipc_self(ipc).await;
     }

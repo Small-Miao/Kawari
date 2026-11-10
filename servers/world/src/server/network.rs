@@ -128,6 +128,11 @@ impl NetworkState {
     /// Spawn an object that has already been inserted into the instance, using each client's
     /// client-side object pool to choose the actual spawn index.
     pub fn spawn_inserted_object_in_range(&mut self, instance: &Instance, object_id: ObjectId) {
+        self.spawn_inserted_actor_in_range(instance, object_id);
+    }
+
+    /// 为可见玩家分配生成槽位，并发送首次生成消息。
+    pub fn spawn_inserted_actor_in_range(&mut self, instance: &Instance, object_id: ObjectId) {
         let Some(object) = instance.find_actor(object_id) else {
             return;
         };
@@ -142,20 +147,17 @@ impl NetworkState {
                 continue;
             };
 
-            if !viewer.in_range_of(object) || state.has_spawned(object_id) {
+            if handle.actor_id == object_id
+                || !viewer.in_range_of(object)
+                || state.has_spawned(object_id)
+            {
                 continue;
             }
 
-            if let Some(spawn_index) = state.object_allocator.reserve(object_id) {
-                let NetworkedActor::Object { object, .. } = object else {
-                    continue;
-                };
-                let mut object = *object;
-                object.spawn_index = spawn_index;
-
-                if handle.send(FromServer::SpawnObject(object)).is_err() {
-                    self.to_remove.push(id);
-                }
+            if let Some(message) = Self::spawn_existing_actor_message(state, object_id, object)
+                && handle.send(message).is_err()
+            {
+                self.to_remove.push(id);
             }
         }
     }

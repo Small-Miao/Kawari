@@ -73,7 +73,7 @@ mod tests {
             let packet = ServerZoneIpcSegment::new(ServerZoneIpcData::RsvData(data.clone()));
             let mut bytes = Cursor::new(Vec::new());
             packet.write_le(&mut bytes).unwrap();
-            assert_eq!(packet.get_opcode(), 274);
+            assert_eq!(packet.get_opcode(), 594);
             assert_eq!(bytes.get_ref().len(), 16 + 52 + value.len());
             assert_eq!(packet.calc_size() as usize, bytes.get_ref().len());
             assert_eq!(
@@ -94,7 +94,7 @@ mod tests {
         let packet = ServerZoneIpcSegment::new(ServerZoneIpcData::RsfData(data.clone()));
         let mut bytes = Cursor::new(Vec::new());
         packet.write_le(&mut bytes).unwrap();
-        assert_eq!(packet.get_opcode(), 921);
+        assert_eq!(packet.get_opcode(), 903);
         assert_eq!(packet.calc_size(), 88);
         assert_eq!(bytes.get_ref().len(), 88);
         bytes.set_position(16);

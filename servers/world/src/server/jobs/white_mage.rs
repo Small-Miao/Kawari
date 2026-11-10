@@ -564,11 +564,12 @@ pub(crate) fn incoming_heal_multiplier(target: Option<&NetworkedActor>) -> f64 {
     let Some(status_effects) = target.and_then(NetworkedActor::status_effects) else {
         return 1.0;
     };
-    if status_effects.get(STATUS_ASYLUM_INSIDE).is_some() {
+    let asylum = if status_effects.get(STATUS_ASYLUM_INSIDE).is_some() {
         1.1
     } else {
         1.0
-    }
+    };
+    asylum * target.map_or(1.0, super::astrologian::incoming_heal_multiplier)
 }
 
 /// Damage mitigation multiplier from a player target's WHM statuses (Aquaveil 15%,

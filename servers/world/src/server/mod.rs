@@ -24,9 +24,12 @@ use crate::{
             DirectorData, PendingAoe, director_tick, encounter_tick, handle_director_messages,
             resolve_aoe,
         },
-        effect::{handle_effect_messages, remove_effect, send_effects_list},
+        effect::{
+            clear_job_effects, expire_effects, handle_effect_messages, remove_effect,
+            run_effect_on_lose, send_effects_list,
+        },
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{black_mage, dispatch::job_for, summoner, white_mage},
+        jobs::{astrologian, black_mage, dispatch::job_for, paladin, summoner, white_mage},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -233,6 +236,54 @@ fn commence_duty_for_all(instance: &mut Instance, network: &mut NetworkState) ->
     );
 
     true
+}
+
+fn deactivate_job(
+    network: &Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    owner: ObjectId,
+    old_class: u8,
+) {
+    clear_job_effects(network, instance, owner);
+    let mut network = network.lock();
+    let Some(actor) = instance.find_actor_mut(owner) else {
+        return;
+    };
+    let ground_object = if black_mage::is_black_mage(old_class) {
+        black_mage::deactivate(actor)
+    } else if old_class == astrologian::CLASSJOB_ASTROLOGIAN {
+        astrologian::deactivate(actor)
+    } else {
+        if paladin::is_paladin(old_class) {
+            paladin::deactivate(actor);
+        } else if let NetworkedActor::Player { combat_state, .. } = actor {
+            if white_mage::is_white_mage(old_class) {
+                let state = std::mem::take(&mut combat_state.white_mage);
+                if let Some(object_id) = state.asylum_object_id {
+                    network.remove_actor(instance, object_id);
+                }
+                if state.bell_actor_id.is_some() {
+                    white_mage::despawn_bell_actor(
+                        &mut network,
+                        instance,
+                        owner,
+                        state.bell_actor_id,
+                    );
+                }
+            } else if let Some(job) = job_for(old_class) {
+                if job.gauge_class_job_id(old_class) == jobs::bard::gauge_class_job_id() {
+                    combat_state.bard = Default::default();
+                }
+                if let Some(actors) = job.persistent_actors() {
+                    actors.on_job_deactivated(&mut network, instance, owner);
+                }
+            }
+        }
+        None
+    };
+    if let Some(object_id) = ground_object {
+        network.remove_actor(instance, object_id);
+    }
 }
 
 fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState) -> Vec<ObjectId> {
@@ -792,6 +843,7 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
     // number above the target every tick using the owning Status EXD row id.
     let mut tick_popups: Vec<(u32, ObjectId, ObjectId, u32, bool)> = Vec::new();
 
+    let now = Instant::now();
     // Collect the ids up-front so we can borrow the instance immutably per-actor below.
     let actor_ids: Vec<ObjectId> = instance.actors.keys().copied().collect();
 
@@ -815,7 +867,7 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
         // Gather this actor's DoT/HoT ticks (cloned so we drop the borrow before looking up sources).
         let ticks: Vec<crate::TickEffect> = actor
             .status_effects()
-            .map(|s| s.tick_effects().to_vec())
+            .map(|s| s.tick_effects(now).collect())
             .unwrap_or_default();
 
         let (in_combat, is_player) = match actor {
@@ -877,10 +929,13 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
                             as i64
                     })
                     .unwrap_or((tick.potency / 2) as i64),
-                TickEffectKind::Heal => source_params
-                    .as_ref()
-                    .map(|p| p.calc_heal_amount(tick.potency as u32) as i64)
-                    .unwrap_or((tick.potency / 2) as i64),
+                TickEffectKind::Heal => {
+                    ((source_params
+                        .as_ref()
+                        .map(|p| p.calc_heal_amount(tick.potency as u32) as i64)
+                        .unwrap_or((tick.potency / 2) as i64) as f64)
+                        * astrologian::incoming_heal_multiplier(actor)) as i64
+                }
                 TickEffectKind::RestoreMp => tick.potency as i64,
             };
 
@@ -1071,6 +1126,7 @@ fn server_logic_tick(
     let mut actors_to_update_hp_mp = Vec::new();
     let mut actors_to_fake_zone_jump = Vec::new();
     let mut actors_to_refresh_effects = Vec::new();
+    let mut expired_effects = Vec::new();
     let mut pending_aoes: Vec<PendingAoe> = Vec::new();
 
     {
@@ -1694,15 +1750,22 @@ fn server_logic_tick(
             // Process any director tasks for this instance.
             pending_aoes.extend(director_tick(network.clone(), gamedata.clone(), instance));
 
-            // Every ~3 seconds: resolve DoT/HoT ticks and natural HP/MP regen, matching retail's
-            // 3s server tick (which also drives passive regen).
+            {
+                let mut network = network.lock();
+                actors_to_refresh_effects.extend(refresh_runtime_job_state(instance, &mut network));
+                astrologian::refresh_delayed_actions(&mut network, instance);
+            }
+
+            expired_effects.extend(expire_effects(&network, instance, Instant::now()));
+
+            // 状态到期后再结算自然恢复和持续伤害、治疗。
             if regen_tick {
                 process_regen_tick(network.clone(), instance);
             }
 
             {
                 let mut network = network.lock();
-                actors_to_refresh_effects.extend(refresh_runtime_job_state(instance, &mut network));
+                paladin::refresh_auto_attacks(&mut network, instance);
             }
         }
         // Ensure the rested EXP counter only happens approx. every 10 seconds (300ms tick * 33).
@@ -1721,6 +1784,13 @@ fn server_logic_tick(
         data.regen_tick_counter += 1;
         if data.regen_tick_counter == 10 {
             data.regen_tick_counter = 0;
+        }
+    }
+
+    for (actor_id, effect_id) in expired_effects {
+        let from_id = network.lock().find_by_actor(actor_id);
+        if let Some(from_id) = from_id {
+            run_effect_on_lose(&network, &lua, from_id, effect_id);
         }
     }
 
@@ -1850,34 +1920,6 @@ pub async fn server_main_loop(
                                         request.clone(),
                                     );
                                 }
-                            }
-                            QueuedTaskData::LoseStatusEffect {
-                                effect_id,
-                                effect_param,
-                                effect_source_actor_id,
-                            } => {
-                                if *effect_id == 3532 {
-                                    let mut world = data.lock();
-                                    if let Some(instance) =
-                                        world.find_actor_instance_mut(task.from_actor_id)
-                                    {
-                                        limit_break::expire_magic_number(
-                                            network.clone(),
-                                            instance,
-                                            task.from_actor_id,
-                                        );
-                                    }
-                                }
-                                remove_effect(
-                                    network.clone(),
-                                    data.clone(),
-                                    lua.clone(),
-                                    task.from_id,
-                                    task.from_actor_id,
-                                    *effect_id,
-                                    *effect_param,
-                                    *effect_source_actor_id,
-                                );
                             }
                             QueuedTaskData::DeadFadeOut { actor_id } => {
                                 let mut data = data.lock();
@@ -2424,16 +2466,6 @@ pub async fn server_main_loop(
                         );
                     }
                 }
-                ToServer::JobDeactivated(_from_id, owner, old_class) => {
-                    let mut data = data.lock();
-                    if let Some(instance) = data.find_actor_instance_mut(owner)
-                        && let Some(actors) =
-                            job_for(old_class).and_then(|job| job.persistent_actors())
-                    {
-                        let mut network = network.lock();
-                        actors.on_job_deactivated(&mut network, instance, owner);
-                    }
-                }
                 ToServer::ClientTrigger(from_id, from_actor_id, trigger) => {
                     match &trigger.trigger {
                         ClientTriggerCommand::TeleportQuery { aetheryte_id, .. } => {
@@ -2511,6 +2543,24 @@ pub async fn server_main_loop(
                                 tracing::debug!("Client executed unknown pet action {}", action_id);
                             }
                         }
+                        ClientTriggerCommand::ToggleAutoAttack {
+                            on,
+                            target,
+                            is_manual_toggle,
+                        } => {
+                            let mut world = data.lock();
+                            if let Some(instance) = world.find_actor_instance_mut(from_actor_id)
+                                && let Some(actor) = instance.find_actor_mut(from_actor_id)
+                                && paladin::is_paladin(actor.get_common_spawn().class_job)
+                            {
+                                paladin::toggle_auto_attack(actor, *on, *target, *is_manual_toggle);
+                                network.lock().send_ac_in_range_inclusive_instance(
+                                    instance,
+                                    from_actor_id,
+                                    ActorControlCategory::SetAutoAttack { auto_attack: *on },
+                                );
+                            }
+                        }
                         ClientTriggerCommand::SetTarget {
                             actor_id,
                             actor_type,
@@ -2544,6 +2594,9 @@ pub async fn server_main_loop(
                                 && let Some(actor) = instance.find_actor_mut(from_actor_id)
                             {
                                 actor.get_common_spawn_mut().target_id = target;
+                                if paladin::is_paladin(actor.get_common_spawn().class_job) {
+                                    paladin::retarget_auto_attack(actor, *actor_id);
+                                }
                             }
                             let mut network = network.lock();
                             network.send_in_range(
@@ -2687,30 +2740,6 @@ pub async fn server_main_loop(
                             source_actor_id,
                             effect_param,
                         } => {
-                            // If there is a scheduled task to remove it, cancel it!
-                            // This is harmless to keep, but it's better not to clog the queue.
-                            {
-                                let mut data = data.lock();
-                                if let Some(instance) = data.find_actor_instance_mut(from_actor_id)
-                                {
-                                    for task in instance.find_tasks(from_actor_id) {
-                                        let target_effect_id = *effect_id as u16;
-                                        let target_actor_id = *source_actor_id;
-                                        // NOTE: I intentionally don't match on effect_param, I don't think that's truly reflective from CT?
-                                        if let QueuedTaskData::LoseStatusEffect {
-                                            effect_id,
-                                            effect_source_actor_id,
-                                            ..
-                                        } = task.data
-                                            && effect_id == target_effect_id
-                                            && effect_source_actor_id == target_actor_id
-                                        {
-                                            instance.retain_tasks(|queued| queued != &task);
-                                        }
-                                    }
-                                }
-                            }
-
                             remove_effect(
                                 network.clone(),
                                 data.clone(),
@@ -4014,6 +4043,7 @@ pub async fn server_main_loop(
                             continue;
                         };
 
+                        let old_class = actor.get_common_spawn().class_job;
                         actor.get_common_spawn_mut().level = level;
                         actor.get_common_spawn_mut().max_health_points = new_parameters.hp;
                         actor.get_common_spawn_mut().max_resource_points =
@@ -4022,6 +4052,10 @@ pub async fn server_main_loop(
 
                         if let NetworkedActor::Player { parameters, .. } = actor {
                             *parameters = new_parameters.clone();
+                        }
+
+                        if old_class != 0 && old_class != class_job {
+                            deactivate_job(&network, instance, from_actor_id, old_class);
                         }
 
                         // The only way the game can reliably set these stats is via StatusEffectList (REALLY)

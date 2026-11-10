@@ -1021,6 +1021,7 @@ pub fn take_combat_state_and_despawn_pets(
     // the destination (no re-summon / birth animation — see `reinstate_carried_pet`). Position is
     // not carried; it is recomputed beside the owner's new position at the destination.
     if let Some(state) = carried_combat_state.as_mut() {
+        let earthly_star = state.astrologian.take_star_for_zone_change();
         // Don't carry a demi/primal actor across a zone. Retail-confirmed (demi换区.log): a demi
         // (e.g. Solar Bahamut) is dismissed on zone-out and the destination spawns a FRESH Carbuncle
         // with the summoner gauge reset — the demi never persists. Leaving `carried_pet` None here
@@ -1037,6 +1038,7 @@ pub fn take_combat_state_and_despawn_pets(
                     ..
                 } = actor
                     && spawn.common.owner_id == actor_id
+                    && Some(*id) != earthly_star
                     // Skip a Dead owned pet: after a summon/demi cast a fading Dead carbuncle can
                     // coexist with the live pet, and HashMap order could otherwise pick it.
                     && *npc_state != NpcState::Dead

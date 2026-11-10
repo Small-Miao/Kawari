@@ -142,4 +142,27 @@ mod tests {
         assert_eq!(action_request.target.object_id, ObjectId(0xdbc892e7));
         assert_eq!(buffer.position(), 32);
     }
+
+    #[test]
+    fn read_cn_ley_lines_ground_request() {
+        use crate::ipc::zone::{ClientZoneIpcData, ClientZoneIpcSegment};
+
+        let mut wire = [0_u8; 40];
+        wire[..4].copy_from_slice(&[0x14, 0x00, 0x6f, 0x02]);
+        wire[16..28].copy_from_slice(&[0xf5, 0x0d, 0, 0, 0, 1, 3, 0, 0xff, 0xf8, 0xff, 0xf8]);
+        for (bytes, coordinate) in wire[28..]
+            .chunks_exact_mut(4)
+            .zip([-68.4_f32, -194.0, -41.44])
+        {
+            bytes.copy_from_slice(&coordinate.to_le_bytes());
+        }
+        let packet = ClientZoneIpcSegment::read_le_args(&mut Cursor::new(wire), (&24,)).unwrap();
+        let ClientZoneIpcData::ActionRequestGroundTargeted(request) = packet.data else {
+            panic!("国服地面技能请求应使用 opcode 623 解码");
+        };
+        assert_eq!(request.action_id, 3573);
+        assert_eq!(request.action_type, ActionType::Action);
+        assert_eq!(request.sequence, 3);
+        assert_eq!(request.position.0.to_array(), [-68.4, -194.0, -41.44]);
+    }
 }

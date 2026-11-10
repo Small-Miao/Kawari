@@ -152,9 +152,21 @@ impl StatusEffects {
         self.dirty = true;
     }
 
-    /// All periodic tick effects currently active (DoT/HoT).
-    pub fn tick_effects(&self) -> &[TickEffect] {
-        &self.tick_effects
+    /// Periodic effects whose owning status is still active at this tick.
+    pub fn tick_effects(&self, now: Instant) -> impl Iterator<Item = TickEffect> + '_ {
+        self.tick_effects.iter().copied().filter(move |tick| {
+            self.position_of(tick.effect_id).is_some()
+                && !self.expirations.iter().any(|expiration| {
+                    expiration.effect_id == tick.effect_id && expiration.expires_at <= now
+                })
+        })
+    }
+
+    pub fn expired_ids(&self, now: Instant) -> impl Iterator<Item = u16> + '_ {
+        self.expirations
+            .iter()
+            .filter(move |expiration| expiration.expires_at <= now)
+            .map(|expiration| expiration.effect_id)
     }
 
     /// Total remaining barrier amount.

@@ -2102,6 +2102,8 @@ mod tests {
     fn actor_timelines_match_recorded_parallel_arrays() {
         use binrw::{BinRead, BinWrite};
         use std::io::Cursor;
+        use crate::packet::PredefinedOpcode;
+        assert_eq!(ServerZoneIpcType::PlayActorTimelines.get_opcode(), 987);
         let mut wire = vec![0u8; 64];
         for i in 0..10 {
             let actor = if i < 3 { 0x40000001u32 + i as u32 } else { 0xE0000000 };

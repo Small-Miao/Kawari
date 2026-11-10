@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use kawari::{common::ObjectId, ipc::zone::SpawnNpc};
 
+use super::jobs::astrologian::{AstrologianState, DelayedHeal};
+use super::jobs::paladin::PaladinState;
 use super::jobs::{bard::BardState, black_mage::BlackMageState, white_mage::WhiteMageState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -224,6 +226,9 @@ pub struct PlayerCombatState {
     pub summoner: SummonerState,
     pub bard: BardState,
     pub black_mage: BlackMageState,
+    pub astrologian: AstrologianState,
+    pub paladin: PaladinState,
+    pub(in crate::server) astrologian_heals: Vec<DelayedHeal>,
     pub white_mage: WhiteMageState,
     /// Whether the player currently has aggro (something hates them). Tracked so the server only
     /// sends a battle-state toggle (weapon drawn + combat music) when it actually changes.

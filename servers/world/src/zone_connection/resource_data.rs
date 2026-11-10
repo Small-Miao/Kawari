@@ -106,11 +106,11 @@ mod tests {
             let packets = load(&root(), 1094).unwrap();
             assert_eq!(packets.len(), 606);
             assert_eq!(
-                packets.iter().filter(|p| p.get_opcode() == 274).count(),
+                packets.iter().filter(|p| p.get_opcode() == 594).count(),
                 386
             );
             assert_eq!(
-                packets.iter().filter(|p| p.get_opcode() == 921).count(),
+                packets.iter().filter(|p| p.get_opcode() == 903).count(),
                 220
             );
             assert!(

@@ -1,6 +1,6 @@
 mod effects_builder;
 pub use effects_builder::{
-    EffectsBuilder, EnmityAction, GaugeAction, StatusGrant, TickAction, TickKind,
+    BarrierAction, EffectsBuilder, EnmityAction, GaugeAction, StatusGrant, TickAction, TickKind,
 };
 
 mod inventory;

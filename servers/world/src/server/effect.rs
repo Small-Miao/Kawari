@@ -1,6 +1,6 @@
 //! Executing status effect related functions.
 
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Instant};
 
 use mlua::Function;
 use parking_lot::Mutex;
@@ -11,7 +11,7 @@ use crate::{
     server::{
         WorldServer,
         combat_state::PlayerCombatState,
-        instance::{Instance, QueuedTaskData},
+        instance::Instance,
         network::{DestinationNetwork, NetworkState},
     },
     zone_connection::BaseParameters,
@@ -33,7 +33,7 @@ pub fn handle_effect_messages(
 ) -> bool {
     match msg {
         ToServer::GainEffect(
-            from_id,
+            _from_id,
             from_actor_id,
             effect_id,
             effect_param,
@@ -43,7 +43,6 @@ pub fn handle_effect_messages(
             gain_effect(
                 network.clone(),
                 data.clone(),
-                *from_id,
                 *from_actor_id,
                 *effect_id,
                 *effect_param,
@@ -162,7 +161,6 @@ fn process_effects_list(
 pub fn gain_effect(
     network: Arc<Mutex<NetworkState>>,
     data: Arc<Mutex<WorldServer>>,
-    from_id: ClientId,
     from_actor_id: ObjectId,
     effect_id: u16,
     effect_param: u16,
@@ -177,7 +175,6 @@ pub fn gain_effect(
 
     gain_effect_instance(
         network,
-        from_id,
         instance,
         from_actor_id,
         effect_id,
@@ -191,7 +188,6 @@ pub fn gain_effect(
 /// Gives the actor a new effect. You can also optionally send an ACS, if needed.
 pub fn gain_effect_instance(
     network: Arc<Mutex<NetworkState>>,
-    from_id: ClientId,
     instance: &mut Instance,
     from_actor_id: ObjectId,
     effect_id: u16,
@@ -272,34 +268,6 @@ pub fn gain_effect_instance(
         process_effects_list(network.clone(), instance, from_actor_id);
     }
 
-    // Cancel any existing expiry task for this same status on this actor before scheduling the new
-    // one. Re-applying a status (a refresh) re-adds it with the full duration, but the OLD expiry
-    // task still points at the original end time — if left in place it fires early and removes the
-    // just-refreshed status, so the client shows the refresh but the buff vanishes prematurely.
-    instance.retain_tasks(|task| {
-        !(task.from_actor_id == from_actor_id
-            && matches!(
-                task.data,
-                QueuedTaskData::LoseStatusEffect { effect_id: e, .. } if e == effect_id
-            ))
-    });
-
-    // 永久刷新也必须先取消旧的定时移除任务。
-    if effect_duration == 0.0 {
-        return index;
-    }
-
-    instance.insert_task(
-        from_id,
-        from_actor_id,
-        Duration::from_secs_f32(effect_duration),
-        QueuedTaskData::LoseStatusEffect {
-            effect_id,
-            effect_param,
-            effect_source_actor_id,
-        },
-    );
-
     index
 }
 
@@ -310,10 +278,20 @@ pub fn remove_effect_instance(
     actor_id: ObjectId,
     effect_id: u16,
 ) -> Option<StatusEffect> {
+    let effect = remove_effect_and_notify(&network, instance, actor_id, effect_id)?;
+    process_effects_list(network, instance, actor_id);
+    Some(effect)
+}
+
+fn remove_effect_and_notify(
+    network: &Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    actor_id: ObjectId,
+    effect_id: u16,
+) -> Option<StatusEffect> {
     let statuses = instance.find_actor_mut(actor_id)?.status_effects_mut()?;
     let effect = statuses.get(effect_id)?;
     statuses.remove(effect_id);
-    instance.retain_tasks(|task| !(task.from_actor_id == actor_id && matches!(task.data, QueuedTaskData::LoseStatusEffect { effect_id: id, .. } if id == effect_id)));
     if let Some(director) = &mut instance.director {
         director
             .runtime
@@ -339,8 +317,71 @@ pub fn remove_effect_instance(
             source_actor_id: effect.source_actor_id,
         },
     );
-    process_effects_list(network, instance, actor_id);
     Some(effect)
+}
+
+/// 范围技能和副本脚本使用同一状态截止时间。职业专属到期动作先结算，再清理剩余状态。
+pub(super) fn expire_effects(
+    network: &Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    now: Instant,
+) -> Vec<(ObjectId, u16)> {
+    let mut expired_by_actor = Vec::new();
+    for (actor_id, actor) in &instance.actors {
+        if let Some(statuses) = actor.status_effects() {
+            let ids: Vec<_> = statuses.expired_ids(now).collect();
+            if !ids.is_empty() {
+                expired_by_actor.push((*actor_id, ids));
+            }
+        }
+    }
+    let mut expired = Vec::new();
+    for (actor_id, ids) in expired_by_actor {
+        for effect_id in ids {
+            if effect_id == 3532 {
+                super::limit_break::expire_magic_number(network.clone(), instance, actor_id);
+            }
+            if remove_effect_and_notify(network, instance, actor_id, effect_id).is_some() {
+                expired.push((actor_id, effect_id));
+            }
+        }
+        process_effects_list(network.clone(), instance, actor_id);
+    }
+    expired
+}
+
+pub(super) fn clear_job_effects(
+    network: &Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    owner: ObjectId,
+) {
+    let actor_ids: Vec<_> = instance.actors.keys().copied().collect();
+    for actor_id in actor_ids {
+        let Some(statuses) = instance
+            .find_actor(actor_id)
+            .and_then(|actor| actor.status_effects())
+        else {
+            continue;
+        };
+        let mut removed = false;
+        for effect in statuses.data() {
+            if effect.effect_id != 0
+                && (actor_id == owner || effect.source_actor_id == owner)
+                && !instance.director.as_ref().is_some_and(|director| {
+                    director
+                        .runtime
+                        .owned_effects
+                        .contains_key(&(actor_id, effect.effect_id))
+                })
+            {
+                removed |= remove_effect_and_notify(network, instance, actor_id, effect.effect_id)
+                    .is_some();
+            }
+        }
+        if removed {
+            process_effects_list(network.clone(), instance, actor_id);
+        }
+    }
 }
 
 /// Removes an effect from the actor.
@@ -364,6 +405,15 @@ pub fn remove_effect(
         }
     }
 
+    run_effect_on_lose(&network, &lua, from_id, effect_id);
+}
+
+pub(super) fn run_effect_on_lose(
+    network: &Arc<Mutex<NetworkState>>,
+    lua: &Arc<Mutex<KawariLua>>,
+    from_id: ClientId,
+    effect_id: u16,
+) {
     // Also run the effect's Lua script in case it wants to do something!
     {
         let lua = lua.lock();
@@ -406,13 +456,94 @@ pub fn remove_effect(
                     tracing::warn!("Failed to read effect script {effect_script}: {err:?}");
                 }
             }
-        } else {
-            tracing::warn!("Effect {effect_id} isn't scripted yet! Ignoring...");
         }
 
         // Inform the client of any new Lua tasks
-        let mut network = network.lock();
-        let msg = FromServer::NewTasks(lua_player.queued_tasks);
-        network.send_to(from_id, msg, DestinationNetwork::ZoneClients);
+        if !lua_player.queued_tasks.is_empty() {
+            let mut network = network.lock();
+            let msg = FromServer::NewTasks(lua_player.queued_tasks);
+            network.send_to(from_id, msg, DestinationNetwork::ZoneClients);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TickEffectKind;
+    use std::time::Duration;
+
+    #[test]
+    fn timed_effects_expire_once_and_sync_all_removed_slots() {
+        let source = ObjectId(1);
+        let target = ObjectId(2);
+        let mut instance = Instance::default();
+        instance.insert_empty_actor(target);
+        let statuses = instance
+            .find_actor_mut(target)
+            .unwrap()
+            .status_effects_mut()
+            .unwrap();
+        statuses.add_tick(
+            248,
+            0,
+            15.0,
+            TickEffectKind::DamagePhysical,
+            30,
+            None,
+            source,
+        );
+        statuses.add_barrier(1175, 0, 15.0, 100, target, 1000);
+        statuses.add_with_source(79, 0, 0.0, target);
+        let deadline = Instant::now() + Duration::from_secs(16);
+        assert_eq!(statuses.tick_effects(Instant::now()).count(), 1);
+        assert_eq!(statuses.tick_effects(deadline).count(), 0);
+
+        let network = Arc::new(Mutex::new(NetworkState::default()));
+        let client = ClientId::default();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        network.lock().clients.insert(
+            client,
+            (
+                crate::ClientHandle {
+                    id: client,
+                    channel: sender,
+                    actor_id: target,
+                    account_id: 0,
+                    content_id: 0,
+                },
+                Default::default(),
+            ),
+        );
+
+        assert_eq!(
+            expire_effects(&network, &mut instance, deadline),
+            vec![(target, 248), (target, 1175)]
+        );
+        for expected in [248, 1175] {
+            assert!(
+                matches!(receiver.try_recv().unwrap(), FromServer::ActorControlSelf(
+                ActorControlCategory::LoseEffect { effect_id, .. }) if effect_id == expected)
+            );
+        }
+        let FromServer::PacketSegment(packet, actor) = receiver.try_recv().unwrap() else {
+            panic!("缺少状态列表包");
+        };
+        let ServerZoneIpcData::StatusEffectList(list) = packet.data else {
+            panic!("缺少状态列表同步");
+        };
+        assert_eq!(actor, target);
+        assert_eq!(list.statuses[0].effect_id, 0);
+        assert_eq!(list.statuses[1].effect_id, 0);
+        assert_eq!(list.statuses[2].effect_id, 79);
+        let statuses = instance
+            .find_actor(target)
+            .unwrap()
+            .status_effects()
+            .unwrap();
+        assert_eq!(statuses.barrier_amount(), 0);
+        assert_eq!(statuses.tick_effects(Instant::now()).count(), 0);
+        assert!(expire_effects(&network, &mut instance, deadline).is_empty());
+        assert!(receiver.try_recv().is_err());
     }
 }

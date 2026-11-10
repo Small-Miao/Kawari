@@ -7,7 +7,7 @@ use super::{
     instance::Instance,
     network::{DestinationNetwork, NetworkState},
 };
-use crate::{ClientId, FromServer};
+use crate::FromServer;
 use kawari::{
     common::{CharacterMode, ObjectId, ObjectTypeId, ObjectTypeKind},
     ipc::zone::{
@@ -99,7 +99,7 @@ pub fn allowed(instance: &Instance, source: ObjectId, action: u32) -> bool {
     })
 }
 
-/// 只在到期任务执行时检查；治疗 LB 已移除状态便不会再触发。
+/// 只在状态自然到期时检查，治疗 LB 提前移除状态后便不会触发。
 pub fn expire_magic_number(
     network: Arc<Mutex<NetworkState>>,
     instance: &mut Instance,
@@ -228,17 +228,7 @@ pub fn execute(
         };
         match kind {
             Kind::Tank(status) => {
-                gain_effect_instance(
-                    network.clone(),
-                    ClientId::default(),
-                    instance,
-                    *id,
-                    status,
-                    0,
-                    8.0,
-                    source,
-                    true,
-                );
+                gain_effect_instance(network.clone(), instance, *id, status, 0, 8.0, source, true);
                 instance
                     .director
                     .as_mut()
@@ -354,7 +344,6 @@ pub fn execute(
         remove_effect_instance(network.clone(), instance, source, 3446);
         gain_effect_instance(
             network.clone(),
-            ClientId::default(),
             instance,
             source,
             3448,

@@ -3191,7 +3191,7 @@ impl JobActors for Summoner {
     ) {
         kill_live_summoner_pets_for_transition(network, instance, owner);
         if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(owner) {
-            combat_state.summoner.carbuncle_summoned = false;
+            combat_state.summoner = Default::default();
         }
     }
 }

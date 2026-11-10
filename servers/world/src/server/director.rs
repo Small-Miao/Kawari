@@ -2796,7 +2796,6 @@ pub fn director_tick(
             } => {
                 gain_effect_instance(
                     network.clone(),
-                    ClientId::default(),
                     instance,
                     *actor_id,
                     *id,
@@ -4029,7 +4028,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
             && instance.find_actor(target_id).is_some_and(|a|
                 a.get_common_spawn().health_points == 0 && !a.is_god_mode())
         {
-            gain_effect_instance(network.clone(), ClientId::default(), instance,
+            gain_effect_instance(network.clone(), instance,
                 target_id, aoe.rules.death_status, 0, 0.0, aoe.source_id, true);
             instance.director.as_mut().unwrap().runtime.owned_effects
                 .insert((target_id, aoe.rules.death_status), aoe.source_id);
@@ -4043,7 +4042,6 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
         {
             gain_effect_instance(
                 network.clone(),
-                ClientId::default(),
                 instance,
                 target_id,
                 aoe.rules.first_status,
@@ -4068,7 +4066,6 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
         {
             gain_effect_instance(
                 network.clone(),
-                ClientId::default(),
                 instance,
                 target_id,
                 aoe.rules.status,
@@ -4102,7 +4099,6 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
                 };
                 gain_effect_instance(
                     network.clone(),
-                    ClientId::default(),
                     instance,
                     target_id,
                     rule.id,

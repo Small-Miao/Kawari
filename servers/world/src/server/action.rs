@@ -1,5 +1,7 @@
 //! Executing actions and other related functions.
 
+pub(in crate::server) mod area;
+
 use std::{sync::Arc, time::Duration};
 
 use glam::Vec3;
@@ -20,11 +22,12 @@ use crate::{
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
         jobs::{
-            black_mage,
+            astrologian, black_mage,
             dispatch::{Job, JobActionUpdate, job_for, send_job_gauge_update},
-            summoner, white_mage,
+            paladin, summoner, white_mage,
         },
         network::{DestinationNetwork, NetworkState},
+        party::get_party_id_from_actor_id,
         set_character_mode, set_shared_group_timeline_state,
     },
     zone_connection::{BaseParameters, DamageRollModifiers},
@@ -98,6 +101,22 @@ fn is_spell_action(game_data: &mut GameData, action_id: u32) -> bool {
     game_data.get_action_category(action_id) == 2
 }
 
+fn job_adjusted_sheet_mp_cost(
+    game_data: &mut GameData,
+    class_job: u8,
+    level: u8,
+    action_id: u32,
+) -> u32 {
+    let cost = game_data.get_action_mp_cost(action_id);
+    if cost != 0
+        && paladin::has_divine_magic_mastery(class_job, level)
+        && is_spell_action(game_data, action_id)
+    {
+        return cost / 2;
+    }
+    cost
+}
+
 fn actor_has_status(actor: &NetworkedActor, status_id: u16) -> bool {
     actor
         .status_effects()
@@ -113,6 +132,10 @@ pub(crate) struct ActionDamageModifiers {
     /// BLM elemental stance multiplier in percent (100 = no change, 0 = not a BLM cast).
     /// Set per-action because it depends on the action's element, not just the caster.
     black_mage_damage_percent: u32,
+    astrologian_card_bonus: u8,
+    divination: bool,
+    fight_or_flight: bool,
+    reprisal: bool,
 }
 
 impl ActionDamageModifiers {
@@ -131,6 +154,18 @@ impl ActionDamageModifiers {
         if self.black_mage_damage_percent > 0 {
             amount = apply_damage_percent(amount, self.black_mage_damage_percent);
         }
+        if self.astrologian_card_bonus > 0 {
+            amount = apply_damage_percent(amount, 100 + u32::from(self.astrologian_card_bonus));
+        }
+        if self.divination {
+            amount = apply_damage_percent(amount, 106);
+        }
+        if self.fight_or_flight {
+            amount = apply_damage_percent(amount, 125);
+        }
+        if self.reprisal {
+            amount = apply_damage_percent(amount, 90);
+        }
         amount
     }
 }
@@ -144,9 +179,14 @@ pub(crate) fn action_damage_modifiers(actor: Option<&NetworkedActor>) -> ActionD
         return ActionDamageModifiers::default();
     };
 
+    let (astrologian_card_bonus, divination) = astrologian::damage_bonus(actor);
     let mut modifiers = ActionDamageModifiers {
         raging_strikes: actor_has_status(actor, STATUS_RAGING_STRIKES),
         mages_ballad: actor_has_status(actor, STATUS_MAGES_BALLAD),
+        astrologian_card_bonus,
+        divination,
+        fight_or_flight: paladin::damage_bonus(actor),
+        reprisal: paladin::outgoing_multiplier(actor) < 1.0,
         ..Default::default()
     };
 
@@ -213,6 +253,8 @@ pub(crate) fn apply_target_player_mitigation(
         return ((amount as f64)
             * (1.0 - mitigation)
             * white_mage_multiplier
+            * target.map_or(1.0, astrologian::mitigation_multiplier)
+            * target.map_or(1.0, paladin::mitigation_multiplier)
             * if lb { 0.2 } else { 1.0 })
         .floor() as u32;
     }
@@ -266,13 +308,6 @@ fn remove_status_from_actor_instance(
     }
 
     status_effects.remove(status_id);
-    instance.retain_tasks(|task| {
-        !(task.from_actor_id == actor_id
-            && matches!(
-                task.data,
-                QueuedTaskData::LoseStatusEffect { effect_id, .. } if effect_id == status_id
-            ))
-    });
     true
 }
 
@@ -304,8 +339,30 @@ fn build_aoe_effect_packet(
     header: ActionEffectHeader,
     targets: &[(ObjectTypeId, TargetEffect)],
     center: kawari::common::Position,
+    caster_mp_gain: Option<TargetEffect>,
 ) -> Option<ServerZoneIpcData> {
-    if targets.is_empty() {
+    let mut rows: Vec<_> = targets
+        .iter()
+        .map(|&(target, effect)| {
+            let mut row = [TargetEffect::default(); 8];
+            row[0] = effect;
+            (target, row)
+        })
+        .collect();
+    if let Some(effect) = caster_mp_gain
+        && let Some((_, row)) = rows.first_mut()
+    {
+        row[1] = effect;
+    }
+    build_action_rows_packet(header, &rows, center)
+}
+
+fn build_action_rows_packet(
+    header: ActionEffectHeader,
+    targets: &[(ObjectTypeId, [TargetEffect; 8])],
+    center: kawari::common::Position,
+) -> Option<ServerZoneIpcData> {
+    if targets.is_empty() || targets.len() > MAX_AOE_TARGETS {
         return None;
     }
 
@@ -314,8 +371,8 @@ fn build_aoe_effect_packet(
         ($variant:ident, $struct:ident, $n:expr) => {{
             let mut effects = [[TargetEffect::default(); 8]; $n];
             let mut target_ids = [ObjectTypeId::default(); $n];
-            for (i, (target, effect)) in targets.iter().enumerate() {
-                effects[i][0] = *effect;
+            for (i, (target, row)) in targets.iter().enumerate() {
+                effects[i] = *row;
                 target_ids[i] = *target;
             }
             ServerZoneIpcData::$variant(Box::new($struct {
@@ -333,6 +390,63 @@ fn build_aoe_effect_packet(
         17..=24 => build_variant!(ActionEffect24, ActionEffect24, 24),
         _ => build_variant!(ActionEffect32, ActionEffect32, 32),
     })
+}
+
+pub(in crate::server) fn send_area_action_result(
+    network: &mut NetworkState,
+    instance: &Instance,
+    caster: ObjectId,
+    action_id: u32,
+    request: ActionRequest,
+    mut result: area::AreaResult,
+) -> u32 {
+    if result.targets.is_empty() {
+        result.targets.push((
+            ObjectTypeId {
+                object_id: caster,
+                ..Default::default()
+            },
+            [TargetEffect::default(); 8],
+        ));
+    }
+    let sequence = network.global_action_sequence;
+    let header = ActionEffectHeader {
+        animation_target_id: request.target,
+        action_id,
+        global_sequence: sequence,
+        animation_lock: ANIMATION_LOCK_TIME,
+        source_sequence: request.sequence,
+        rotation: request.rotation1,
+        spell_id: action_id as u16,
+        action_type: ActionType::Action,
+        target_count: result.targets.len() as u8,
+        ..Default::default()
+    };
+    let Some(data) = build_action_rows_packet(header, &result.targets, result.center) else {
+        return 0;
+    };
+    network.global_action_sequence += 1;
+    network.send_in_range_inclusive_instance(
+        caster,
+        instance,
+        FromServer::PacketSegment(ServerZoneIpcSegment::new(data), caster),
+        DestinationNetwork::ZoneClients,
+    );
+    for (target, effects) in result.targets {
+        white_mage::send_hp_mp(network, instance, target.object_id);
+        if effects.iter().any(|effect| {
+            matches!(
+                effect.0,
+                TargetEffectKind::GainEffect { .. } | TargetEffectKind::GainEffectSelf { .. }
+            )
+        }) || matches!(
+            instance.find_actor(target.object_id),
+            Some(NetworkedActor::Player { .. })
+        ) {
+            super::effect::send_effects_list_with(network, instance, target.object_id);
+        }
+    }
+    sequence
 }
 
 /// Bit 7 of an effect's flags byte: the status lands on the action's source, not its target.
@@ -853,7 +967,6 @@ fn resolve_player_action_id(
                 sheet_cost,
                 aspect,
                 u32::from(common.resource_points),
-                u32::from(common.max_resource_points),
                 actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
             )
         } else if white_mage::is_white_mage(class_job) {
@@ -865,7 +978,7 @@ fn resolve_player_action_id(
                 actor_has_status(actor, white_mage::STATUS_THIN_AIR),
             )
         } else {
-            game_data.get_action_mp_cost(resolved_action_id)
+            job_adjusted_sheet_mp_cost(game_data, class_job, level, resolved_action_id)
         };
         let current_mp = actor.get_common_spawn().resource_points;
         if mp_cost > u32::from(current_mp)
@@ -884,6 +997,37 @@ fn resolve_player_action_id(
     }
 
     Some(resolved_action_id)
+}
+
+fn valid_job_target(
+    class_job: u8,
+    action: u32,
+    instance: &Instance,
+    network: &NetworkState,
+    caster: ObjectId,
+    requested_target: ObjectId,
+) -> bool {
+    let is_astrologian = class_job == astrologian::CLASSJOB_ASTROLOGIAN;
+    if !(is_astrologian && astrologian::party_target_only(action)
+        || paladin::is_paladin(class_job) && paladin::party_target_only(action))
+    {
+        return true;
+    }
+    let target = if requested_target.is_valid() {
+        requested_target
+    } else {
+        caster
+    };
+    if target == caster {
+        return is_astrologian && action != 3612;
+    }
+    if !matches!(instance.find_actor(target), Some(NetworkedActor::Player { spawn, .. })
+        if spawn.common.health_points > 0)
+    {
+        return false;
+    }
+    let party = get_party_id_from_actor_id(network, caster);
+    party.is_some() && party == get_party_id_from_actor_id(network, target)
 }
 
 fn reject_time_stopped_action(
@@ -985,7 +1129,19 @@ pub fn handle_action_messages(
                 };
 
                 let mut game_data = game_data.lock();
-                resolve_player_action_id(actor, *from_actor_id, &request, &mut game_data, true)
+                let resolved =
+                    resolve_player_action_id(actor, *from_actor_id, &request, &mut game_data, true);
+                drop(game_data);
+                resolved.filter(|&action| {
+                    valid_job_target(
+                        actor.get_common_spawn().class_job,
+                        action,
+                        instance,
+                        &network.lock(),
+                        *from_actor_id,
+                        request.target.object_id,
+                    )
+                })
             };
 
             let Some(resolved_action_id) = resolved_action_id else {
@@ -1063,16 +1219,14 @@ pub fn handle_action_messages(
                         } else if is_spell
                             && black_mage::is_black_mage(actor.get_common_spawn().class_job)
                         {
-                            // BLM cast rules: Firestarter/Triplecast/Lv100 Despair are instant,
-                            // opposite-element casts are halved under max stance, and standing in
-                            // Ley Lines shaves another 15% off both cast and recast.
-                            if black_mage::requires_no_cast_time(
-                                &combat_state.black_mage,
+                            // Opposite-element casts are halved under max stance. Ley Lines
+                            // shaves another 15% off both cast and recast.
+                            if black_mage::is_instant_without_cast_buff(
                                 resolved_request.action_id,
-                                base_centisec,
                                 actor.get_common_spawn().level,
                                 actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
-                            ) {
+                            ) || combat_state.black_mage.has_triplecast()
+                            {
                                 Some(0)
                             } else {
                                 let mut centisec = parameters.apply_speed(base_centisec);
@@ -1087,6 +1241,13 @@ pub fn handle_action_messages(
                                     actor_has_status(actor, black_mage::STATUS_CIRCLE_OF_POWER),
                                 ))
                             }
+                        } else if is_spell
+                            && paladin::is_paladin(actor.get_common_spawn().class_job)
+                            && paladin::instant_cast(actor, resolved_request.action_id)
+                        {
+                            Some(0)
+                        } else if is_spell && astrologian::has_lightspeed(actor) {
+                            Some(parameters.apply_speed(base_centisec).saturating_sub(250))
                         } else {
                             // Presence of Mind (神速咏唱) shaves 20% off WHM spell casts.
                             Some(white_mage::apply_pom_haste(
@@ -1277,7 +1438,7 @@ pub fn execute_action(
         return;
     }
 
-    let resolved_request = request.clone();
+    let mut resolved_request = request.clone();
     if request.action_type == ActionType::Action
         && super::limit_break::specification(request.action_id).is_some()
     {
@@ -1340,6 +1501,13 @@ pub fn execute_action(
             actor.get_common_spawn().class_job,
         )
     };
+    if class_job == astrologian::CLASSJOB_ASTROLOGIAN
+        && resolved_request.action_type == ActionType::Action
+        && astrologian::party_target_only(resolved_request.action_id)
+        && !resolved_request.target.object_id.is_valid()
+    {
+        resolved_request.target.object_id = from_actor_id;
+    }
 
     let effects_builder = {
         let data = data.lock();
@@ -1350,10 +1518,47 @@ pub fn execute_action(
             return;
         };
 
+        if resolved_request.action_type == ActionType::Action
+            && (class_job == astrologian::CLASSJOB_ASTROLOGIAN || paladin::is_paladin(class_job))
+            && let NetworkedActor::Player { combat_state, .. } = actor
+            && let Some(job) = job_for(class_job)
+            && (!job.can_execute(resolved_request.action_id, combat_state, common_spawn.level)
+                || !valid_job_target(
+                    class_job,
+                    resolved_request.action_id,
+                    instance,
+                    &network.lock(),
+                    from_actor_id,
+                    resolved_request.target.object_id,
+                ))
+        {
+            return;
+        }
+
         match resolved_request.action_type {
             ActionType::None => None,
             ActionType::Action => {
-                execute_normal_action(lua.clone(), &resolved_request, &mut lua_player, in_combo)
+                let native = if class_job == astrologian::CLASSJOB_ASTROLOGIAN {
+                    let target = instance.find_actor(resolved_request.target.object_id);
+                    let role = target
+                        .and_then(NetworkedActor::common_spawn)
+                        .and_then(|target| {
+                            game_data
+                                .lock()
+                                .classjob_sheet
+                                .row(u32::from(target.class_job))
+                                .map(|row| row.Role)
+                        })
+                        .unwrap_or_default();
+                    astrologian::action_effects(resolved_request.action_id, actor, target, role)
+                } else if paladin::is_paladin(class_job) {
+                    paladin::action_effects(resolved_request.action_id, actor, in_combo)
+                } else {
+                    None
+                };
+                native.or_else(|| {
+                    execute_normal_action(lua.clone(), &resolved_request, &mut lua_player, in_combo)
+                })
             }
             ActionType::Item => execute_item_action(
                 game_data.clone(),
@@ -1404,13 +1609,20 @@ pub fn execute_action(
         let bard_action_update;
         let lost_statuses: Vec<u16>;
         let black_mage_gauge_data;
+        let black_mage_mp_gain;
+        let black_mage_ground_object;
         let black_mage_action_update;
         let white_mage_gauge_data;
         let white_mage_action_update;
         let (sheet_mp_cost, action_aspect) = if resolved_request.action_type == ActionType::Action {
             let mut game_data = game_data.lock();
             (
-                game_data.get_action_mp_cost(resolved_request.action_id),
+                job_adjusted_sheet_mp_cost(
+                    &mut game_data,
+                    class_job,
+                    common_spawn.level,
+                    resolved_request.action_id,
+                ),
                 game_data.get_action_aspect(resolved_request.action_id),
             )
         } else {
@@ -1456,7 +1668,6 @@ pub fn execute_action(
                     sheet_mp_cost,
                     action_aspect,
                     u32::from(common.resource_points),
-                    u32::from(common.max_resource_points),
                     actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
                 )
             } else {
@@ -1501,7 +1712,10 @@ pub fn execute_action(
                     .collect();
             }
 
-            let combo_sequence = if let Some(actor) = instance.find_actor_mut(from_actor_id) {
+            let combo_sequence = if !(paladin::is_paladin(class_job)
+                && paladin::preserves_combo(resolved_request.action_id))
+                && let Some(actor) = instance.find_actor_mut(from_actor_id)
+            {
                 if let NetworkedActor::Player {
                     last_combo_action,
                     combo_sequence,
@@ -1581,7 +1795,7 @@ pub fn execute_action(
                     0.0
                 }
             };
-            consume_swiftcast = {
+            let cast_buff_eligible = {
                 let mut game_data = game_data.lock();
                 resolved_request.action_type == ActionType::Action
                     && is_spell_action(&mut game_data, resolved_request.action_id)
@@ -1589,27 +1803,41 @@ pub fn execute_action(
                         .get_casttime(resolved_request.action_id)
                         .unwrap_or_default()
                         > 0
-                    && instance
-                        .find_actor(from_actor_id)
-                        .is_some_and(|actor| actor_has_status(actor, STATUS_SWIFTCAST))
-            };
-            // BLM Triplecast: a spell with a real cast time eats one stack (unless Swiftcast
-            // already made this cast instant — retail consumes Swiftcast first).
-            consume_triplecast = !consume_swiftcast
-                && black_mage::is_black_mage(class_job)
-                && resolved_request.action_type == ActionType::Action
-                && {
-                    let mut game_data = game_data.lock();
-                    is_spell_action(&mut game_data, resolved_request.action_id)
+                    && !(class_job == astrologian::CLASSJOB_ASTROLOGIAN
                         && game_data
                             .get_casttime(resolved_request.action_id)
                             .unwrap_or_default()
-                            > 0
-                }
+                            <= 25
+                        && instance
+                            .find_actor(from_actor_id)
+                            .is_some_and(astrologian::has_lightspeed))
+                    && !(paladin::is_paladin(class_job)
+                        && instance.find_actor(from_actor_id).is_some_and(|actor| {
+                            paladin::instant_cast(actor, resolved_request.action_id)
+                        }))
+                    && !(black_mage::is_black_mage(class_job)
+                        && instance.find_actor(from_actor_id).is_some_and(|actor| {
+                            black_mage::is_instant_without_cast_buff(
+                                resolved_request.action_id,
+                                actor.get_common_spawn().level,
+                                actor_has_status(actor, black_mage::STATUS_FIRESTARTER),
+                            )
+                        }))
+            };
+            consume_swiftcast = cast_buff_eligible
+                && instance
+                    .find_actor(from_actor_id)
+                    .is_some_and(|actor| actor_has_status(actor, STATUS_SWIFTCAST));
+            consume_triplecast = cast_buff_eligible
+                && !consume_swiftcast
+                && black_mage::is_black_mage(class_job)
                 && instance.find_actor(from_actor_id).is_some_and(|actor| {
-                    matches!(actor, NetworkedActor::Player { combat_state, .. } if combat_state.black_mage.triplecast_stacks > 0)
+                    matches!(actor, NetworkedActor::Player { combat_state, .. } if combat_state.black_mage.has_triplecast())
                 });
             source_damage_modifiers = action_damage_modifiers(instance.find_actor(from_actor_id));
+            let enmity_multiplier = instance
+                .find_actor(from_actor_id)
+                .map_or(1, paladin::enmity_multiplier);
             // BLM elemental stance multiplier (AF boosts fire / weakens ice, UI weakens fire;
             // also rolls Scathe's 20% double damage).
             if black_mage::is_black_mage(class_job)
@@ -1652,7 +1880,7 @@ pub fn execute_action(
                             && let Some(hate_list) = actor.npc_hate_list_mut()
                         {
                             let entry = hate_list.entry(from_actor_id).or_insert(0);
-                            *entry = entry.saturating_add(*amount as u32);
+                            *entry = entry.saturating_add(amount.saturating_mul(enmity_multiplier));
                         }
 
                         let Some(actor) =
@@ -1661,6 +1889,13 @@ pub fn execute_action(
                             return;
                         };
                         actor.apply_damage(*amount);
+                        if *amount > 0
+                            && paladin::is_paladin(class_job)
+                            && matches!(actor, NetworkedActor::Npc { .. })
+                            && let Some(caster) = instance.find_actor_mut(from_actor_id)
+                        {
+                            paladin::engage_auto_attack(caster, resolved_request.target.object_id);
+                        }
                         super::director::notify_attack_hit(
                             instance,
                             from_actor_id,
@@ -1672,8 +1907,14 @@ pub fn execute_action(
                         *damage_element =
                             game_data.get_action_damage_element(resolved_request.action_id);
                     }
-                    TargetEffectKind::Heal { amount, .. } => {
-                        let heal_target = resolved_request.target.object_id;
+                    TargetEffectKind::Heal { amount, unk1 } => {
+                        let heal_target = if unk1[4] & EFFECT_FLAG_AT_SOURCE != 0
+                            || !resolved_request.target.object_id.is_valid()
+                        {
+                            from_actor_id
+                        } else {
+                            resolved_request.target.object_id
+                        };
 
                         // Capture the unmultiplied base for WHM AoE heals so secondary targets can
                         // have their own incoming-heal multipliers applied.
@@ -1734,6 +1975,22 @@ pub fn execute_action(
                                     *entry = entry.saturating_add(each);
                                 }
                             }
+                        }
+                    }
+                    TargetEffectKind::MpGain { params, amount } => {
+                        let recipient = if params[4] & EFFECT_FLAG_AT_SOURCE != 0
+                            || !resolved_request.target.object_id.is_valid()
+                        {
+                            from_actor_id
+                        } else {
+                            resolved_request.target.object_id
+                        };
+                        if let Some(actor) = instance.find_actor_mut(recipient) {
+                            let common = actor.get_common_spawn_mut();
+                            common.resource_points = common
+                                .resource_points
+                                .saturating_add(*amount)
+                                .min(common.max_resource_points);
                         }
                     }
                     TargetEffectKind::InterruptAction {} => {
@@ -2019,13 +2276,21 @@ pub fn execute_action(
                 }
             }
 
-            job_gauge_data = if let Some(job) = job_for(class_job)
+            job_gauge_data = if resolved_request.action_type == ActionType::Action
+                && let Some(job) = job_for(class_job)
                 && let Some(actor) = instance.find_actor_mut(from_actor_id)
             {
+                if paladin::is_paladin(class_job) && in_combo {
+                    paladin::apply_combo_proc(actor, resolved_request.action_id);
+                }
                 bard_action_update =
                     job.update_state_after_action(resolved_request.action_id, actor, from_actor_id);
                 let level = actor.get_common_spawn().level;
-                if let NetworkedActor::Player { combat_state, .. } = actor {
+                if ((class_job != astrologian::CLASSJOB_ASTROLOGIAN
+                    && !paladin::is_paladin(class_job))
+                    || bard_action_update.changed)
+                    && let NetworkedActor::Player { combat_state, .. } = actor
+                {
                     job.build_gauge_data(combat_state, level)
                         .map(|data| (job.gauge_class_job_id(class_job), data))
                 } else {
@@ -2093,18 +2358,26 @@ pub fn execute_action(
                 }
             }
 
-            black_mage_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
+            black_mage_gauge_data = if resolved_request.action_type == ActionType::Action
                 && black_mage::is_black_mage(class_job)
+                && let Some(actor) = instance.find_actor_mut(from_actor_id)
             {
+                let landed_damage = effects_builder
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect.0, TargetEffectKind::Damage { .. }));
                 let action_update = black_mage::update_black_mage_state_after_action(
                     resolved_request.action_id,
                     actor,
                     from_actor_id,
-                    sheet_mp_cost,
+                    action_mp_cost,
                     action_aspect,
+                    landed_damage,
                 );
                 let level = actor.get_common_spawn().level;
-                let gauge_data = if let NetworkedActor::Player { combat_state, .. } = actor {
+                let gauge_data = if action_update.changed
+                    && let NetworkedActor::Player { combat_state, .. } = actor
+                {
                     Some(black_mage::build_black_mage_gauge_data(combat_state, level))
                 } else {
                     None
@@ -2115,6 +2388,18 @@ pub fn execute_action(
                 black_mage_action_update = black_mage::BlackMageActionUpdate::default();
                 None
             };
+            black_mage_mp_gain = (black_mage_action_update.mp_restored > 0).then(|| {
+                let mut params = [0; 5];
+                if resolved_request.target.object_id != from_actor_id
+                    || resolved_request.action_id != black_mage::ACTION_MANAFONT
+                {
+                    params[4] = EFFECT_FLAG_AT_SOURCE;
+                }
+                TargetEffect(TargetEffectKind::MpGain {
+                    params,
+                    amount: black_mage_action_update.mp_restored,
+                })
+            });
 
             white_mage_gauge_data = if white_mage::is_white_mage(class_job) {
                 // Detonate the active bell: a re-cast replaces it, and the dedicated detonate
@@ -2262,14 +2547,19 @@ pub fn execute_action(
                 }
             }
 
-            // Ley Lines / Retrace: (re)place the ground circle at the requested position.
-            black_mage::register_ley_lines_after_action(
-                network.clone(),
-                instance,
-                from_actor_id,
-                resolved_request.action_id,
-                ground_position,
-            );
+            black_mage_ground_object = if black_mage::is_black_mage(class_job)
+                && resolved_request.action_type == ActionType::Action
+            {
+                black_mage::register_ley_lines_after_action(
+                    network.clone(),
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                    ground_position,
+                )
+            } else {
+                None
+            };
 
             if remove_cooldowns {
                 if let Some(actor) = instance.find_actor_mut(from_actor_id) {
@@ -2288,7 +2578,15 @@ pub fn execute_action(
             update_actor_hp_mp(network.clone(), instance, resolved_request.target.object_id);
             if from_actor_id != resolved_request.target.object_id
                 && (action_mp_cost > 0
-                    || black_mage_action_update.mp_changed
+                    || black_mage_action_update.mp_restored > 0
+                    || effects_builder
+                        .effects
+                        .iter()
+                        .any(|effect| matches!(effect.0, TargetEffectKind::MpGain { .. }))
+                    || effects_builder.effects.iter().any(|effect| {
+                        matches!(effect.0,
+                        TargetEffectKind::Heal { unk1, .. } if unk1[4] & EFFECT_FLAG_AT_SOURCE != 0)
+                    })
                     || white_mage_action_update.mp_changed)
             {
                 update_actor_hp_mp(network.clone(), instance, from_actor_id);
@@ -2370,6 +2668,7 @@ pub fn execute_action(
         let mut notified: Vec<(ObjectId, u16)> = Vec::new();
 
         {
+            effects_builder.effects.extend(black_mage_mp_gain);
             let effects = target_action_result_effects(&effects_builder.effects);
 
             let action_animation_id = {
@@ -2460,7 +2759,13 @@ pub fn execute_action(
                             && let Some(hate_list) = actor.npc_hate_list_mut()
                         {
                             let entry = hate_list.entry(from_actor_id).or_insert(0);
-                            *entry = entry.saturating_add(rolled as u32);
+                            *entry = entry.saturating_add(rolled.saturating_mul(
+                                if lua_player.status_effects.get(paladin::IRON_WILL).is_some() {
+                                    10
+                                } else {
+                                    1
+                                },
+                            ));
                         }
 
                         if let Some(actor) = instance.find_actor_mut(target_id) {
@@ -2540,7 +2845,59 @@ pub fn execute_action(
                 }
             }
 
-            if secondary_targets.is_empty() {
+            let ley_lines_result = if black_mage::is_black_mage(class_job)
+                && resolved_request.action_type == ActionType::Action
+            {
+                instance.find_actor(from_actor_id).and_then(|actor| {
+                    black_mage::ley_lines_action_result(actor, resolved_request.action_id)
+                })
+            } else {
+                None
+            };
+
+            let job_area = if resolved_request.action_type != ActionType::Action {
+                None
+            } else if class_job == astrologian::CLASSJOB_ASTROLOGIAN {
+                let direct_heal = effects
+                    .iter()
+                    .find_map(|effect| match effect.0 {
+                        TargetEffectKind::Heal { amount, .. } => Some(amount),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                astrologian::apply_support_action(
+                    &mut network.lock(),
+                    instance,
+                    from_actor_id,
+                    resolved_request.target.object_id,
+                    resolved_request.action_id,
+                    ground_position,
+                    direct_heal,
+                )
+            } else if paladin::is_paladin(class_job) {
+                paladin::apply_area_action(
+                    &mut network.lock(),
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                    in_combo,
+                    &lua_player.status_effects,
+                    &effects,
+                )
+            } else {
+                None
+            };
+
+            if let Some(result) = job_area {
+                action_global_sequence = send_area_action_result(
+                    &mut network.lock(),
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                    resolved_request.clone(),
+                    result,
+                );
+            } else if secondary_targets.is_empty() && ley_lines_result.is_none() {
                 // Single target (or an AoE that hit nothing else): a plain ActionEffect1, carrying
                 // the primary's full effect set (damage, combo, gained buffs, ...).
                 // Record which (recipient, status) pairs this array notifies so status_grants that
@@ -2580,28 +2937,37 @@ pub fn execute_action(
                     DestinationNetwork::ZoneClients,
                 );
             } else {
-                // Multiple targets: one ActionEffectN packet, primary at slot 0 then each secondary.
-                let center = instance
-                    .find_actor(resolved_request.target.object_id)
-                    .map(|actor| actor.position().0)
-                    .unwrap_or_default();
-
                 let mut all_targets: Vec<(ObjectTypeId, TargetEffect)> =
                     Vec::with_capacity(secondary_targets.len() + 1);
-                let primary_effect = effects_builder
-                    .effects
-                    .iter()
-                    .copied()
-                    .find(|e| matches!(e.0, TargetEffectKind::Damage { .. }))
-                    .unwrap_or_default();
-                all_targets.push((resolved_request.target, primary_effect));
+                let (center, animation_target_id, animation_lock) =
+                    if let Some((position, effect, lock)) = ley_lines_result {
+                        let caster = ObjectTypeId {
+                            object_id: from_actor_id,
+                            ..Default::default()
+                        };
+                        all_targets.push((caster, TargetEffect(wire_effect_kind(effect))));
+                        (position, ObjectTypeId::default(), lock)
+                    } else {
+                        let center = instance
+                            .find_actor(resolved_request.target.object_id)
+                            .map(NetworkedActor::position)
+                            .unwrap_or_default();
+                        let primary_effect = effects_builder
+                            .effects
+                            .iter()
+                            .copied()
+                            .find(|e| matches!(e.0, TargetEffectKind::Damage { .. }))
+                            .unwrap_or_default();
+                        all_targets.push((resolved_request.target, primary_effect));
+                        (center, resolved_request.target, ANIMATION_LOCK_TIME)
+                    };
                 all_targets.extend(secondary_targets.iter().copied());
 
                 let mut net = network.lock();
                 let header = ActionEffectHeader {
-                    animation_target_id: resolved_request.target,
+                    animation_target_id,
                     action_id: resolved_request.action_id,
-                    animation_lock: ANIMATION_LOCK_TIME,
+                    animation_lock,
                     rotation: common_spawn.rotation,
                     spell_id: action_animation_id,
                     source_sequence: resolved_request.sequence,
@@ -2611,7 +2977,7 @@ pub fn execute_action(
                     ..Default::default()
                 };
                 if let Some(ipc_data) =
-                    build_aoe_effect_packet(header, &all_targets, kawari::common::Position(center))
+                    build_aoe_effect_packet(header, &all_targets, center, black_mage_mp_gain)
                 {
                     action_global_sequence = net.global_action_sequence;
                     net.global_action_sequence += 1;
@@ -2630,6 +2996,21 @@ pub fn execute_action(
                 for (target, _) in &secondary_targets {
                     update_actor_hp_mp(network.clone(), instance, target.object_id);
                 }
+            }
+            if let Some(object_id) = black_mage_ground_object {
+                network
+                    .lock()
+                    .spawn_inserted_object_in_range(instance, object_id);
+            }
+            if class_job == astrologian::CLASSJOB_ASTROLOGIAN
+                && resolved_request.action_type == ActionType::Action
+            {
+                astrologian::finish_earthly_star_action(
+                    &mut network.lock(),
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                );
             }
         }
 
@@ -2706,7 +3087,6 @@ pub fn execute_action(
                     let index = gain_effect(
                         network.clone(),
                         data.clone(),
-                        ClientId::default(),
                         resolved_request.target.object_id,
                         effect_id,
                         param,
@@ -2736,7 +3116,6 @@ pub fn execute_action(
                     let index = gain_effect(
                         network.clone(),
                         data.clone(),
-                        from_id,
                         from_actor_id,
                         effect_id,
                         param,
@@ -2858,7 +3237,6 @@ pub fn execute_action(
                 gain_effect(
                     network.clone(),
                     data.clone(),
-                    ClientId::default(),
                     grant.recipient,
                     grant.effect_id,
                     grant.param,
@@ -2955,6 +3333,7 @@ pub fn execute_enemy_action(
     let common_spawn;
     let source_has_feint;
     let source_has_addle;
+    let reprisal_multiplier;
     {
         let Some(actor) = instance.find_actor(from_actor_id) else {
             return;
@@ -2969,6 +3348,7 @@ pub fn execute_enemy_action(
         source_has_addle = source_status_effects
             .and_then(|status_effects| status_effects.get(STATUS_ADDLE))
             .is_some();
+        reprisal_multiplier = paladin::outgoing_multiplier(actor);
 
         effects_builder = match &request.action_type {
             ActionType::Action => {
@@ -2994,7 +3374,9 @@ pub fn execute_enemy_action(
                 } else {
                     (0.0, 0.0)
                 };
-            let white_mage_multiplier = white_mage::white_mage_mitigation_multiplier(Some(&*actor));
+            let incoming_multiplier = white_mage::white_mage_mitigation_multiplier(Some(&*actor))
+                * astrologian::mitigation_multiplier(actor)
+                * paladin::mitigation_multiplier(actor);
 
             // Apply ±5% variance and the target's defense mitigation to each hit.
             for effect in &mut effects_builder.effects {
@@ -3023,7 +3405,8 @@ pub fn execute_enemy_action(
                         * variance
                         * outgoing_multiplier
                         * (1.0 - mitigation)
-                        * white_mage_multiplier)
+                        * incoming_multiplier
+                        * reprisal_multiplier)
                         .floor() as u32;
                 }
             }
@@ -3507,6 +3890,352 @@ pub fn update_actor_hp_mp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "需要从工作区根目录读取配置中的国服 SqPack"]
+    fn cn_paladin_confiteor_chain_uses_one_thousand_mp_per_spell() {
+        let caster = ObjectId(0x1000_0001);
+        let target = ObjectId(0x4000_0002);
+        let client = ClientId::default();
+        let mut instance = Instance::default();
+        instance.insert_empty_actor(caster);
+        let common = instance
+            .find_actor_mut(caster)
+            .unwrap()
+            .get_common_spawn_mut();
+        common.class_job = 19;
+        common.level = 100;
+        common.health_points = 1000;
+        common.max_health_points = 1000;
+        common.resource_points = 4000;
+        common.max_resource_points = 10000;
+        let mut dummy = kawari::ipc::zone::SpawnNpc::default();
+        dummy.common.health_points = 100000;
+        dummy.common.max_health_points = 100000;
+        instance.insert_npc(target, dummy);
+
+        let world = Arc::new(Mutex::new(WorldServer {
+            instances: vec![instance],
+            ..Default::default()
+        }));
+        let network = Arc::new(Mutex::new(NetworkState::default()));
+        let game_data = Arc::new(Mutex::new(GameData::new()));
+        let mut lua = KawariLua::new();
+        lua.init(game_data.clone()).unwrap();
+        let lua = Arc::new(Mutex::new(lua));
+
+        let request = |action_id| ActionRequest {
+            action_type: ActionType::Action,
+            action_id,
+            target: ObjectTypeId {
+                object_id: target,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (action_id, expected_mp) in [
+            (36921, 4000),
+            (16459, 3000),
+            (25748, 2000),
+            (25749, 1000),
+            (25750, 0),
+        ] {
+            let mut request = request(if action_id == 36921 { 36921 } else { 16459 });
+            {
+                let world = world.lock();
+                let actor = world.instances[0].find_actor(caster).unwrap();
+                assert_eq!(
+                    resolve_player_action_id(actor, caster, &request, &mut game_data.lock(), false),
+                    Some(action_id)
+                );
+            }
+            request.action_id = action_id;
+            execute_action(
+                network.clone(),
+                world.clone(),
+                game_data.clone(),
+                lua.clone(),
+                client,
+                caster,
+                request,
+                None,
+            );
+            assert_eq!(
+                world.lock().instances[0]
+                    .find_actor(caster)
+                    .unwrap()
+                    .get_common_spawn()
+                    .resource_points,
+                expected_mp
+            );
+        }
+        execute_action(
+            network.clone(),
+            world.clone(),
+            game_data.clone(),
+            lua,
+            client,
+            caster,
+            request(23),
+            None,
+        );
+        let mut world = world.lock();
+        let instance = &mut world.instances[0];
+        assert!(
+            instance
+                .find_actor(target)
+                .unwrap()
+                .status_effects()
+                .unwrap()
+                .get(248)
+                .is_some()
+        );
+        assert_eq!(
+            super::super::effect::expire_effects(
+                &network,
+                instance,
+                Instant::now() + Duration::from_secs(16)
+            ),
+            vec![(target, 248)]
+        );
+        assert!(
+            instance
+                .find_actor(target)
+                .unwrap()
+                .status_effects()
+                .unwrap()
+                .get(248)
+                .is_none()
+        );
+
+        let mut game_data = game_data.lock();
+        assert_eq!(
+            job_adjusted_sheet_mp_cost(&mut game_data, 19, 63, 3541),
+            4000
+        );
+        assert_eq!(
+            job_adjusted_sheet_mp_cost(&mut game_data, 19, 64, 3541),
+            2000
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "需要从工作区根目录读取配置中的国服 SqPack"]
+    async fn cn_ley_lines_ground_request_sends_action_result_and_visible_circle() {
+        use binrw::{BinRead, BinWrite};
+        use kawari::ipc::zone::{ClientZoneIpcData, ClientZoneIpcSegment, ObjectKind};
+        use std::io::Cursor;
+
+        let caster = ObjectId(0x1000_0001);
+        let client = ClientId::default();
+        let mut wire = [0_u8; 40];
+        wire[..4].copy_from_slice(&[0x14, 0, 0x6f, 0x02]);
+        wire[16..28].copy_from_slice(&[0xf5, 0x0d, 0, 0, 0, 1, 3, 0, 0xff, 0xf8, 0xff, 0xf8]);
+        let position = Vec3::new(-68.4, -194.0, -41.44);
+        for (bytes, coordinate) in wire[28..].chunks_exact_mut(4).zip(position.to_array()) {
+            bytes.copy_from_slice(&coordinate.to_le_bytes());
+        }
+        let ipc = ClientZoneIpcSegment::read_le_args(&mut Cursor::new(wire), (&24,)).unwrap();
+        let ClientZoneIpcData::ActionRequestGroundTargeted(request) = ipc.data else {
+            panic!("国服地面技能请求未解码");
+        };
+
+        let mut instance = Instance::default();
+        instance.insert_empty_actor(caster);
+        let common = instance
+            .find_actor_mut(caster)
+            .unwrap()
+            .get_common_spawn_mut();
+        common.class_job = 25;
+        common.level = 100;
+        common.health_points = 1000;
+        common.position.0 = position;
+        common.rotation = 1.25;
+        let world = Arc::new(Mutex::new(WorldServer {
+            instances: vec![instance],
+            ..Default::default()
+        }));
+        let network = Arc::new(Mutex::new(NetworkState::default()));
+        let (sender, mut messages) = tokio::sync::mpsc::channel(32);
+        network.lock().clients.insert(
+            client,
+            (
+                crate::ClientHandle {
+                    id: client,
+                    channel: sender,
+                    actor_id: caster,
+                    content_id: 0,
+                    account_id: 0,
+                },
+                Default::default(),
+            ),
+        );
+        let game_data = Arc::new(Mutex::new(GameData::new()));
+        let mut lua = KawariLua::new();
+        lua.init(game_data.clone()).unwrap();
+        assert!(handle_action_messages(
+            world.clone(),
+            game_data,
+            network,
+            Arc::new(Mutex::new(lua)),
+            &ToServer::ActionRequestGroundTargeted(client, caster, request),
+        ));
+        let (has_result, circle) = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut has_result = false;
+            loop {
+                match messages.recv().await.unwrap() {
+                    FromServer::PacketSegment(packet, source) => {
+                        if let ServerZoneIpcData::ActionEffect8(result) = packet.data {
+                            assert_eq!(source, caster);
+                            assert_eq!(result.header.action_id, 3573);
+                            assert_eq!(result.header.source_sequence, 3);
+                            assert_eq!(result.target_ids[0].object_id, caster);
+                            has_result = true;
+                        }
+                    }
+                    FromServer::SpawnObject(circle) => break (has_result, circle),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("黑魔纹没有生成");
+        assert!(has_result, "黑魔纹应该在技能结算后生成");
+        assert_eq!(circle.kind, ObjectKind::AreaObject);
+        assert_eq!(circle.base_id, 377);
+        assert_eq!(circle.owner_id, caster);
+        assert_eq!(circle.position.0, position);
+        assert_eq!(circle.radius, 3.0);
+        assert_eq!(circle.entity_id.0 >> 28, 4);
+        let mut encoded = Cursor::new(Vec::new());
+        circle.write_le(&mut encoded).unwrap();
+        let bytes = encoded.into_inner();
+        assert_eq!(&bytes[1..8], &[0x0b, 0x04, 0, 0x79, 1, 0, 0]);
+        assert_eq!(&bytes[34..36], &[0xff, 0x7f]);
+        let world = world.lock();
+        let actor = world
+            .find_actor_instance(caster)
+            .unwrap()
+            .find_actor(caster)
+            .unwrap();
+        assert!(
+            actor
+                .status_effects()
+                .unwrap()
+                .get(black_mage::STATUS_LEY_LINES)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn legacy_damage_scripts_produce_magical_damage_through_the_action_runner() {
+        use bitflags::Flags;
+        use kawari::ipc::zone::SceneFlags;
+        use std::{fs, path::Path};
+
+        let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/scripts");
+        let lua = mlua::Lua::new();
+        for flag in SceneFlags::FLAGS {
+            lua.globals().set(flag.name(), flag.value().bits()).unwrap();
+        }
+        lua.globals()
+            .set("DAMAGE_TYPE_MAGIC", DamageType::Magic)
+            .unwrap();
+        lua.globals()
+            .set(
+                "EffectsBuilder",
+                lua.create_function(|_, ()| Ok(EffectsBuilder::default()))
+                    .unwrap(),
+            )
+            .unwrap();
+        lua.load(fs::read(scripts.join("Global.lua")).unwrap())
+            .exec()
+            .unwrap();
+        let mut state = KawariLuaState::default();
+        for group in fs::read_dir(scripts.join("actions")).unwrap() {
+            for script in fs::read_dir(group.unwrap().path()).unwrap() {
+                let path = script.unwrap().path();
+                let contents = fs::read_to_string(&path).unwrap();
+                if contents.contains(":damage(DAMAGE_KIND_NORMAL,") {
+                    let (_, id) = path
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .rsplit_once('_')
+                        .unwrap();
+                    state.action_scripts.insert(
+                        id.parse::<u32>().unwrap(),
+                        path.to_str().unwrap().to_owned(),
+                    );
+                }
+            }
+        }
+        assert!(state.action_scripts.contains_key(&152));
+        let mut actions: Vec<_> = state.action_scripts.keys().copied().collect();
+        actions.sort_unstable();
+        lua.set_app_data(state);
+        let lua = Arc::new(Mutex::new(KawariLua(lua)));
+        let mut player = LuaPlayer {
+            level: 100,
+            base_parameters: BaseParameters {
+                classjob_id: 25,
+                level: 100,
+                intelligence: 1000,
+                magic_damage: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for action_id in actions {
+            let request = ActionRequest {
+                action_id,
+                ..Default::default()
+            };
+            let result = execute_normal_action(lua.clone(), &request, &mut player, false)
+                .unwrap_or_else(|| panic!("skill {action_id} should execute"));
+            let damage = result
+                .effects
+                .iter()
+                .find_map(|effect| match effect.0 {
+                    TargetEffectKind::Damage {
+                        damage_type: DamageType::Magic,
+                        amount,
+                        ..
+                    } => Some(amount),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("skill {action_id} should produce magical damage"));
+            assert!(damage > 0, "skill {action_id} should deal positive damage");
+            if action_id == 152 {
+                assert_eq!(damage, player.base_parameters.calc_magical_damage(290));
+            }
+        }
+    }
+
+    #[test]
+    fn lua_damage_rejects_bad_types_without_panicking() {
+        let lua = mlua::Lua::new();
+        lua.globals()
+            .set("effects", EffectsBuilder::default())
+            .unwrap();
+        lua.globals().set("magic", DamageType::Magic).unwrap();
+        lua.load("effects:damage(magic, 150); effects:damage(0, magic, 290)")
+            .exec()
+            .unwrap();
+        for call in [
+            "effects:damage(nil, 50)",
+            "effects:damage(256, 50)",
+            "effects:damage(-1, 50)",
+            "effects:damage(5, magic, 50)",
+        ] {
+            assert!(lua.load(call).exec().is_err(), "{call}");
+        }
+        let effects = lua.globals().get::<mlua::AnyUserData>("effects").unwrap();
+        let effects = effects.borrow::<EffectsBuilder>().unwrap();
+        assert_eq!(effects.effects.len(), 2);
+    }
 
     const BLAST_ARROW_READY: u16 = 2692;
     const BLAST_ARROW_READY_ALT: u16 = 3142;
@@ -3613,6 +4342,60 @@ mod tests {
             cursor.into_inner(),
             vec![0x0E, 0, 0, 0x14, 0, 0, 0xAF, 0x04]
         );
+    }
+
+    #[test]
+    fn ice_spell_mp_gain_reaches_single_target_and_aoe_packets() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let gain = TargetEffect(TargetEffectKind::MpGain {
+            params: [0, 0, 0, 0, EFFECT_FLAG_AT_SOURCE],
+            amount: 2500,
+        });
+        let effects = target_action_result_effects(&[gain]);
+        let mut wire = Cursor::new(Vec::new());
+        effects[0].write_le(&mut wire).unwrap();
+        assert_eq!(wire.into_inner(), [0x0b, 0, 0, 0, 0, 0x80, 0xc4, 0x09]);
+
+        let targets = [(ObjectTypeId::default(), TargetEffect::default()); 2];
+        let Some(ServerZoneIpcData::ActionEffect8(aoe)) = build_aoe_effect_packet(
+            ActionEffectHeader::default(),
+            &targets,
+            Default::default(),
+            Some(gain),
+        ) else {
+            panic!("expected ActionEffect8");
+        };
+        assert_eq!(aoe.effects[0][1].0, gain.0);
+        assert_eq!(aoe.effects[1][1].0, TargetEffectKind::None);
+    }
+
+    #[test]
+    fn between_the_lines_effect_and_ground_position_match_the_replay_layout() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let caster = ObjectTypeId {
+            object_id: ObjectId(1),
+            ..Default::default()
+        };
+        let effect = TargetEffect(TargetEffectKind::Teleport {
+            unk: [0; 5],
+            territory: 0,
+        });
+        let header = ActionEffectHeader {
+            target_count: 1,
+            ..Default::default()
+        };
+        let center = kawari::common::Position(glam::Vec3::ZERO);
+        let packet = build_aoe_effect_packet(header, &[(caster, effect)], center, None).unwrap();
+        let mut wire = Cursor::new(Vec::new());
+        packet.write_le(&mut wire).unwrap();
+        let wire = wire.into_inner();
+        assert_eq!(&wire[42..50], &[61, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&wire[560..568], &[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&wire[624..630], &[0xff, 0x7f, 0xff, 0x7f, 0xff, 0x7f]);
     }
 
     /// Only the ids the caster really holds are reported, so the client is not told twice about

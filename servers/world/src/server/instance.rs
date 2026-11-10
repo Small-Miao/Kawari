@@ -125,11 +125,6 @@ pub enum QueuedTaskData {
     CastEnemyAction {
         request: ActionRequest,
     },
-    LoseStatusEffect {
-        effect_id: u16,
-        effect_param: u16,
-        effect_source_actor_id: ObjectId,
-    },
     /// Fade out a dead actor.
     DeadFadeOut {
         actor_id: ObjectId,

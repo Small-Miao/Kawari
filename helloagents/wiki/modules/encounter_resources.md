@@ -12,14 +12,14 @@
 
 ## 协议证据
 
-录制插件 ARealmRecorded 使用自定义回放编号 0xF001 / 0xF002 保存两类数据，不能直接作为线上包号发送。当前 `ffxiv_dx11.exe` 的只读分发表验证结果：
+录制插件 ARealmRecorded 使用自定义回放编号 0xF001 / 0xF002 保存两类数据。`2026.11.03` 国服客户端的线上分发表验证结果如下。
 
 | 类型 | 线上 opcode | 数据格式 | 接收函数 RVA |
 |---|---|---|---|
-| RSV | 274 | u32 UTF-8 字节长度、48 字节键、变长文本 | 0xB4A520 |
-| RSF | 921 | u64 索引、64 字节参数 | 0xB4A540 |
+| RSV | 594 | u32 UTF-8 字节长度、48 字节键、变长文本 | 0xB49EC0 |
+| RSF | 903 | u64 索引、64 字节参数 | 0xB49EE0 |
 
-分发表 RVA 为 0x18DB3C8，索引为 opcode - 101；分支 RVA 分别为 0x18D9C7C、0x18D9C8A。客户端及录像 SHA-256 见 `tools/ultimate-evidence/z3oy_resources_protocol.json`。升级客户端时必须重新核对，不使用第三方旧版包号。
+当前分发表 RVA 为 0x18DB708，索引为 opcode - 102，分支 RVA 分别为 0x18D9FBC、0x18D9FCA。`tools/ultimate-evidence/z3oy_resources_protocol.json` 保留 2026.10.06 客户端和原录像的校验记录，该版本的线上编号分别为 274 和 921。
 
 核心协议新增显式变长尺寸声明，IPC 和外层 segment 长度都按实际字节计算。RSV 最多 4096 字节，RSF 固定 64 字节；单份资源最多 1024 项、256 KiB。完整验证成功后再开始发送，错误在世界服日志中报告。
 

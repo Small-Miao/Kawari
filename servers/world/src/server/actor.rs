@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 use crate::{
     StatusEffects,
@@ -269,6 +272,16 @@ impl NetworkedActor {
             }
         } else {
             common.health_points = common.health_points.saturating_sub(hp_damage);
+        }
+
+        if hp_damage > 0
+            && let Self::Player { combat_state, .. } = self
+            && !combat_state.astrologian_heals.is_empty()
+        {
+            let now = Instant::now();
+            for pending in &mut combat_state.astrologian_heals {
+                pending.record_damage(hp_damage, now);
+            }
         }
 
         hp_damage

@@ -10,6 +10,10 @@ FFXIV 服务器工作区。core 提供协议与数据基础，servers 提供登�
 
 单人测试保护见 [GM 无敌模式](modules/god_mode.md)。
 
+黑魔法师技能结算、职业量谱和国服录像证据见 [黑魔法师与职业量谱](modules/black_mage.md)。
+
+国服治疗与坦克职业实现见 [占星术士](modules/astrologian.md) 和 [骑士](modules/paladin.md)。
+
 离线整理 MapEffect、演出、判定、预兆与单独机制见 [Windows 录像分析工具](modules/replay_analyzer.md)。
 
 脱离游戏运行环境查看物件模型、AVFX 和 SGB 时间线见 [EObject 离线浏览器](modules/eobject_browser.md)。

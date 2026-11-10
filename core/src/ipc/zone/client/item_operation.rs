@@ -40,15 +40,14 @@ mod tests {
         let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         d.push(client_zone_tests_dir!("inventory_modify.bin"));
 
-        let buffer = read(d).unwrap();
+        let mut buffer = read(d).unwrap();
+        // 录像样本保留旧版子命令，解码前换成当前协议的 Move。
+        buffer[4..8].copy_from_slice(&(ItemOperationKind::Move as u32).to_le_bytes());
         let mut buffer = Cursor::new(&buffer);
 
         let modify_inventory = ItemOperation::read_le(&mut buffer).unwrap();
         assert_eq!(modify_inventory.context_id, 0x10000000);
-        // operation_type is intentionally NOT asserted: its wire value = BASE_INVENTORY_ACTION + N,
-        // and BASE_INVENTORY_ACTION shifts every game patch, so pinning a fixed variant here is not
-        // version-stable. The fixture's byte is normalized to a currently-valid value only so the
-        // enum parse (read_le) succeeds; the meaningful coverage is the struct field layout below.
+        assert_eq!(modify_inventory.operation_type, ItemOperationKind::Move);
         assert_eq!(modify_inventory.src_actor_id, ObjectId(0));
         assert_eq!(modify_inventory.src_storage_id, ContainerType::Equipped);
         assert_eq!(modify_inventory.src_container_index, 3);

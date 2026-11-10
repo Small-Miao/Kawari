@@ -1,4 +1,4 @@
-use mlua::{FromLua, Lua, UserData, UserDataMethods, Value};
+use mlua::{FromLua, Lua, MultiValue, UserData, UserDataMethods, Value};
 
 use kawari::common::ObjectId;
 use kawari::ipc::zone::{DamageElement, DamageKind, DamageType, TargetEffect, TargetEffectKind};
@@ -93,21 +93,30 @@ pub struct EffectsBuilder {
 
 impl UserData for EffectsBuilder {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut(
-            "damage",
-            |_, this, (damage_type, amount): (DamageType, u32)| {
-                this.effects.push(TargetEffect(TargetEffectKind::Damage {
-                    damage_kind: DamageKind::default(),
-                    damage_type,
-                    damage_element: DamageElement::Unaspected, // Will be filled in later
-                    bonus_percent: 0,
-                    unk3: 0,
-                    unk4: 0,
-                    amount,
-                }));
-                Ok(())
-            },
-        );
+        methods.add_method_mut("damage", |lua, this, mut args: MultiValue| {
+            // Older action scripts pass DAMAGE_KIND_NORMAL first. It is nil when
+            // the legacy constants are absent. The server rolls hit severity later.
+            if args.len() == 3 && matches!(args.front(), Some(Value::Nil | Value::Integer(0))) {
+                args.pop_front();
+            }
+            let [damage_type, amount] = args.into_vec().try_into().map_err(|_| {
+                mlua::Error::RuntimeError(
+                    "damage expects (type, amount) or (normal, type, amount)".into(),
+                )
+            })?;
+            let damage_type = DamageType::from_lua(damage_type, lua)?;
+            let amount = u32::from_lua(amount, lua)?;
+            this.effects.push(TargetEffect(TargetEffectKind::Damage {
+                damage_kind: DamageKind::default(),
+                damage_type,
+                damage_element: DamageElement::Unaspected, // Will be filled in later
+                bonus_percent: 0,
+                unk3: 0,
+                unk4: 0,
+                amount,
+            }));
+            Ok(())
+        });
         methods.add_method_mut(
             "gain_effect",
             |_, this, (effect_id, param, duration): (u16, u16, f32)| {

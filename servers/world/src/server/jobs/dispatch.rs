@@ -17,7 +17,9 @@ use crate::lua::GaugeAction;
 use crate::server::actor::NetworkedActor;
 use crate::server::combat_state::{CarriedPet, PlayerCombatState};
 use crate::server::instance::Instance;
+use crate::server::jobs::astrologian::Astrologian;
 use crate::server::jobs::bard::Bard;
+use crate::server::jobs::paladin::Paladin;
 use crate::server::jobs::summoner::Summoner;
 use crate::server::network::{DestinationNetwork, NetworkState};
 use kawari::common::ObjectId;
@@ -222,10 +224,14 @@ pub(in crate::server) trait JobActors: Sync {
 
 /// The single per-job growth point. One arm per job; everything else is closed to extension.
 pub(in crate::server) fn job_for(class_job: u8) -> Option<&'static dyn Job> {
+    const ASTROLOGIAN: &Astrologian = &Astrologian;
     const BARD: &Bard = &Bard;
+    const PALADIN: &Paladin = &Paladin;
     const SUMMONER: &Summoner = &Summoner;
     match class_job {
+        cj if ASTROLOGIAN.class_jobs().contains(&cj) => Some(ASTROLOGIAN),
         cj if BARD.class_jobs().contains(&cj) => Some(BARD),
+        cj if PALADIN.class_jobs().contains(&cj) => Some(PALADIN),
         cj if SUMMONER.class_jobs().contains(&cj) => Some(SUMMONER),
         _ => None,
     }
@@ -269,7 +275,7 @@ mod tests {
 
         // An unhandled class id resolves to nothing.
         assert!(job_for(0).is_none());
-        assert!(job_for(19).is_none()); // Paladin — not yet implemented.
+        assert!(job_for(19).is_some());
     }
 
     #[test]

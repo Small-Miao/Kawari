@@ -616,6 +616,32 @@ fn god_mode_survives_unmitigated_mechanics_and_magic_number_expiry() {
 }
 
 #[test]
+fn astrologian_mitigation_reduces_normal_hits_until_the_statuses_expire() {
+    let (mut instance, enemy, player) = actors();
+    let network = Arc::new(Mutex::new(NetworkState::default()));
+    let hit = |instance: &mut Instance, unmitigated| {
+        instance.find_actor_mut(player).unwrap().get_common_spawn_mut().health_points = 1000;
+        let mut attack = pending(instance, enemy);
+        attack.rules.unmitigated = unmitigated;
+        resolve_aoe(network.clone(), instance, attack);
+        1000 - instance.find_actor(player).unwrap().get_common_spawn().health_points
+    };
+
+    for status in [3890, 2717, 849, 3896] {
+        gain_effect_instance(network.clone(), &mut instance, player, status, 0, 8.0, player, false);
+        assert_eq!(hit(&mut instance, false), 90, "状态 {status}");
+        remove_effect_instance(network.clone(), &mut instance, player, status).unwrap();
+    }
+    for status in [849, 3896] {
+        gain_effect_instance(network.clone(), &mut instance, player, status, 0, 8.0, player, false);
+    }
+    assert_eq!(hit(&mut instance, false), 81);
+    assert_eq!(hit(&mut instance, true), 100);
+    crate::server::effect::expire_effects(&network, &mut instance, Instant::now() + Duration::from_secs(9));
+    assert_eq!(hit(&mut instance, false), 100);
+}
+
+#[test]
 fn proximity_trigger_waits_for_player_to_finish_loading() {
     let (mut instance, source, player) = actors();
     instance.director.as_mut().unwrap().runtime.hit_trigger = Some(source);
@@ -664,7 +690,6 @@ fn ultimate_limit_break_checks_job_consumes_gauge_and_refunds_only_once() {
     limit_break::set_gauge(&mut network.lock(), &mut instance, 30000);
     gain_effect_instance(
         network.clone(),
-        ClientId::default(),
         &mut instance,
         player,
         3446,
@@ -763,7 +788,6 @@ fn healer_limit_break_cleanses_magic_number_and_revives() {
     p.mode = CharacterMode::Dead;
     gain_effect_instance(
         network.clone(),
-        ClientId::default(),
         &mut instance,
         healer,
         3532,
@@ -830,7 +854,7 @@ fn forsaken_death_blocks_raise_but_not_godmode_and_prison_blocks_lb() {
 
     instance.director.as_mut().unwrap().start_battle();
     limit_break::set_gauge(&mut network.lock(), &mut instance, 30000);
-    gain_effect_instance(network.clone(), ClientId::default(), &mut instance, healer, 2165, 0, 0.0, source, true);
+    gain_effect_instance(network.clone(), &mut instance, healer, 2165, 0, 0.0, source, true);
     assert!(instance.find_actor(healer).unwrap().is_time_stopped());
     assert!(!limit_break::allowed(&instance, healer, 208));
     remove_effect_instance(network.clone(), &mut instance, healer, 2165);
@@ -1281,7 +1305,6 @@ fn buff_refresh_to_permanent_cancels_expiry_and_emits_callbacks() {
     );
     gain_effect_instance(
         network.clone(),
-        ClientId::default(),
         &mut instance,
         player,
         700,
@@ -1304,10 +1327,14 @@ fn buff_refresh_to_permanent_cancels_expiry_and_emits_callbacks() {
         }
         _ => panic!("缺少状态列表包"),
     }
-    assert_eq!(instance.queued_task.len(), 1);
+    let deadline = Instant::now() + Duration::from_secs(11);
+    assert_eq!(
+        instance.find_actor(player).unwrap().status_effects().unwrap()
+            .expired_ids(deadline).collect::<Vec<_>>(),
+        vec![700]
+    );
     gain_effect_instance(
         network.clone(),
-        ClientId::default(),
         &mut instance,
         player,
         700,
@@ -1316,7 +1343,7 @@ fn buff_refresh_to_permanent_cancels_expiry_and_emits_callbacks() {
         source,
         true,
     );
-    assert!(instance.queued_task.is_empty());
+    assert!(crate::server::effect::expire_effects(&network, &mut instance, deadline).is_empty());
     let statuses = instance
         .find_actor(player)
         .unwrap()
@@ -1356,4 +1383,26 @@ fn buff_refresh_to_permanent_cancels_expiry_and_emits_callbacks() {
     director.dispatch_status_changes();
     assert_eq!(director.lua.0.globals().get::<u32>("gains").unwrap(), 2);
     assert_eq!(director.lua.0.globals().get::<u32>("losses").unwrap(), 1);
+}
+
+#[test]
+fn job_change_removes_combat_effects_but_keeps_director_owned_effects() {
+    let (mut instance, enemy, player) = actors();
+    let network = Arc::new(Mutex::new(NetworkState::default()));
+    gain_effect_instance(network.clone(), &mut instance, player, 79, 0, 0.0, player, false);
+    gain_effect_instance(network.clone(), &mut instance, player, 3532, 0, 10.0, enemy, false);
+    instance.director.as_mut().unwrap().runtime.owned_effects.insert((player, 3532), enemy);
+    instance.find_actor_mut(enemy).unwrap().status_effects_mut().unwrap()
+        .add_tick(248, 0, 15.0, crate::TickEffectKind::DamagePhysical, 30, None, player);
+    gain_effect_instance(network.clone(), &mut instance, enemy, 700, 0, 5.0, enemy, false);
+
+    crate::server::effect::clear_job_effects(&network, &mut instance, player);
+
+    let own = instance.find_actor(player).unwrap().status_effects().unwrap();
+    assert!(own.get(79).is_none());
+    assert!(own.get(3532).is_some());
+    let target = instance.find_actor(enemy).unwrap().status_effects().unwrap();
+    assert!(target.get(248).is_none());
+    assert_eq!(target.tick_effects(Instant::now()).count(), 0);
+    assert!(target.get(700).is_some());
 }

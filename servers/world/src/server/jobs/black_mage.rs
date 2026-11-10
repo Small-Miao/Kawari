@@ -5,8 +5,8 @@
 //! Trait/TraitTransient rows (极性精通 I-V = Aspect Mastery I-V) and Status rows from the
 //! game sheets. Notable sources:
 //!   - Trait#296/458/459 (Aspect Mastery I/II/III): stance damage & MP rules, per-tier values.
-//!   - Trait#465 (Aspect Mastery V, Lv90): Paradox marker granted on swapping to the opposite
-//!     element while at max stance AND max Umbral Hearts; marker clears when the stance ends.
+//!   - Trait#465 (Aspect Mastery V, Lv90): Paradox on a swap from AF III, or from UI III
+//!     with three Umbral Hearts. The marker clears when the stance ends.
 //!   - Trait#616 (Enhanced Astral Fire, Lv100): Astral Soul (max 6) from Fire IV / Flare hits,
 //!     and Despair becomes instant.
 //!   - Trait#295/297/615: Umbral Heart (Lv58), Polyglot max 2 (Lv80) / 3 (Lv98).
@@ -25,8 +25,8 @@ use crate::{
     },
 };
 use kawari::{
-    common::{ObjectId, Position},
-    ipc::zone::{ActionRequest, ObjectKind, SpawnObject},
+    common::{ANIMATION_LOCK_TIME, ObjectId, Position},
+    ipc::zone::{ActionRequest, ObjectKind, SpawnObject, TargetEffectKind},
 };
 
 /// ClassJob row id for Black Mage (BLM).
@@ -45,7 +45,7 @@ const ACTION_FIRE_III: u32 = 152;
 const ACTION_THUNDER_III: u32 = 153;
 const ACTION_BLIZZARD_III: u32 = 154;
 const ACTION_SCATHE: u32 = 156;
-const ACTION_MANAFONT: u32 = 158;
+pub(crate) const ACTION_MANAFONT: u32 = 158;
 const ACTION_FREEZE: u32 = 159;
 const ACTION_FLARE: u32 = 162;
 const ACTION_LEY_LINES: u32 = 3573;
@@ -140,13 +140,9 @@ const SCATHE_DOUBLE_CHANCE_PERCENT: u8 = 20;
 const PARADOX_MP_COST: u32 = 1600;
 /// Minimum MP required to cast Flare/Despair (they consume all remaining MP).
 const ALL_MP_COST_MIN: u32 = 800;
-/// MP restored when an ice-aspected spell hits while in Umbral Ice, per UI tier
-/// (Aspect Mastery I/II/III: 2500/5000/10000).
-const UMBRAL_ICE_MP_ON_HIT: [u32; 3] = [2500, 5000, 10000];
-/// MP restored by Umbral Soul per UI tier.
-const UMBRAL_SOUL_MP: [u32; 3] = [2500, 5000, 10000];
-/// Out-of-combat Umbral Soul restores a flat 10000 MP.
-const UMBRAL_SOUL_OOC_MP: u32 = 10000;
+/// MP restored by an ice spell hit or Umbral Soul, based on the tier before the action.
+const UMBRAL_ICE_MP: [u16; 3] = [2500, 5000, 10000];
+const UMBRAL_SOUL_OOC_MP: u16 = 10000;
 
 /// "Permanent" buffs (Firestarter, Thunderhead) use a far-future duration; the client shows
 /// no countdown for very long statuses, and both are consumed server-side long before expiry.
@@ -158,7 +154,7 @@ pub struct BlackMageState {
     /// Elemental stance: 1-3 = Astral Fire stacks, -1..-3 = Umbral Ice stacks, 0 = none.
     pub element_stance: i8,
     /// Umbral Hearts (0-3). Each nullifies the AF fire MP increase for one cast; Flare
-    /// consumes all of them to reduce its cost to 2/3.
+    /// consumes all of them to reduce its cost to 66% of current MP.
     pub umbral_hearts: u8,
     /// Polyglot stacks (0-3, cap depends on level).
     pub polyglot_stacks: u8,
@@ -206,6 +202,13 @@ impl BlackMageState {
             .is_some_and(|t| t > Instant::now())
     }
 
+    pub(crate) fn has_triplecast(&self) -> bool {
+        self.triplecast_stacks > 0
+            && self
+                .triplecast_expires_at
+                .is_some_and(|t| t > Instant::now())
+    }
+
     fn max_stance_stacks(level: u8) -> i8 {
         if level >= LEVEL_STANCE_STACKS_3 {
             3
@@ -228,14 +231,32 @@ impl BlackMageState {
         }
     }
 
-    /// MP restored when an ice spell hits in Umbral Ice, by current UI tier.
-    fn umbral_ice_mp_on_hit(&self) -> u32 {
+    fn umbral_ice_mp(&self) -> u16 {
         let stacks = self.umbral_ice_stacks();
         if stacks == 0 {
             0
         } else {
-            UMBRAL_ICE_MP_ON_HIT[(stacks as usize - 1).min(2)]
+            UMBRAL_ICE_MP[(stacks as usize - 1).min(2)]
         }
+    }
+
+    fn update_polyglot_timer(&mut self, level: u8, now: Instant) -> bool {
+        let cap = Self::max_polyglot(level);
+        if self.element_stance == 0 || cap == 0 {
+            return self.polyglot_next_at.take().is_some();
+        }
+
+        let Some(next_at) = self.polyglot_next_at else {
+            self.polyglot_next_at = Some(now + POLYGLOT_INTERVAL);
+            return true;
+        };
+        if now < next_at {
+            return false;
+        }
+
+        self.polyglot_stacks = self.polyglot_stacks.saturating_add(1).min(cap);
+        self.polyglot_next_at = Some(next_at + POLYGLOT_INTERVAL);
+        true
     }
 }
 
@@ -246,6 +267,28 @@ pub(crate) fn is_black_mage(class_job: u8) -> bool {
 
 pub(crate) fn gauge_class_job_id() -> u8 {
     CLASSJOB_BLACK_MAGE
+}
+
+pub(crate) fn deactivate(actor: &mut NetworkedActor) -> Option<ObjectId> {
+    let NetworkedActor::Player {
+        combat_state,
+        status_effects,
+        ..
+    } = actor
+    else {
+        return None;
+    };
+    let previous = std::mem::take(&mut combat_state.black_mage);
+    for status in [
+        STATUS_FIRESTARTER,
+        STATUS_THUNDERHEAD,
+        STATUS_TRIPLECAST,
+        STATUS_LEY_LINES,
+        STATUS_CIRCLE_OF_POWER,
+    ] {
+        status_effects.remove(status);
+    }
+    previous.ley_lines_object_id
 }
 
 // ==================== Damage multipliers ====================
@@ -308,7 +351,7 @@ pub(crate) fn element_damage_percent(
 ///   - In Astral Fire: fire spells cost double; an Umbral Heart is consumed instead to
 ///     nullify the increase (handled in the after-action hook). Ice spells cost 0.
 ///   - In Umbral Ice: fire and ice spells cost 0.
-///   - Flare consumes all MP (min 800); with any Umbral Hearts it costs 2/3 of max MP.
+///   - Flare consumes all MP (min 800); with any Umbral Hearts it costs 66% of current MP.
 ///   - Despair consumes all MP (min 800). Paradox costs 1600 in AF and 0 in UI.
 ///
 /// `sheet_cost` is the Action-sheet MP cost (0 for the special cost types).
@@ -318,13 +361,12 @@ pub(crate) fn effective_mp_cost(
     sheet_cost: u32,
     aspect: u8,
     current_mp: u32,
-    max_mp: u32,
     has_firestarter: bool,
 ) -> u32 {
     match action_id {
         ACTION_FLARE => {
             if state.umbral_hearts > 0 {
-                current_mp.min(max_mp * 2 / 3)
+                (u64::from(current_mp) * 66 / 100) as u32
             } else {
                 current_mp
             }
@@ -368,15 +410,15 @@ pub(crate) fn effective_mp_cost(
 fn consumes_umbral_heart(
     state: &BlackMageState,
     action_id: u32,
-    sheet_cost: u32,
+    actual_mp_cost: u32,
     aspect: u8,
 ) -> bool {
     state.in_astral_fire()
         && state.umbral_hearts > 0
         && aspect == ASPECT_FIRE
-        && sheet_cost > 0
-        // Flare consumes *all* hearts for its own discount instead.
-        && action_id != ACTION_FLARE
+        && actual_mp_cost > 0
+        // All-MP spells bypass the normal discount. Flare spends the whole stack separately.
+        && !matches!(action_id, ACTION_FLARE | ACTION_DESPAIR)
 }
 
 /// Minimum MP required to cast (Flare/Despair consume all MP but still demand 800+).
@@ -389,27 +431,18 @@ pub(crate) fn min_mp_requirement(action_id: u32) -> u32 {
 
 // ==================== Cast time rules ====================
 
-/// Whether this cast is instant for BLM-specific reasons: Firestarter Fire III, a
-/// Triplecast stack, or Lv100 Despair (Trait#616). `base_centisec` must be > 0 — actions
-/// that are already instant never consume Triplecast stacks.
-pub(crate) fn requires_no_cast_time(
-    state: &BlackMageState,
+/// These spells are already instant before applying Swiftcast or Triplecast.
+pub(crate) fn is_instant_without_cast_buff(
     action_id: u32,
-    base_centisec: u32,
     level: u8,
     has_firestarter: bool,
 ) -> bool {
-    if base_centisec == 0 {
-        return false;
+    match action_id {
+        ACTION_FIRE_III => has_firestarter,
+        ACTION_FOUL => level >= LEVEL_POLYGLOT_2,
+        ACTION_DESPAIR => level >= LEVEL_ASTRAL_SOUL,
+        _ => false,
     }
-    if action_id == ACTION_FIRE_III && has_firestarter {
-        return true;
-    }
-    if state.triplecast_stacks > 0 {
-        return true;
-    }
-    // Enhanced Astral Fire (#616, Lv100): Despair needs no cast time.
-    action_id == ACTION_DESPAIR && level >= LEVEL_ASTRAL_SOUL
 }
 
 /// AF3 halves ice cast times and UI3 halves fire cast times (Aspect Mastery III).
@@ -501,8 +534,8 @@ pub(crate) struct BlackMageActionUpdate {
     pub(crate) changed: bool,
     /// A status was added/removed; the caller pushes the effects list.
     pub(crate) status_changed: bool,
-    /// MP was restored (ice-hit regen, Umbral Soul, Manafont); the caller syncs HP/MP.
-    pub(crate) mp_changed: bool,
+    /// Nominal MP restored before clamping to maximum MP, also sent in the action effect.
+    pub(crate) mp_restored: u16,
 }
 
 /// Grant Thunderhead if it isn't already present (one at a time, permanent until consumed).
@@ -533,13 +566,13 @@ fn grant_firestarter(status_effects: &mut StatusEffects, owner_actor_id: ObjectI
     true
 }
 
-/// Aspect Mastery V (#465): swapping to the opposite element while at max stance AND max
-/// Umbral Hearts lights the Paradox marker.
+/// Aspect Mastery V (#465): AF III can swap directly; UI III also needs three hearts.
 fn maybe_grant_paradox_on_swap(black_mage: &mut BlackMageState, previous_stance: i8, level: u8) {
-    if level >= LEVEL_PARADOX
-        && previous_stance.abs() == MAX_ELEMENT_STANCE
-        && black_mage.umbral_hearts >= MAX_UMBRAL_HEARTS
-    {
+    let from_max_fire = previous_stance == MAX_ELEMENT_STANCE && black_mage.in_umbral_ice();
+    let from_full_ice = previous_stance == -MAX_ELEMENT_STANCE
+        && black_mage.in_astral_fire()
+        && black_mage.umbral_hearts >= MAX_UMBRAL_HEARTS;
+    if level >= LEVEL_PARADOX && (from_max_fire || from_full_ice) {
         black_mage.paradox_active = true;
     }
 }
@@ -557,8 +590,9 @@ pub(crate) fn update_black_mage_state_after_action(
     action_id: u32,
     actor: &mut NetworkedActor,
     owner_actor_id: ObjectId,
-    sheet_mp_cost: u32,
+    actual_mp_cost: u32,
     aspect: u8,
+    landed_damage: bool,
 ) -> BlackMageActionUpdate {
     let level = actor.get_common_spawn().level;
     let NetworkedActor::Player {
@@ -575,13 +609,19 @@ pub(crate) fn update_black_mage_state_after_action(
     let mut update = BlackMageActionUpdate::default();
 
     // An Umbral Heart pays for this fire cast's MP increase (AF only).
-    if consumes_umbral_heart(black_mage, action_id, sheet_mp_cost, aspect) {
+    if consumes_umbral_heart(black_mage, action_id, actual_mp_cost, aspect) {
         black_mage.umbral_hearts -= 1;
         update.changed = true;
     }
 
     let previous_stance = black_mage.element_stance;
     let max_stacks = BlackMageState::max_stance_stacks(level);
+    let previous_ice_mp = black_mage.umbral_ice_mp();
+    let mut mp_restore = if aspect == ASPECT_ICE && landed_damage {
+        previous_ice_mp
+    } else {
+        0
+    };
 
     match action_id {
         ACTION_FIRE => {
@@ -673,7 +713,7 @@ pub(crate) fn update_black_mage_state_after_action(
             }
         }
         ACTION_FIRE_IV => {
-            if level >= LEVEL_ASTRAL_SOUL {
+            if level >= LEVEL_ASTRAL_SOUL && landed_damage {
                 black_mage.astral_soul_stacks =
                     (black_mage.astral_soul_stacks + 1).min(MAX_ASTRAL_SOUL);
             }
@@ -691,9 +731,8 @@ pub(crate) fn update_black_mage_state_after_action(
         }
         ACTION_FLARE => {
             black_mage.element_stance = max_stacks;
-            // Flare consumes all Umbral Hearts to reduce its MP cost to 2/3.
             black_mage.umbral_hearts = 0;
-            if level >= LEVEL_ASTRAL_SOUL {
+            if level >= LEVEL_ASTRAL_SOUL && landed_damage {
                 black_mage.astral_soul_stacks =
                     (black_mage.astral_soul_stacks + 3).min(MAX_ASTRAL_SOUL);
             }
@@ -704,32 +743,19 @@ pub(crate) fn update_black_mage_state_after_action(
             update.changed = true;
         }
         ACTION_UMBRAL_SOUL => {
-            let common = &mut spawn.common;
-            if !combat_state.in_combat {
-                // Out of combat: max UI, 3 hearts, and a flat 10000 MP.
-                black_mage.element_stance = -MAX_ELEMENT_STANCE;
-                black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
-                let restored = common
-                    .resource_points
-                    .saturating_add(UMBRAL_SOUL_OOC_MP as u16)
-                    .min(common.max_resource_points);
-                common.resource_points = restored;
-            } else {
+            if combat_state.in_combat {
                 black_mage.element_stance = (black_mage.element_stance - 1).max(-max_stacks);
                 black_mage.umbral_hearts = (black_mage.umbral_hearts + 1).min(MAX_UMBRAL_HEARTS);
-                let mp = UMBRAL_SOUL_MP[(black_mage.umbral_ice_stacks() as usize - 1).min(2)];
-                let restored = common
-                    .resource_points
-                    .saturating_add(mp.min(u16::MAX as u32) as u16)
-                    .min(common.max_resource_points);
-                common.resource_points = restored;
+                mp_restore = previous_ice_mp;
+            } else {
+                black_mage.element_stance = -max_stacks;
+                black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
+                mp_restore = UMBRAL_SOUL_OOC_MP;
             }
             update.changed = true;
-            update.mp_changed = true;
         }
         ACTION_MANAFONT => {
-            let common = &mut spawn.common;
-            common.resource_points = common.max_resource_points;
+            mp_restore = spawn.common.max_resource_points;
             black_mage.element_stance = max_stacks;
             black_mage.umbral_hearts = MAX_UMBRAL_HEARTS;
             update.status_changed |= grant_thunderhead(status_effects, owner_actor_id);
@@ -737,7 +763,6 @@ pub(crate) fn update_black_mage_state_after_action(
                 black_mage.paradox_active = true;
             }
             update.changed = true;
-            update.mp_changed = true;
         }
         ACTION_AMPLIFIER => {
             let cap = BlackMageState::max_polyglot(level);
@@ -784,17 +809,13 @@ pub(crate) fn update_black_mage_state_after_action(
         _ => {}
     }
 
-    // Ice spells restore MP on hit while in Umbral Ice (Aspect Mastery I/II/III).
-    if aspect == ASPECT_ICE && black_mage.in_umbral_ice() {
-        let mp = black_mage.umbral_ice_mp_on_hit();
-        if mp > 0 {
-            let common = &mut spawn.common;
-            common.resource_points = common
-                .resource_points
-                .saturating_add(mp.min(u16::MAX as u32) as u16)
-                .min(common.max_resource_points);
-            update.mp_changed = true;
-        }
+    if mp_restore > 0 {
+        let common = &mut spawn.common;
+        common.resource_points = common
+            .resource_points
+            .saturating_add(mp_restore)
+            .min(common.max_resource_points);
+        update.mp_restored = mp_restore;
     }
 
     // (Triplecast stack consumption happens at the execute site via consume_triplecast_stack,
@@ -803,11 +824,12 @@ pub(crate) fn update_black_mage_state_after_action(
     // Stance ended → Astral Soul and the Paradox marker go out (Trait#465).
     if black_mage.element_stance == 0 && previous_stance != 0 {
         black_mage.paradox_active = false;
-        black_mage.polyglot_next_at = None;
+        black_mage.umbral_hearts = 0;
     }
     clear_astral_soul_if_fire_ended(black_mage);
 
     update.changed |= black_mage.element_stance != previous_stance;
+    update.changed |= black_mage.update_polyglot_timer(level, Instant::now());
     update
 }
 
@@ -915,25 +937,7 @@ pub(crate) fn refresh_black_mage_runtime_state_on_actor(
         }
     }
 
-    // Polyglot generation: one stack every 30s while in Astral Fire or Umbral Ice.
-    let polyglot_cap = BlackMageState::max_polyglot(level);
-    if black_mage.element_stance != 0 && polyglot_cap > 0 {
-        if black_mage.polyglot_stacks >= polyglot_cap {
-            black_mage.polyglot_next_at = None;
-        } else {
-            let next_at = black_mage
-                .polyglot_next_at
-                .get_or_insert(now + POLYGLOT_INTERVAL);
-            if now >= *next_at {
-                black_mage.polyglot_stacks += 1;
-                black_mage.polyglot_next_at =
-                    (black_mage.polyglot_stacks < polyglot_cap).then_some(now + POLYGLOT_INTERVAL);
-                update.changed = true;
-            }
-        }
-    } else {
-        black_mage.polyglot_next_at = None;
-    }
+    update.changed |= black_mage.update_polyglot_timer(level, now);
 
     // Ley Lines: expire, and maintain the marker (737) / standing-inside haste (738).
     if black_mage.ley_lines_expires_at.is_some_and(|t| t <= now) {
@@ -986,22 +990,27 @@ pub(crate) fn refresh_black_mage_runtime_state_on_actor(
 /// Pack the BLM job gauge. Byte layout (FFXIVClientStructs BlackMageGauge, data starts at
 /// the struct's 0x08, which is what ActorGauge carries):
 ///   [0..2] EnochianTimer (i16 LE, ms — in 7.x this drives the Polyglot progress display:
-///          remaining time until the next stack, 0 when capped or stance-less)
+///          remaining time until the next 30-second tick, 0 when stance-less)
 ///   [2]    ElementStance (sbyte: +N = Astral Fire, -N = Umbral Ice — two's complement!)
 ///   [3]    UmbralHearts
 ///   [4]    PolyglotStacks
 ///   [5]    EnochianFlags (bit0 = Enochian, bit1 = Paradox, bits2-4 = AstralSoul 0-6)
 ///   [6..8] padding
 pub(crate) fn build_black_mage_gauge_data(combat_state: &PlayerCombatState, level: u8) -> u64 {
-    let black_mage = &combat_state.black_mage;
+    pack_black_mage_gauge(&combat_state.black_mage, level, Instant::now())
+}
 
-    let polyglot_timer_ms = if black_mage.element_stance != 0 && level >= LEVEL_POLYGLOT {
+fn pack_black_mage_gauge(black_mage: &BlackMageState, level: u8, now: Instant) -> u64 {
+    let polyglot_cap = BlackMageState::max_polyglot(level);
+    let polyglot = black_mage.polyglot_stacks.min(polyglot_cap);
+    let polyglot_timer_ms = if black_mage.element_stance != 0 && polyglot_cap > 0 {
         black_mage
             .polyglot_next_at
             .map(|t| {
-                t.saturating_duration_since(std::time::Instant::now())
-                    .as_millis()
-                    .min(u128::from(u16::MAX)) as u16
+                t.saturating_duration_since(now)
+                    .as_micros()
+                    .div_ceil(1000)
+                    .min(i16::MAX as u128) as i16
             })
             .unwrap_or(0)
     } else {
@@ -1013,9 +1022,6 @@ pub(crate) fn build_black_mage_gauge_data(combat_state: &PlayerCombatState, leve
     } else {
         0
     };
-    let polyglot = black_mage
-        .polyglot_stacks
-        .min(BlackMageState::max_polyglot(level));
 
     let mut flags = 0u8;
     if black_mage.element_stance != 0 && level >= LEVEL_ENOCHIAN {
@@ -1044,36 +1050,86 @@ pub(crate) fn build_black_mage_gauge_data(combat_state: &PlayerCombatState, leve
 
 // ==================== Ley Lines ground circle ====================
 
+pub(crate) fn ley_lines_action_result(
+    actor: &NetworkedActor,
+    action_id: u32,
+) -> Option<(Position, TargetEffectKind, f32)> {
+    let NetworkedActor::Player { combat_state, .. } = actor else {
+        return None;
+    };
+    let (effect, animation_lock) = match action_id {
+        ACTION_LEY_LINES => (
+            TargetEffectKind::GainEffectSelf {
+                unk1: 0,
+                unk2: 0,
+                unk3: 0,
+                param: 0,
+                effect_id: STATUS_LEY_LINES,
+                duration: LEY_LINES_DURATION.as_secs_f32(),
+            },
+            ANIMATION_LOCK_TIME,
+        ),
+        ACTION_BETWEEN_THE_LINES => (
+            TargetEffectKind::Teleport {
+                unk: [0; 5],
+                territory: 0,
+            },
+            0.8,
+        ),
+        _ => return None,
+    };
+    let black_mage = &combat_state.black_mage;
+    if !black_mage.has_ley_lines_active() {
+        return None;
+    }
+    Some((
+        Position(black_mage.ley_lines_position?),
+        effect,
+        animation_lock,
+    ))
+}
+
 /// Handle Ley Lines / Retrace after the action executes: (re)place the ground circle at the
 /// requested position (the CN 7.51 client sends the caster's feet for these), spawn the VFX
 /// object, and despawn the previous circle when Retrace replaces it. Mirrors the retail
-/// ObjectSpawn (base_id 0x179, AreaObject, radius 3.0, not targetable).
-pub(crate) fn register_ley_lines_after_action(
+/// ObjectSpawn (base_id 0x179, AreaObject, radius 3.0, flags 0x04).
+/// Returns the inserted object so the caller can send its spawn after the action result.
+pub(in crate::server) fn register_ley_lines_after_action(
     network: Arc<Mutex<NetworkState>>,
     instance: &mut Instance,
     from_actor_id: ObjectId,
     action_id: u32,
     ground_position: Option<Position>,
-) {
+) -> Option<ObjectId> {
     if !matches!(action_id, ACTION_LEY_LINES | ACTION_RETRACE) {
-        return;
+        return None;
     }
 
-    let Some(actor) = instance.find_actor(from_actor_id) else {
-        return;
-    };
-    let position = ground_position.unwrap_or_else(|| actor.position());
-    let rotation = actor.get_common_spawn().rotation;
+    let actor = instance.find_actor(from_actor_id)?;
+    let position = ground_position
+        .filter(|position| position.0.is_finite())
+        .unwrap_or_else(|| actor.position());
 
     let old_object_id;
-    let object_id = ObjectId(fastrand::u32(..));
+    let object_id = loop {
+        let candidate = ObjectId(fastrand::u32(0x4000_0000..0x5000_0000));
+        if instance.find_actor(candidate).is_none() {
+            break candidate;
+        }
+    };
     {
-        let Some(NetworkedActor::Player { combat_state, .. }) =
-            instance.find_actor_mut(from_actor_id)
+        let Some(NetworkedActor::Player {
+            combat_state,
+            status_effects,
+            ..
+        }) = instance.find_actor_mut(from_actor_id)
         else {
-            return;
+            return None;
         };
         let black_mage = &mut combat_state.black_mage;
+        if action_id == ACTION_RETRACE && !black_mage.has_ley_lines_active() {
+            return None;
+        }
 
         old_object_id = black_mage.ley_lines_object_id.take();
         black_mage.ley_lines_position = Some(position.0);
@@ -1082,17 +1138,7 @@ pub(crate) fn register_ley_lines_after_action(
             black_mage.ley_lines_expires_at = Some(Instant::now() + LEY_LINES_DURATION);
         }
         black_mage.ley_lines_object_id = Some(object_id);
-    }
-
-    // Refresh the marker status so it shows the (possibly inherited) remaining duration.
-    if let Some(NetworkedActor::Player {
-        combat_state,
-        status_effects,
-        ..
-    }) = instance.find_actor_mut(from_actor_id)
-    {
-        let remaining = combat_state
-            .black_mage
+        let remaining = black_mage
             .ley_lines_expires_at
             .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f32())
             .unwrap_or(LEY_LINES_DURATION.as_secs_f32());
@@ -1101,20 +1147,302 @@ pub(crate) fn register_ley_lines_after_action(
 
     let spawn = SpawnObject {
         kind: ObjectKind::AreaObject,
-        not_targetable: true,
+        extra_flags: 0x04,
         base_id: LEY_LINES_GROUND_VFX_ID,
         entity_id: object_id,
         owner_id: from_actor_id,
         radius: LEY_LINES_RADIUS,
-        rotation,
         position,
         ..Default::default()
     };
     instance.insert_object(object_id, spawn, String::default());
 
-    let mut network = network.lock();
-    network.spawn_inserted_object_in_range(instance, object_id);
     if let Some(old_object_id) = old_object_id {
-        network.remove_actor(instance, old_object_id);
+        network.lock().remove_actor(instance, old_object_id);
+    }
+    Some(object_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binrw::BinWrite;
+    use kawari::ipc::zone::{ServerZoneIpcData, ServerZoneIpcSegment};
+    use std::io::Cursor;
+
+    const PLAYER: ObjectId = ObjectId(1);
+
+    fn player(stance: i8, hearts: u8, mp: u16) -> NetworkedActor {
+        let mut instance = Instance::default();
+        instance.insert_empty_actor(PLAYER);
+        let mut actor = instance.actors.remove(&PLAYER).unwrap();
+        let NetworkedActor::Player {
+            spawn,
+            combat_state,
+            ..
+        } = &mut actor
+        else {
+            unreachable!();
+        };
+        spawn.common.class_job = CLASSJOB_BLACK_MAGE;
+        spawn.common.level = 100;
+        spawn.common.health_points = 1000;
+        spawn.common.resource_points = mp;
+        spawn.common.max_resource_points = 10000;
+        combat_state.in_combat = true;
+        combat_state.black_mage.element_stance = stance;
+        combat_state.black_mage.umbral_hearts = hearts;
+        actor
+    }
+
+    fn state(actor: &NetworkedActor) -> &BlackMageState {
+        let NetworkedActor::Player { combat_state, .. } = actor else {
+            unreachable!();
+        };
+        &combat_state.black_mage
+    }
+
+    fn cast(
+        actor: &mut NetworkedActor,
+        action: u32,
+        sheet_cost: u32,
+        aspect: u8,
+        landed_damage: bool,
+    ) -> BlackMageActionUpdate {
+        let has_firestarter = actor
+            .status_effects_mut()
+            .unwrap()
+            .get(STATUS_FIRESTARTER)
+            .is_some();
+        let current_mp = actor.get_common_spawn().resource_points;
+        let cost = effective_mp_cost(
+            state(actor),
+            action,
+            sheet_cost,
+            aspect,
+            u32::from(current_mp),
+            has_firestarter,
+        );
+        actor.get_common_spawn_mut().resource_points -= cost as u16;
+        update_black_mage_state_after_action(action, actor, PLAYER, cost, aspect, landed_damage)
+    }
+
+    #[test]
+    fn replay_transpose_and_umbral_soul_update_the_elemental_gauge() {
+        let mut actor = player(3, 0, 1256);
+        cast(&mut actor, ACTION_TRANSPOSE, 0, 0, false);
+        let ice = state(&actor);
+        assert_eq!(ice.element_stance, -1);
+        assert!(ice.paradox_active);
+
+        for (tier, hearts, restore, expected_mp) in [
+            (-2, 1, 2500, 3756),
+            (-3, 2, 5000, 8756),
+            (-3, 3, 10000, 10000),
+        ] {
+            let update = cast(&mut actor, ACTION_UMBRAL_SOUL, 0, 0, false);
+            assert_eq!(update.mp_restored, restore);
+            assert_eq!(actor.get_common_spawn().resource_points, expected_mp);
+            assert_eq!(state(&actor).element_stance, tier);
+            assert_eq!(state(&actor).umbral_hearts, hearts);
+        }
+
+        cast(&mut actor, ACTION_PARADOX, 1600, 0, true);
+        assert!(!state(&actor).paradox_active);
+        cast(&mut actor, ACTION_HIGH_FIRE_II, 1500, ASPECT_FIRE, true);
+        assert!(state(&actor).paradox_active);
+        assert_eq!(state(&actor).element_stance, 3);
+        assert_eq!(state(&actor).umbral_hearts, 3);
+
+        let mut two_hearts = player(-3, 2, 10000);
+        cast(&mut two_hearts, ACTION_TRANSPOSE, 0, 0, false);
+        assert!(!state(&two_hearts).paradox_active);
+    }
+
+    #[test]
+    fn replay_ice_hits_use_the_stance_before_the_hit() {
+        let mut actor = player(-1, 0, 200);
+        let update = cast(&mut actor, ACTION_BLIZZARD_III, 800, ASPECT_ICE, true);
+        assert_eq!(update.mp_restored, 2500);
+        assert_eq!(actor.get_common_spawn().resource_points, 2700);
+        assert_eq!(state(&actor).element_stance, -3);
+
+        let miss = cast(&mut actor, ACTION_BLIZZARD_IV, 800, ASPECT_ICE, false);
+        assert_eq!(miss.mp_restored, 0);
+        let hit = cast(&mut actor, ACTION_BLIZZARD_IV, 800, ASPECT_ICE, true);
+        assert_eq!(hit.mp_restored, 10000);
+        assert_eq!(actor.get_common_spawn().resource_points, 10000);
+
+        let mut from_fire = player(3, 2, 8000);
+        let swap = cast(
+            &mut from_fire,
+            ACTION_HIGH_BLIZZARD_II,
+            800,
+            ASPECT_ICE,
+            true,
+        );
+        assert_eq!(swap.mp_restored, 0);
+        assert_eq!(from_fire.get_common_spawn().resource_points, 8000);
+        assert_eq!(state(&from_fire).element_stance, -3);
+    }
+
+    #[test]
+    fn replay_flare_spends_current_mp_and_builds_astral_soul() {
+        let mut actor = player(3, 3, 8400);
+        cast(&mut actor, ACTION_FLARE, 0, ASPECT_FIRE, true);
+        assert_eq!(actor.get_common_spawn().resource_points, 2856);
+        assert_eq!(state(&actor).umbral_hearts, 0);
+        assert_eq!(state(&actor).astral_soul_stacks, 3);
+        for _ in 0..3 {
+            cast(&mut actor, ACTION_FIRE_IV, 800, ASPECT_FIRE, true);
+            actor.get_common_spawn_mut().resource_points = 2856;
+        }
+        assert_eq!(state(&actor).astral_soul_stacks, 6);
+        cast(&mut actor, ACTION_FLARE_STAR, 0, ASPECT_FIRE, true);
+        assert_eq!(state(&actor).astral_soul_stacks, 0);
+        cast(&mut actor, ACTION_FIRE_IV, 800, ASPECT_FIRE, true);
+        cast(&mut actor, ACTION_TRANSPOSE, 0, 0, false);
+        assert_eq!(state(&actor).astral_soul_stacks, 0);
+
+        let mut despair = player(3, 3, 1200);
+        cast(&mut despair, ACTION_DESPAIR, 0, ASPECT_FIRE, true);
+        assert_eq!(despair.get_common_spawn().resource_points, 0);
+        assert_eq!(state(&despair).umbral_hearts, 3);
+    }
+
+    #[test]
+    fn replay_firestarter_fire_iii_does_not_spend_a_heart_or_a_cast_buff() {
+        let mut actor = player(1, 3, 10000);
+        actor
+            .status_effects_mut()
+            .unwrap()
+            .add_with_source(STATUS_FIRESTARTER, 0, 60.0, PLAYER);
+        cast(&mut actor, ACTION_TRIPLECAST, 0, 0, false);
+        assert!(state(&actor).has_triplecast());
+        assert!(is_instant_without_cast_buff(ACTION_FIRE_III, 100, true));
+        assert!(!is_instant_without_cast_buff(ACTION_FIRE_III, 100, false));
+        cast(&mut actor, ACTION_FIRE_III, 2000, ASPECT_FIRE, true);
+        assert_eq!(actor.get_common_spawn().resource_points, 10000);
+        assert_eq!(state(&actor).umbral_hearts, 3);
+        assert_eq!(state(&actor).triplecast_stacks, 3);
+        assert!(
+            actor
+                .status_effects_mut()
+                .unwrap()
+                .get(STATUS_FIRESTARTER)
+                .is_none()
+        );
+
+        cast(&mut actor, ACTION_FIRE_III, 2000, ASPECT_FIRE, true);
+        assert_eq!(actor.get_common_spawn().resource_points, 8000);
+        assert_eq!(state(&actor).umbral_hearts, 2);
+    }
+
+    #[test]
+    fn replay_polyglot_timer_starts_with_the_first_spell_and_survives_swaps() {
+        let mut actor = player(0, 0, 10000);
+        cast(&mut actor, ACTION_FIRE_III, 2000, ASPECT_FIRE, true);
+        let start_deadline = state(&actor).polyglot_next_at.unwrap();
+        cast(&mut actor, ACTION_AMPLIFIER, 0, 0, false);
+        assert_eq!(state(&actor).polyglot_stacks, 1);
+        cast(&mut actor, ACTION_XENOGLOSSY, 0, 0, true);
+        assert_eq!(state(&actor).polyglot_stacks, 0);
+        cast(&mut actor, ACTION_TRANSPOSE, 0, 0, false);
+        assert_eq!(state(&actor).polyglot_next_at, Some(start_deadline));
+
+        let mut state = state(&actor).clone();
+        assert!(state.update_polyglot_timer(100, start_deadline));
+        assert_eq!(state.polyglot_stacks, 1);
+        assert_eq!(
+            state.polyglot_next_at,
+            Some(start_deadline + POLYGLOT_INTERVAL)
+        );
+        state.polyglot_stacks = 3;
+        assert!(state.update_polyglot_timer(100, start_deadline + POLYGLOT_INTERVAL));
+        assert_eq!(state.polyglot_stacks, 3);
+        assert_eq!(
+            state.polyglot_next_at,
+            Some(start_deadline + 2 * POLYGLOT_INTERVAL)
+        );
+        state.element_stance = 0;
+        assert!(state.update_polyglot_timer(100, start_deadline));
+        assert_eq!(state.polyglot_next_at, None);
+    }
+
+    #[test]
+    fn actor_gauge_serializes_to_the_recorded_payloads() {
+        let now = Instant::now();
+        let cases = [
+            (30000, 3, 0, 0, false, 0, [0x30, 0x75, 0x03, 0, 0, 0x01]),
+            (13048, 3, 2, 0, true, 6, [0xf8, 0x32, 0x03, 2, 0, 0x1b]),
+            (25852, -3, 2, 1, true, 0, [0xfc, 0x64, 0xfd, 2, 1, 0x03]),
+            (17842, -1, 0, 0, true, 0, [0xb2, 0x45, 0xff, 0, 0, 0x03]),
+        ];
+        for (ms, stance, hearts, stacks, paradox, soul, recorded) in cases {
+            let state = BlackMageState {
+                element_stance: stance,
+                umbral_hearts: hearts,
+                polyglot_stacks: stacks,
+                paradox_active: paradox,
+                astral_soul_stacks: soul,
+                polyglot_next_at: Some(now + Duration::from_millis(ms)),
+                ..Default::default()
+            };
+            let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
+                classjob_id: gauge_class_job_id(),
+                data: pack_black_mage_gauge(&state, 100, now),
+            });
+            let mut wire = Cursor::new(Vec::new());
+            segment.write_le(&mut wire).unwrap();
+            let mut payload = [0; 16];
+            payload[0] = 25;
+            payload[2..8].copy_from_slice(&recorded);
+            let wire = wire.into_inner();
+            assert_eq!(&wire[2..4], &803u16.to_le_bytes());
+            assert_eq!(&wire[16..], &payload);
+        }
+    }
+
+    #[test]
+    fn between_the_lines_uses_only_the_active_circle_as_destination() {
+        let mut actor = player(3, 0, 10000);
+        let position = glam::Vec3::new(-68.4, -194.0, -41.5);
+        assert!(ley_lines_action_result(&actor, ACTION_BETWEEN_THE_LINES).is_none());
+        let NetworkedActor::Player { combat_state, .. } = &mut actor else {
+            unreachable!();
+        };
+        combat_state.black_mage.ley_lines_position = Some(position);
+        combat_state.black_mage.ley_lines_expires_at = Some(Instant::now() + LEY_LINES_DURATION);
+        let (center, effect, lock) =
+            ley_lines_action_result(&actor, ACTION_BETWEEN_THE_LINES).unwrap();
+        assert_eq!(center.0, position);
+        assert_eq!(lock, 0.8);
+        assert_eq!(
+            effect,
+            TargetEffectKind::Teleport {
+                unk: [0; 5],
+                territory: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn changing_jobs_clears_the_black_mage_gauge_and_circle() {
+        let mut actor = player(3, 3, 10000);
+        cast(&mut actor, ACTION_TRIPLECAST, 0, 0, false);
+        let NetworkedActor::Player { combat_state, .. } = &mut actor else {
+            unreachable!();
+        };
+        let circle = ObjectId(2);
+        combat_state.black_mage.ley_lines_object_id = Some(circle);
+        assert_eq!(deactivate(&mut actor), Some(circle));
+        assert_eq!(*state(&actor), BlackMageState::default());
+        assert!(
+            actor
+                .status_effects_mut()
+                .unwrap()
+                .get(STATUS_TRIPLECAST)
+                .is_none()
+        );
     }
 }

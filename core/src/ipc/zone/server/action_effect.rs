@@ -135,6 +135,9 @@ pub enum TargetEffectKind {
     /// Seen during Head Graze.
     #[brw(magic = 8u8)]
     InterruptAction {},
+    /// Restores MP. Bit 7 of the final parameter directs the gain to the caster.
+    #[brw(magic = 11u8)]
+    MpGain { params: [u8; 5], amount: u16 },
     /// Executes/combies an action combo.
     #[brw(magic = 27u8)]
     ExecuteCombo {
@@ -257,6 +260,7 @@ pub enum TargetEffectKind {
     /// no-op for the base Teleport action, but retail always sends this so the action result is
     /// well-formed (one populated effect slot); an empty result (no effects) leaves the teleport-out
     /// visuals unresolved (the caster stays stuck in the teleport animation). `unk` is zero in captures.
+    /// Between the Lines sends this with territory 0 and an ActionEffect8 ground position.
     #[brw(magic = 61u8)]
     Teleport { unk: [u8; 5], territory: u16 },
     /// Unknown effect (that should be added!)
@@ -302,10 +306,15 @@ impl mlua::IntoLua for DamageType {
 #[cfg(feature = "server")]
 impl mlua::FromLua for DamageType {
     fn from_lua(value: mlua::Value, _: &mlua::Lua) -> mlua::Result<Self> {
-        match value {
-            mlua::Value::Integer(integer) => Ok(Self::from_repr(integer as u8).unwrap()),
-            _ => unreachable!(),
-        }
+        let damage_type = match &value {
+            mlua::Value::Integer(integer) => u8::try_from(*integer).ok().and_then(Self::from_repr),
+            _ => None,
+        };
+        damage_type.ok_or_else(|| mlua::Error::FromLuaConversionError {
+            from: value.type_name(),
+            to: "DamageType".into(),
+            message: Some("expected a registered damage type".into()),
+        })
     }
 }
 
