@@ -28,7 +28,10 @@ use icarus::GilShopItem::GilShopItemSheet;
 use icarus::GimmickRect::{GimmickRectRow, GimmickRectSheet};
 use icarus::HalloweenNpcSelect::HalloweenNpcSelectSheet;
 use icarus::HousingAethernet::HousingAethernetSheet;
+use icarus::HousingExterior::HousingExteriorSheet;
+use icarus::HousingInterior::HousingInteriorSheet;
 use icarus::HousingLandSet::{HousingLandSetSheet, LandSetElement};
+use icarus::HousingPreset::HousingPresetSheet;
 use icarus::IKDRoute::IKDRouteSheet;
 use icarus::InstanceContent::InstanceContentSheet;
 use icarus::Item::ItemSheet;
@@ -82,6 +85,7 @@ pub struct GameData {
     pub warp_sheet: WarpSheet,
     pub action_sheet: ActionSheet,
     pub trait_sheet: TraitSheet,
+    pub status_sheet: icarus::Status::StatusSheet,
     pub place_name_sheet: PlaceNameSheet,
     pub custom_talk_sheet: CustomTalkSheet,
     pub tribe_sheet: TribeSheet,
@@ -813,6 +817,9 @@ impl GameData {
         let action_sheet = ActionSheet::read_from(&mut resource_resolver, config.world.language())
             .expect("Failed to read Action, does the Excel files exist?");
 
+        let status_sheet =
+            icarus::Status::StatusSheet::read_from(&mut resource_resolver, config.world.language())
+                .expect("读取 Status 表失败");
         let trait_sheet = TraitSheet::read_from(&mut resource_resolver, config.world.language())
             .expect("Failed to read Trait, does the Excel files exist?");
 
@@ -904,6 +911,7 @@ impl GameData {
             warp_sheet,
             action_sheet,
             trait_sheet,
+            status_sheet,
             place_name_sheet,
             custom_talk_sheet,
             tribe_sheet,
@@ -2157,6 +2165,21 @@ impl GameData {
             ACTION_BLOODLETTER | ACTION_RAIN_OF_DEATH if level >= LEVEL_ENHANCED_BLOODLETTER => 3,
             ACTION_HEARTBREAK_SHOT => 3,
             25799 if level >= 88 => 2,
+            34670..=34673 | 35347 if level >= 96 => 3,
+            34674 | 35348 if level >= 86 => 2,
+            7432 if level >= 88 => 2,
+            3570 if level >= 98 => 2,
+            7386 => if level >= 88 {3} else {2},
+            16151 => if level>=84{2}else{1},
+            2874 | 2890 | 36979 | 36980 => if level>=74{3}else{2},
+            2876 => if level>=84{2}else{1},
+            16498 | 16499 => if level>=94{2}else{1},
+            25762 => if level>=84{3}else{2},
+            7499 => if level>=76{2}else{1},
+            16010 => if level>=78{3}else if level>=68{2}else{1},
+            34646 => if level>=84{3}else{2},
+            7518 => if level>=88{2}else{1},
+            24380|24381 => if level>=78{2}else{1},
             _ => base_charges,
         }
     }
@@ -2293,7 +2316,7 @@ impl GameData {
         let sheet = HousingLandSetSheet::read_from(&mut self.resource, Language::None).ok()?;
         let row = sheet.row(housing_id)?;
 
-        PlotSize::from_repr(row.LandSet[plot_index].PlotSize)
+        PlotSize::from_repr(row.LandSet.get(plot_index)?.PlotSize)
     }
 
     /// Returns the land sets in a housing district.
@@ -2302,6 +2325,79 @@ impl GameData {
         let row = sheet.row(housing_id)?;
 
         Some(row.LandSet.to_vec())
+    }
+
+    pub fn get_housing_preset(
+        &mut self,
+        permit_id: u32,
+        size: PlotSize,
+        district: u16,
+    ) -> Option<crate::housing::EstatePreset> {
+        use kawari::ipc::zone::{HouseExterior, HousingInteriorDetails};
+
+        let permit = self.item_sheet.row(permit_id)?;
+        if permit.ItemUICategory != 64 {
+            return None;
+        }
+        let sheet =
+            HousingPresetSheet::read_from(&mut self.resource, get_config().world.language())
+                .or_else(|_| HousingPresetSheet::read_from(&mut self.resource, Language::None))
+                .ok()?;
+        let preset = sheet.row(permit.AdditionalData)?;
+        let place = match district {
+            339 => 22,
+            340 => 23,
+            418 => 24,
+            641 => 2402,
+            979 => 25,
+            _ => return None,
+        };
+        if preset.HousingSize != size as u8 || preset.PlaceName != place {
+            return None;
+        }
+        let language = get_config().world.language();
+        let exterior = HousingExteriorSheet::read_from(&mut self.resource, language)
+            .or_else(|_| HousingExteriorSheet::read_from(&mut self.resource, Language::None))
+            .ok()?;
+        let interior = HousingInteriorSheet::read_from(&mut self.resource, language)
+            .or_else(|_| HousingInteriorSheet::read_from(&mut self.resource, Language::None))
+            .ok()?;
+        let item_model = |item_id: i32| {
+            self.item_sheet
+                .row(u32::try_from(item_id).ok()?)
+                .map(|item| item.AdditionalData)
+        };
+        let exterior_model = |item_id: i32| {
+            let model = item_model(item_id)?;
+            exterior.row(model)?;
+            u16::try_from(model).ok()
+        };
+        let interior_model = |item_id: i32| {
+            item_model(item_id)
+                .filter(|&model| interior.row(model).is_some())
+                .unwrap_or_default()
+        };
+        let mut details = HousingInteriorDetails::default();
+        details.ground_walls = interior_model(preset.InteriorWall);
+        details.ground_floor = interior_model(preset.InteriorFlooring);
+        details.ground_chandelier = interior_model(preset.InteriorLighting);
+        details.top_walls = interior_model(preset.OtherFloorWall);
+        details.top_floor = interior_model(preset.OtherFloorFlooring);
+        details.top_chandelier = interior_model(preset.OtherFloorLighting);
+        details.cellar_walls = interior_model(preset.BasementWall);
+        details.cellar_floor = interior_model(preset.BasementFlooring);
+        details.cellar_chandelier = interior_model(preset.BasementLighting);
+        details.unk_interior = interior_model(preset.MansionLighting);
+        Some(crate::housing::EstatePreset {
+            exterior: HouseExterior {
+                roof_id: exterior_model(preset.ExteriorRoof)?,
+                walls_id: exterior_model(preset.ExteriorWall)?,
+                windows_id: exterior_model(preset.ExteriorWindow)?,
+                door_id: exterior_model(preset.ExteriorDoor)?,
+                ..Default::default()
+            },
+            interior: details,
+        })
     }
 
     /// Returns a CommonSpawn with the NPC's equipment.
@@ -2346,6 +2442,12 @@ impl GameData {
         }
 
         None
+    }
+
+    pub fn get_estate_furniture_catalog_id(&mut self, item_id: u32, yard: bool) -> Option<u16> {
+        ((self.item_sheet.row(item_id)?.ItemUICategory == 76) == yard)
+            .then(|| self.get_furniture_catalog_id(item_id))
+            .flatten()
     }
 
     /// Returns the damage element of this action.

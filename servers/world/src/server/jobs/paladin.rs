@@ -85,7 +85,7 @@ pub struct PaladinState {
     goring_until: Option<Instant>,
     confiteor_until: Option<Instant>,
     honor_until: Option<Instant>,
-    auto_target: Option<ObjectId>,
+    pub(in crate::server) auto_target: Option<ObjectId>,
     auto_next: Option<Instant>,
     auto_disabled: bool,
     passage: Option<(kawari::common::Position, f32, Instant)>,
@@ -104,6 +104,11 @@ fn oath_cost(action: u32) -> u8 {
 
 pub(in crate::server) fn is_paladin(class_job: u8) -> bool {
     matches!(class_job, GLADIATOR | PALADIN)
+}
+
+/// 已接入服务器自动攻击循环的近战职业；忠义奖励仍只授予骑士。
+pub(in crate::server) fn uses_native_auto_attack(class_job:u8)->bool {
+    is_paladin(class_job) || super::warrior::is_warrior(class_job) || matches!(class_job,2|20|31|32|34|35|37|38|39|41)
 }
 
 pub(in crate::server) fn has_divine_magic_mastery(class_job: u8, level: u8) -> bool {
@@ -417,6 +422,7 @@ pub(in crate::server) fn mitigation_multiplier(actor: &NetworkedActor) -> f64 {
         (2674, 0.85),
         (3829, 0.6),
         (1191, 0.8),
+        (1179, 0.8),
     ];
     defenses
         .into_iter()
@@ -427,20 +433,13 @@ pub(in crate::server) fn mitigation_multiplier(actor: &NetworkedActor) -> f64 {
 }
 
 pub(in crate::server) fn outgoing_multiplier(actor: &NetworkedActor) -> f64 {
-    if actor
-        .status_effects()
-        .is_some_and(|s| s.get(1193).is_some())
-    {
-        0.9
-    } else {
-        1.0
-    }
+    [1193,860].into_iter().fold(1.0,|m,id|m*if actor.status_effects().is_some_and(|s|s.get(id).is_some()){0.9}else{1.0})
 }
 
 pub(in crate::server) fn enmity_multiplier(actor: &NetworkedActor) -> u32 {
     if actor
         .status_effects()
-        .is_some_and(|s| s.get(IRON_WILL).is_some())
+        .is_some_and(|s| [IRON_WILL, 91, 743, 1833].into_iter().any(|id| s.get(id).is_some()))
     {
         10
     } else {
@@ -800,8 +799,7 @@ pub(in crate::server) fn apply_area_action(
                 let amount = (f64::from(parameters.calc_heal_amount(400))
                     * white_mage::incoming_heal_multiplier(Some(actor)))
                     as u32;
-                let common = actor.get_common_spawn_mut();
-                common.health_points = common.health_points.saturating_add(amount).min(cap);
+                actor.apply_heal(amount);
                 effects.push(heal(amount, false));
             }
             result.push(id, effects);
@@ -852,6 +850,7 @@ pub(in crate::server) fn apply_area_action(
         };
         for (target, row) in &mut result.targets {
             if matches!(row[0].0, TargetEffectKind::Damage { .. }) {
+                let snapshot=TickDamageSnapshot{roll_modifiers:modifiers.against_target(instance.find_actor(target.object_id)).roll,..snapshot};
                 instance
                     .find_actor_mut(target.object_id)
                     .unwrap()
@@ -919,14 +918,14 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
             continue;
         };
         let state = &combat_state.paladin;
-        if !is_paladin(spawn.common.class_job)
+        if !uses_native_auto_attack(spawn.common.class_job)
             || spawn.common.health_points == 0
             || state.auto_disabled
             || state.auto_next.is_some_and(|next| next > now)
-            || actor.is_time_stopped()
+            || actor.is_action_locked()
             || actor
                 .status_effects()
-                .is_some_and(|statuses| statuses.get(1175).is_some())
+                .is_some_and(|statuses| statuses.get(1175).is_some()||statuses.get(1205).is_some()||statuses.get(1231).is_some()||statuses.get(1827).is_some())
         {
             continue;
         }
@@ -936,7 +935,7 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
         if !matches!(instance.find_actor(target),
             Some(enemy @ NetworkedActor::Npc { spawn, state, targetable: true, currently_invulnerable: false, .. })
                 if *state != NpcState::Dead && !spawn.common.owner_id.is_valid()
-                    && spawn.common.health_points > 0 && enemy.position().0.distance(actor.position().0) <= 3.0)
+                    && spawn.common.health_points > 0 && enemy.position().0.distance(actor.position().0) <= if matches!(actor.get_common_spawn().class_job,31|38){25.0}else{3.0})
         {
             continue;
         }
@@ -945,20 +944,24 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
         } else {
             2240
         };
-        let modifiers = action_damage_modifiers(Some(actor));
-        let base = parameters.calc_physical_damage(delay.saturating_mul(100) / 3000);
+        let mut modifiers = action_damage_modifiers(Some(actor));
+        modifiers.source_actor_id=Some(source);
+        let modifiers=modifiers.against_target(instance.find_actor(target));
+        let base = parameters.calc_auto_attack_damage(delay);
         let (amount, kind) = parameters
             .roll_damage_with_modifiers(modifiers.apply_base_damage(base), modifiers.roll);
+        let actual_delay=if matches!(spawn.common.class_job,2|20){delay*super::monk::auto_haste(actor)/100}else if spawn.common.class_job==34{delay*super::samurai::speed(actor)/100}else if spawn.common.class_job==41{delay*super::viper::speed(actor)/100}else{delay};
         ready.push((
             source,
             target,
-            delay,
+            actual_delay,
             amount,
             kind,
             enmity_multiplier(actor),
         ));
     }
     for (source, target, delay, amount, kind, enmity) in ready {
+        crate::server::revival::end_protection(network, instance, source);
         let Some(enemy) = instance.find_actor_mut(target) else {
             continue;
         };
@@ -982,13 +985,15 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
         let state = &mut combat_state.paladin;
         state.auto_next = Some(now + Duration::from_millis(u64::from(delay)));
         let level = spawn.common.level;
-        record_oath_hit(state, level);
+        if is_paladin(spawn.common.class_job) {record_oath_hit(state, level);}
         let gauge = state.gauge(level, now);
         let job = spawn.common.class_job;
         let mut effects = [TargetEffect::default(); 8];
         effects[0] = damage(amount, false);
-        if let TargetEffectKind::Damage { damage_kind, .. } = &mut effects[0].0 {
+        if let TargetEffectKind::Damage { damage_kind, damage_type, .. } = &mut effects[0].0 {
             *damage_kind = kind;
+            if job==31{*damage_type=DamageType::Piercing;}
+            if matches!(job,2|20){*damage_type=DamageType::Blunt;}
         }
         let target_id = kawari::common::ObjectTypeId {
             object_id: target,
@@ -997,8 +1002,8 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
             animation_target_id: target_id,
             target_id_again: target_id,
-            action_id: AUTO_ATTACK,
-            spell_id: AUTO_ATTACK as u16,
+            action_id: if job==31{8}else{AUTO_ATTACK},
+            spell_id: if job==31{8}else{AUTO_ATTACK as u16},
             action_type: ActionType::Action,
             target_count: 1,
             effects,
@@ -1012,10 +1017,11 @@ pub(in crate::server) fn refresh_auto_attacks(network: &mut NetworkState, instan
             FromServer::PacketSegment(ipc, source),
             DestinationNetwork::ZoneClients,
         );
-        if level >= 35 {
+        if level >= 35 && is_paladin(job) {
             send_job_gauge_update(network, source, job, gauge);
         }
         white_mage::send_hp_mp(network, instance, target);
+        super::role::heal_from_damage(network, instance, source, effects);
     }
 }
 
@@ -1142,6 +1148,7 @@ mod tests {
             let packet = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
                 classjob_id: PALADIN,
                 data: state.gauge(100, now),
+                extra: [0;6],
             });
             let mut wire = Cursor::new(Vec::new());
             packet.write_le(&mut wire).unwrap();

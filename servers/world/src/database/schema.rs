@@ -71,10 +71,25 @@ diesel::table! {
         client_language -> Integer,
         current_mount -> Integer,
         selected_poses -> BigInt,
+        housing_location -> Integer,
+    }
+}
+
+diesel::table! {
+    housing_estate (district, ward, plot) {
+        district -> Integer,
+        ward -> Integer,
+        plot -> Integer,
+        owner_id -> BigInt,
+        permit_id -> Integer,
+        estate_name -> Text,
+        visitors_allowed -> Bool,
+        state -> Text,
     }
 }
 
 diesel::joinable!(volatile -> character (content_id));
+diesel::allow_tables_to_appear_in_same_query!(housing_estate, character);
 
 diesel::table! {
     inventory (content_id) {

@@ -1391,6 +1391,7 @@ mod tests {
             let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
                 classjob_id: gauge_class_job_id(),
                 data: pack_black_mage_gauge(&state, 100, now),
+                extra: [0;6],
             });
             let mut wire = Cursor::new(Vec::new());
             segment.write_le(&mut wire).unwrap();

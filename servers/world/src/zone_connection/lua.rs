@@ -70,7 +70,10 @@ impl ZoneConnection {
                     self.event_finish(events).await;
                     run_finish_event = true;
                 }
-                LuaTask::UnlockClassJob { classjob_id } => {
+                LuaTask::UnlockClassJob {
+                    classjob_id,
+                    ensure_crystal,
+                } => {
                     let starting_level;
                     let soul_crystal_id;
                     {
@@ -104,29 +107,46 @@ impl ZoneConnection {
                     .await;
 
                     if let Some(item_id) = soul_crystal_id {
+                        let inventory = &mut self.player_data.inventory;
+                        if *ensure_crystal
+                            && (inventory.has_soul_crystal(item_id)
+                                || inventory
+                                    .pages
+                                    .iter()
+                                    .flat_map(|page| &page.slots)
+                                    .any(|item| item.item_id == item_id && item.quantity > 0))
+                        {
+                            continue;
+                        }
                         let soul_crystal = Item {
                             quantity: 1,
                             item_id,
                             ..Default::default()
                         };
 
-                        if let Some(destination) =
-                            self.player_data.inventory.add_in_next_free_armory_slot(13)
-                        {
-                            self.player_data.inventory.add_in_slot(
-                                soul_crystal,
-                                &destination.container,
-                                destination.slot,
-                            );
+                        let granted =
+                            if let Some(destination) = inventory.add_in_next_free_armory_slot(13) {
+                                inventory.add_in_slot(
+                                    soul_crystal,
+                                    &destination.container,
+                                    destination.slot,
+                                );
+                                true
+                            } else {
+                                *ensure_crystal
+                                    && inventory.add_in_next_free_slot(soul_crystal).is_some()
+                            };
+                        if granted {
                             self.send_inventory().await;
                         } else {
                             tracing::warn!(
-                                "Soul crystal armoury chest is full; not granting the job crystal for classjob {}.",
+                                "No space to grant the job crystal for classjob {}.",
                                 classjob_id
                             );
                         }
                     }
                 }
+                LuaTask::ClearJobCrystals => self.clear_job_crystals().await,
                 LuaTask::WarpAetheryte {
                     aetheryte_id,
                     housing_aethernet,
@@ -687,6 +707,7 @@ impl ZoneConnection {
                             self.old_zone_id,
                             self.old_position,
                             self.old_rotation,
+                            self.old_housing,
                         ))
                         .await;
                 }
@@ -804,6 +825,15 @@ impl ZoneConnection {
                         ))
                         .await;
                 }
+                LuaTask::EnterHousingWard {
+                    territory_id,
+                    ward,
+                    pop_range_id,
+                } => {
+                    self.enter_housing_ward(*territory_id, *ward, *pop_range_id)
+                        .await;
+                }
+                LuaTask::LeaveEstate => self.leave_estate().await,
                 LuaTask::RemoveCooldowns {} => {
                     self.handle
                         .send(ToServer::RemoveCooldowns(
@@ -840,6 +870,11 @@ impl ZoneConnection {
                             self.player_data.character.actor_id,
                             name.clone(),
                         ))
+                        .await;
+                }
+                LuaTask::CallAll => {
+                    self.handle
+                        .send(ToServer::CallAll(self.player_data.character.actor_id))
                         .await;
                 }
                 LuaTask::FinishDyeing {} => {

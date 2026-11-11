@@ -85,11 +85,15 @@ registerGMCommand(GM_IMMEDIATELY_ACTION, GM_DIR.."ImmediatelyAction.lua")
 -- Debug commands
 -- Please keep these in alphabetical order!
 
+registerCommand("callall",                          DBG_DIR.."CallAll.lua")
 registerCommand("cf",                               DBG_DIR.."JoinContent.lua")
 registerCommand("classjob",                         DBG_DIR.."ClassJob.lua")
+registerCommand("clearjobcrystals",                 DBG_DIR.."ClearJobCrystals.lua")
 registerCommand("festival",                         DBG_DIR.."Festival.lua")
+registerCommand("init",                             DBG_DIR.."InitCharacter.lua")
 registerCommand("inspect",                          GM_DIR.."InspectPlayer.lua") -- TODO: remove this once we figure out the GMInspect IPC opcode
 registerCommand("itemlevel",                        DBG_DIR.."SetItemLevel.lua")
+registerCommand("job100",                           DBG_DIR.."Job100.lua")
 registerCommand("joblevel",                         DBG_DIR.."JobLevel.lua")
 registerCommand("monies",                           DBG_DIR.."Monies.lua")
 registerCommand("nudge",                            DBG_DIR.."Nudge.lua")

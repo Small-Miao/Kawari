@@ -53,8 +53,6 @@ pub use crystals::{CrystalKind, CrystalsStorage};
 
 use crate::{GameData, ItemInfoQuery};
 
-use physis::TerritoryIntendedUse;
-
 const MAX_NORMAL_STORAGE: usize = 35;
 pub const MAX_LARGE_STORAGE: usize = 50;
 
@@ -669,6 +667,30 @@ impl Inventory {
         false
     }
 
+    /// 清理角色自身装备栏、兵装库和背包中的职业水晶，返回需要同步的槽位和数量。
+    pub(crate) fn clear_job_crystals(
+        &mut self,
+        mut is_job_crystal: impl FnMut(u32) -> bool,
+    ) -> Vec<(ContainerType, u16, u32)> {
+        let mut removed = Vec::new();
+        let equipped = &mut self.equipped.soul_crystal;
+        if !equipped.is_empty_slot() && is_job_crystal(equipped.item_id) {
+            removed.push((
+                ContainerType::Equipped,
+                physis::equipment::EquipSlot::SoulCrystal as u16,
+                std::mem::take(equipped).quantity,
+            ));
+        }
+        for storage in self.pages.iter_mut().chain([&mut self.armoury_soul_crystal]) {
+            for (index, item) in storage.slots.iter_mut().enumerate() {
+                if !item.is_empty_slot() && is_job_crystal(item.item_id) {
+                    removed.push((storage.kind, index as u16, std::mem::take(item).quantity));
+                }
+            }
+        }
+        removed
+    }
+
     /// Checks if the soul crystal exists in your inventory.
     pub fn has_soul_crystal(&mut self, id: u32) -> bool {
         // TODO: can you move the soul crystal somewhere else?
@@ -722,239 +744,126 @@ impl Inventory {
     }
 }
 
-/// Represents a single housing plot's collective inventory, both inside and out.
-// TODO: This will need to adjustments in 7.5x
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// 室内和庭院的家具及仓库按地块持久化。
+#[derive(Debug, Clone)]
 pub struct HousingInventory {
-    //pub plot_size: kawari::ipc::zone::PlotSize,
     pub interior: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
     pub interior_storeroom: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
-    // TODO: Unclear if we need to emulate this
-    pub interior_appearance: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
-    pub exterior: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
-    pub exterior_storeroom: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
-    // TODO: Unclear if we need to emulate this
-    pub exterior_appearance: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
+    pub yard: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
+    pub yard_storeroom: Vec<GenericStorage<MAX_LARGE_STORAGE>>,
 }
 
-impl HousingInventory {
-    pub const INT_STORAGE_APT_FC: usize = 2;
-    pub const INT_STORAGE_SMALL: usize = 3;
-    pub const INT_STORAGE_MEDIUM: usize = 4;
-    pub const INT_STORAGE_MANSION: usize = 8;
+impl Serialize for HousingInventory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let pages = self
+            .interior
+            .iter()
+            .chain(&self.interior_storeroom)
+            .chain(&self.yard)
+            .chain(&self.yard_storeroom);
+        serializer.collect_seq(pages.flat_map(|page| {
+            page.slots
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !item.is_empty_slot())
+                .map(|(slot, item)| (page.kind, slot as u16, item))
+        }))
+    }
 }
 
-// By default, be an apartment/fc chamber.
+impl<'de> Deserialize<'de> for HousingInventory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let slots = Vec::<(ContainerType, u16, Item)>::deserialize(deserializer)?;
+        let mut inventory = Self::default();
+        for (kind, slot, item) in slots {
+            let destination = inventory
+                .get_item_mut(kind, slot)
+                .filter(|item| item.is_empty_slot())
+                .ok_or_else(|| serde::de::Error::custom("住宅家具槽位无效或重复"))?;
+            *destination = item;
+        }
+        Ok(inventory)
+    }
+}
+
 impl Default for HousingInventory {
     fn default() -> Self {
+        use crate::housing::furniture_containers;
+        let pages = |yard, storeroom| {
+            furniture_containers(yard, storeroom)
+                .iter()
+                .copied()
+                .map(GenericStorage::new)
+                .collect()
+        };
         Self {
-            // plot_size: kawari::ipc::zone::PlotSize::Small,
-            interior: vec![
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems1,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems2,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems3,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems4,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems5,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems6,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems7,
-                ),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(
-                    ContainerType::HousingInteriorPlacedItems8,
-                ),
-            ],
-            interior_storeroom: vec![
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom1),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom2),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom3),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom4),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom5),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom6),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom7),
-                GenericStorage::<MAX_LARGE_STORAGE>::new(ContainerType::HousingInteriorStoreroom8),
-            ],
-            interior_appearance: vec![GenericStorage::<MAX_LARGE_STORAGE>::new(
-                ContainerType::HousingExteriorAppearance,
-            )],
-
-            exterior: vec![GenericStorage::<MAX_LARGE_STORAGE>::new(
-                ContainerType::HousingExteriorPlacedItems,
-            )],
-            exterior_storeroom: vec![GenericStorage::<MAX_LARGE_STORAGE>::new(
-                ContainerType::HousingExteriorPlacedItems,
-            )],
-            exterior_appearance: vec![GenericStorage::<MAX_LARGE_STORAGE>::new(
-                ContainerType::HousingExteriorAppearance,
-            )],
+            interior: pages(false, false),
+            interior_storeroom: pages(false, true),
+            yard: pages(true, false),
+            yard_storeroom: pages(true, true),
         }
     }
 }
 
 impl HousingInventory {
-    pub fn add_in_empty_slot(
+    pub fn pages(&self, yard: bool, storeroom: bool) -> &[GenericStorage<MAX_LARGE_STORAGE>] {
+        match (yard, storeroom) {
+            (true, false) => &self.yard,
+            (true, true) => &self.yard_storeroom,
+            (false, false) => &self.interior,
+            (false, true) => &self.interior_storeroom,
+        }
+    }
+
+    pub fn add(
         &mut self,
         item: Item,
-        desired_pages: DesiredHousingInventoryPages,
-    ) -> Option<ItemInfo> {
-        let desired_pages = match desired_pages {
-            DesiredHousingInventoryPages::Interior => &mut self.interior,
-            DesiredHousingInventoryPages::InteriorStoreroom => &mut self.interior_storeroom,
-            DesiredHousingInventoryPages::Exterior => {
-                if !self.exterior.is_empty() {
-                    &mut self.exterior
-                } else {
-                    return None;
-                }
-            }
-            DesiredHousingInventoryPages::ExteriorStoreroom => {
-                if !self.exterior_storeroom.is_empty() {
-                    &mut self.exterior_storeroom
-                } else {
-                    return None;
-                }
-            }
-            DesiredHousingInventoryPages::None => {
-                return None;
-            }
-        };
-
-        for page in desired_pages {
-            for (slot_index, slot) in page.slots.iter_mut().enumerate() {
-                if slot.quantity == 0 {
-                    slot.clone_from(&item);
-                    return Some(ItemInfo {
-                        slot: slot_index as u16,
-                        container: page.kind,
-                        ..(*slot).into()
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_desired_pages_from_intendeduse(
-        &self,
-        intended_use: TerritoryIntendedUse,
+        yard: bool,
         storeroom: bool,
-    ) -> DesiredHousingInventoryPages {
-        match intended_use {
-            TerritoryIntendedUse::HousingOutdoor => {
-                if storeroom {
-                    DesiredHousingInventoryPages::ExteriorStoreroom
-                } else {
-                    DesiredHousingInventoryPages::Exterior
-                }
-            }
-            TerritoryIntendedUse::HousingIndoor => {
-                if storeroom {
-                    DesiredHousingInventoryPages::InteriorStoreroom
-                } else {
-                    DesiredHousingInventoryPages::Interior
-                }
-            }
-            _ => DesiredHousingInventoryPages::None,
-        }
+        limit: usize,
+    ) -> Option<(ContainerType, u16)> {
+        let pages = match (yard, storeroom) {
+            (true, false) => &mut self.yard,
+            (true, true) => &mut self.yard_storeroom,
+            (false, false) => &mut self.interior,
+            (false, true) => &mut self.interior_storeroom,
+        };
+        let (page, slot, destination) = pages
+            .iter_mut()
+            .flat_map(|page| {
+                let kind = page.kind;
+                page.slots
+                    .iter_mut()
+                    .enumerate()
+                    .map(move |(slot, item)| (kind, slot, item))
+            })
+            .take(limit)
+            .find(|(_, _, item)| item.is_empty_slot())?;
+        *destination = item;
+        Some((page, slot as u16))
     }
 
-    fn get_container_mut(&mut self, container_type: &ContainerType) -> Option<&mut dyn Storage> {
-        match container_type {
-            ContainerType::HousingInteriorPlacedItems1 => Some(&mut self.interior[0]),
-            ContainerType::HousingInteriorPlacedItems2 => Some(&mut self.interior[1]),
-            ContainerType::HousingInteriorPlacedItems3 => Some(&mut self.interior[2]),
-            ContainerType::HousingInteriorPlacedItems4 => Some(&mut self.interior[3]),
-            ContainerType::HousingInteriorPlacedItems5 => Some(&mut self.interior[4]),
-            ContainerType::HousingInteriorPlacedItems6 => Some(&mut self.interior[5]),
-            ContainerType::HousingInteriorPlacedItems7 => Some(&mut self.interior[6]),
-            ContainerType::HousingInteriorPlacedItems8 => Some(&mut self.interior[7]),
-
-            ContainerType::HousingInteriorStoreroom1 => Some(&mut self.interior_storeroom[0]),
-            ContainerType::HousingInteriorStoreroom2 => Some(&mut self.interior_storeroom[1]),
-            ContainerType::HousingInteriorStoreroom3 => Some(&mut self.interior_storeroom[2]),
-            ContainerType::HousingInteriorStoreroom4 => Some(&mut self.interior_storeroom[3]),
-            ContainerType::HousingInteriorStoreroom5 => Some(&mut self.interior_storeroom[4]),
-            ContainerType::HousingInteriorStoreroom6 => Some(&mut self.interior_storeroom[5]),
-            ContainerType::HousingInteriorStoreroom7 => Some(&mut self.interior_storeroom[6]),
-            ContainerType::HousingInteriorStoreroom8 => Some(&mut self.interior_storeroom[7]),
-
-            ContainerType::HousingInteriorAppearance => Some(&mut self.interior_appearance[0]),
-            ContainerType::HousingExteriorAppearance => Some(&mut self.exterior_appearance[0]),
-
-            ContainerType::HousingExteriorPlacedItems => Some(&mut self.exterior[0]),
-            ContainerType::HousingExteriorStoreroom => Some(&mut self.exterior_storeroom[0]),
-            _ => None,
-        }
+    pub fn get_item_mut(&mut self, kind: ContainerType, slot: u16) -> Option<&mut Item> {
+        self.interior
+            .iter_mut()
+            .chain(&mut self.interior_storeroom)
+            .chain(&mut self.yard)
+            .chain(&mut self.yard_storeroom)
+            .find(|page| page.kind == kind)?
+            .slots
+            .get_mut(slot as usize)
     }
 
-    pub fn get_container(&self, container_type: ContainerType) -> Option<&dyn Storage> {
-        match container_type {
-            ContainerType::HousingInteriorPlacedItems1 => Some(&self.interior[0]),
-            ContainerType::HousingInteriorPlacedItems2 => Some(&self.interior[1]),
-            ContainerType::HousingInteriorPlacedItems3 => Some(&self.interior[2]),
-            ContainerType::HousingInteriorPlacedItems4 => Some(&self.interior[3]),
-            ContainerType::HousingInteriorPlacedItems5 => Some(&self.interior[4]),
-            ContainerType::HousingInteriorPlacedItems6 => Some(&self.interior[5]),
-            ContainerType::HousingInteriorPlacedItems7 => Some(&self.interior[6]),
-            ContainerType::HousingInteriorPlacedItems8 => Some(&self.interior[7]),
-
-            ContainerType::HousingInteriorStoreroom1 => Some(&self.interior_storeroom[0]),
-            ContainerType::HousingInteriorStoreroom2 => Some(&self.interior_storeroom[1]),
-            ContainerType::HousingInteriorStoreroom3 => Some(&self.interior_storeroom[2]),
-            ContainerType::HousingInteriorStoreroom4 => Some(&self.interior_storeroom[3]),
-            ContainerType::HousingInteriorStoreroom5 => Some(&self.interior_storeroom[4]),
-            ContainerType::HousingInteriorStoreroom6 => Some(&self.interior_storeroom[5]),
-            ContainerType::HousingInteriorStoreroom7 => Some(&self.interior_storeroom[6]),
-            ContainerType::HousingInteriorStoreroom8 => Some(&self.interior_storeroom[7]),
-
-            ContainerType::HousingInteriorAppearance => Some(&self.interior_appearance[0]),
-            ContainerType::HousingExteriorAppearance => Some(&self.exterior_appearance[0]),
-
-            ContainerType::HousingExteriorPlacedItems => Some(&self.exterior[0]),
-            ContainerType::HousingExteriorStoreroom => Some(&self.exterior_storeroom[0]),
-            _ => None,
-        }
+    pub fn get_item(&self, kind: ContainerType, slot: u16) -> Option<Item> {
+        self.interior
+            .iter()
+            .chain(&self.interior_storeroom)
+            .chain(&self.yard)
+            .chain(&self.yard_storeroom)
+            .find(|page| page.kind == kind)?
+            .slots
+            .get(slot as usize)
+            .copied()
+            .filter(|item| !item.is_empty_slot())
     }
-
-    /// Helper functions to reduce boilerplate
-    pub fn get_item_mut(
-        &mut self,
-        storage_id: ContainerType,
-        storage_index: u16,
-    ) -> Option<&mut Item> {
-        if let Some(container) = self.get_container_mut(&storage_id) {
-            return Some(container.get_slot_mut(storage_index));
-        }
-
-        None
-    }
-
-    pub fn get_item(&self, storage_id: ContainerType, storage_index: u16) -> Option<Item> {
-        if let Some(container) = self.get_container(storage_id) {
-            return Some(*container.get_slot(storage_index));
-        }
-
-        None
-    }
-}
-
-/// Used to decide which set of housing inventory pages to send.
-#[derive(Debug, Copy, Clone)]
-pub enum DesiredHousingInventoryPages {
-    None,
-    Exterior,
-    ExteriorStoreroom,
-    Interior,
-    InteriorStoreroom,
 }

@@ -757,8 +757,17 @@ impl WorldDatabase {
         // NOTE: The character table should always be last!
         {
             use schema::character::dsl::*;
-            diesel::delete(character.filter(content_id.eq(for_content_id as i64)))
-                .execute(&mut self.connection)
+            self.connection
+                .transaction::<_, diesel::result::Error, _>(|conn| {
+                    diesel::delete(
+                        schema::housing_estate::table
+                            .filter(schema::housing_estate::owner_id.eq(for_content_id as i64)),
+                    )
+                    .execute(conn)?;
+                    diesel::delete(character.filter(content_id.eq(for_content_id as i64)))
+                        .execute(conn)?;
+                    Ok(())
+                })
                 .unwrap();
         }
     }

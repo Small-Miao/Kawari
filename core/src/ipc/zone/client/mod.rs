@@ -460,20 +460,20 @@ pub enum ClientZoneIpcData {
         unk3: [u8; 4],
     },
     ShareStrategyBoard {
-        /// When the content id is 0, the client is starting a non-real-time session, or is initiating one but isn't ready yet.
-        content_id: u64,
+        /// Zero broadcasts the board; otherwise this is the intended recipient.
+        recipient_content_id: u64,
         board_data: StrategyBoard,
     },
     StrategyBoardReceived {
         content_id: u64,
-        #[brw(pad_after = 4)] // Seems to be empty/always zeroes
-        unk: u32,
+        #[brw(pad_after = 7)]
+        board_index: u8,
     },
     StrategyBoardUpdate(StrategyBoardUpdate),
-    RealtimeStrategyBoardFinished {
-        /// Both unknowns have data, but it's unclear what they are. They don't appear to be party ids or content ids.
-        unk1: u32,
-        unk2: u32,
+    RealtimeStrategyBoardControl {
+        operation: u8,
+        #[brw(pad_after = 6)]
+        reason: u8,
     },
     ApplyFieldMarkerPreset(WaymarkPreset),
     RequestFreeCompanyShortMessage {
@@ -691,6 +691,12 @@ pub enum ClientZoneIpcData {
         #[bw(map = write_bool_as::<u32>)]
         spawn_furniture: bool,
         unk2: [u8; 8], // Zeroes?
+    },
+    BuildHousingPreset {
+        permit_id: u32,
+        plot_index: u8,
+        #[brw(pad_after = 4)]
+        estate_name: [u8; 23],
     },
     TranslateFurniture {
         /// Which house this affects.

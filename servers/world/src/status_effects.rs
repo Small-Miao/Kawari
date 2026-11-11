@@ -30,6 +30,8 @@ pub struct TickDamageSnapshot {
 /// changing the network format.
 #[derive(Debug, Clone, Copy)]
 pub struct TickEffect {
+    /// 宠物消失后仍持续的效果以主人读取参数，协议来源仍保留宠物 ID。
+    pub stat_source_actor_id: Option<ObjectId>,
     /// The status this tick belongs to (so it's removed together with the status).
     pub effect_id: u16,
     pub kind: TickEffectKind,
@@ -37,6 +39,8 @@ pub struct TickEffect {
     pub potency: u16,
     /// Damage modifiers captured when the DoT was applied or refreshed.
     pub damage_snapshot: Option<TickDamageSnapshot>,
+    /// 持续治疗施加时锁定的治疗魔法增益；每跳仍独立计算治疗量。
+    pub healing_multiplier: f64,
     /// Who applied the DoT/HoT, for damage attribution.
     pub source_actor_id: ObjectId,
 }
@@ -52,6 +56,7 @@ pub struct BarrierEffect {
 #[derive(Debug, Clone, Copy)]
 struct StatusExpiration {
     effect_id: u16,
+    source_actor_id:ObjectId,
     expires_at: Instant,
 }
 
@@ -69,10 +74,18 @@ pub struct StatusEffects {
     tick_effects: Vec<TickEffect>,
     /// Damage barriers keyed by their owning status id. Server-side only.
     barriers: Vec<BarrierEffect>,
+    broken_barriers: Vec<(u16, ObjectId)>,
+    /// 服务端效果量独立于客户端层数参数，例如标准舞步的 2% / 5%。
+    magnitudes: std::collections::HashMap<u16,u16>,
+    /// 持续效果按施加者独立占槽；减伤/护盾仍遵循同名互斥规则。
+    source_scoped:std::collections::HashSet<u16>,
     dirty: bool,
 }
 
 impl StatusEffects {
+    fn scoped(&self,id:u16)->bool{self.source_scoped.contains(&id)||matches!(id,2586|1182|1847|1848|2600|2601|2605|3899)}
+    pub fn set_magnitude(&mut self,id:u16,value:u16){if self.get(id).is_some(){self.magnitudes.insert(id,value);}}
+    pub fn magnitude(&self,id:u16)->Option<u16>{self.get(id).map(|s|self.magnitudes.get(&id).copied().unwrap_or(s.param))}
     pub fn add(&mut self, effect_id: u16, effect_param: u16, duration: f32) {
         self.add_with_source(effect_id, effect_param, duration, ObjectId::default());
     }
@@ -89,7 +102,8 @@ impl StatusEffects {
         duration: f32,
         source_actor_id: ObjectId,
     ) {
-        let Some(status_effect) = self.find_or_create_status_effect(effect_id) else {
+        self.magnitudes.remove(&effect_id);
+        let Some(status_effect) = self.find_or_create_status_effect(effect_id,source_actor_id) else {
             tracing::warn!(
                 effect_id,
                 "Dropping status effect: all {MAX_STATUS_EFFECTS} slots are in use."
@@ -99,7 +113,7 @@ impl StatusEffects {
         status_effect.param = effect_param;
         status_effect.duration = duration;
         status_effect.source_actor_id = source_actor_id;
-        self.set_expiration(effect_id, duration);
+        self.set_expiration(effect_id, source_actor_id,duration);
         self.dirty = true
     }
 
@@ -116,15 +130,39 @@ impl StatusEffects {
         damage_snapshot: Option<TickDamageSnapshot>,
         source_actor_id: ObjectId,
     ) {
+        self.source_scoped.insert(effect_id);
         self.add_with_source(effect_id, effect_param, duration, source_actor_id);
-        self.tick_effects.retain(|t| t.effect_id != effect_id);
+        self.tick_effects.retain(|t| t.effect_id != effect_id||t.source_actor_id!=source_actor_id);
         self.tick_effects.push(TickEffect {
+            stat_source_actor_id: None,
             effect_id,
             kind,
             potency,
             damage_snapshot,
+            healing_multiplier: 1.0,
             source_actor_id,
         });
+    }
+
+    pub fn snapshot_healing_multiplier(
+        &mut self,
+        effect_id: u16,
+        source: ObjectId,
+        multiplier: f64,
+    ) {
+        if let Some(tick) = self.tick_effects.iter_mut().find(|t| {
+            t.effect_id == effect_id
+                && t.source_actor_id == source
+                && t.kind == TickEffectKind::Heal
+        }) {
+            tick.healing_multiplier = multiplier;
+        }
+    }
+
+    pub fn set_tick_stat_source(&mut self,effect_id:u16,source:ObjectId,stat_source:ObjectId){
+        if let Some(tick)=self.tick_effects.iter_mut().find(|t|t.effect_id==effect_id&&t.source_actor_id==source){
+            tick.stat_source_actor_id=Some(stat_source);
+        }
     }
 
     /// Adds (or refreshes) a status effect that absorbs incoming damage until `amount` is consumed.
@@ -155,9 +193,9 @@ impl StatusEffects {
     /// Periodic effects whose owning status is still active at this tick.
     pub fn tick_effects(&self, now: Instant) -> impl Iterator<Item = TickEffect> + '_ {
         self.tick_effects.iter().copied().filter(move |tick| {
-            self.position_of(tick.effect_id).is_some()
+            self.position_of_from(tick.effect_id,tick.source_actor_id).is_some()
                 && !self.expirations.iter().any(|expiration| {
-                    expiration.effect_id == tick.effect_id && expiration.expires_at <= now
+                    expiration.effect_id == tick.effect_id && expiration.source_actor_id==tick.source_actor_id && expiration.expires_at <= now
                 })
         })
     }
@@ -167,6 +205,10 @@ impl StatusEffects {
             .iter()
             .filter(move |expiration| expiration.expires_at <= now)
             .map(|expiration| expiration.effect_id)
+    }
+
+    pub fn expired_effects(&self,now:Instant)->impl Iterator<Item=(u16,ObjectId)>+'_ {
+        self.expirations.iter().filter(move|e|e.expires_at<=now).map(|e|(e.effect_id,e.source_actor_id))
     }
 
     /// Total remaining barrier amount.
@@ -186,6 +228,15 @@ impl StatusEffects {
     }
 
     /// Absorbs `damage` through active barriers and returns the leftover HP damage.
+    pub(crate) fn take_broken_barriers(&mut self) -> Vec<(u16, ObjectId)> {
+        std::mem::take(&mut self.broken_barriers)
+    }
+
+    /// 返回单个状态仍可吸收的伤害，用于展开和同类护盾强度比较。
+    pub(crate) fn barrier_remaining(&self,effect_id:u16)->u32{
+        self.barriers.iter().find(|b|b.effect_id==effect_id).map_or(0,|b|b.remaining)
+    }
+
     pub fn absorb_damage(&mut self, damage: u32) -> u32 {
         if damage == 0 || self.barriers.is_empty() {
             return damage;
@@ -220,6 +271,15 @@ impl StatusEffects {
                 .filter(|barrier| barrier.remaining == 0)
                 .map(|barrier| barrier.effect_id)
                 .collect();
+            self.broken_barriers.extend(
+                self.status_effects
+                    .iter()
+                    .filter(|s| {
+                        matches!(s.effect_id, 1178 | 3686 | 3687 | 3903 | 2607 | 2609 | 2612 | 2613 | 2597)
+                            && broken_effect_ids.contains(&s.effect_id)
+                    })
+                    .map(|s| (s.effect_id, s.source_actor_id)),
+            );
             self.barriers.retain(|barrier| barrier.remaining > 0);
             // Blank the slots rather than compacting, for the same reason as `remove`.
             for effect in &mut self.status_effects {
@@ -243,11 +303,12 @@ impl StatusEffects {
     /// which is what retail does -- a second sprint cast came back in the slot the expired potion
     /// had occupied rather than landing past it. Returns `None` once all
     /// [`MAX_STATUS_EFFECTS`] slots are taken, since the wire packet cannot carry more.
-    fn find_or_create_status_effect(&mut self, effect_id: u16) -> Option<&mut StatusEffect> {
+    fn find_or_create_status_effect(&mut self, effect_id: u16, source:ObjectId) -> Option<&mut StatusEffect> {
+        let scoped=self.scoped(effect_id);
         if let Some(i) = self
             .status_effects
             .iter()
-            .position(|effect| effect.effect_id == effect_id)
+            .position(|effect| effect.effect_id == effect_id&&(!scoped||effect.source_actor_id==source))
         {
             return Some(&mut self.status_effects[i]);
         }
@@ -275,12 +336,14 @@ impl StatusEffects {
         Some(&mut self.status_effects[i])
     }
 
-    fn set_expiration(&mut self, effect_id: u16, duration: f32) {
+    fn set_expiration(&mut self, effect_id: u16,source_actor_id:ObjectId, duration: f32) {
+        let scoped=self.scoped(effect_id);
         self.expirations
-            .retain(|expiration| expiration.effect_id != effect_id);
+            .retain(|expiration| expiration.effect_id != effect_id||scoped&&expiration.source_actor_id!=source_actor_id);
         if duration > 0.0 {
             self.expirations.push(StatusExpiration {
                 effect_id,
+                source_actor_id,
                 expires_at: Instant::now() + Duration::from_secs_f32(duration),
             });
         }
@@ -290,7 +353,7 @@ impl StatusEffects {
         let Some(expiration) = self
             .expirations
             .iter()
-            .find(|expiration| expiration.effect_id == effect.effect_id)
+            .find(|expiration| expiration.effect_id == effect.effect_id&&expiration.source_actor_id==effect.source_actor_id)
         else {
             return effect;
         };
@@ -326,16 +389,24 @@ impl StatusEffects {
             .position(|effect| effect.effect_id == effect_id)
     }
 
+    pub fn position_of_from(&self,id:u16,source:ObjectId)->Option<usize>{
+        if id==0{return None;}self.status_effects.iter().position(|e|e.effect_id==id&&e.source_actor_id==source)
+    }
+    pub fn get_from(&self,id:u16,source:ObjectId)->Option<StatusEffect>{self.position_of_from(id,source).map(|i|self.remaining_duration(self.status_effects[i]))}
+    pub fn remove_from(&mut self,id:u16,source:ObjectId){
+        if !self.scoped(id){if self.get_from(id,source).is_some(){self.remove(id);}return;}
+        if let Some(i)=self.position_of_from(id,source){self.status_effects[i]=StatusEffect::default();self.dirty=true;}
+        self.expirations.retain(|e|e.effect_id!=id||e.source_actor_id!=source);
+        self.tick_effects.retain(|e|e.effect_id!=id||e.source_actor_id!=source);
+    }
+
     pub fn remove(&mut self, effect_id: u16) {
-        if let Some(i) = self
-            .status_effects
-            .iter()
-            .position(|effect| effect.effect_id == effect_id)
-        {
+        self.magnitudes.remove(&effect_id);
+        for effect in self.status_effects.iter_mut().filter(|e|e.effect_id==effect_id) {
             // Blank the slot instead of closing the gap. The client keys buffs by the slot index it
             // was handed in EffectResult, so shifting the later statuses down would redraw them in
             // the wrong places on the next full StatusEffectList. Retail leaves the same hole.
-            self.status_effects[i] = StatusEffect::default();
+            *effect = StatusEffect::default();
             self.expirations
                 .retain(|expiration| expiration.effect_id != effect_id);
             self.dirty = true;
@@ -382,6 +453,33 @@ mod tests {
     /// Sprint. Used as the stand-in status here because effect id 0 marks an empty slot -- the Status
     /// sheet has no row 0, so a real status can never carry that id.
     const STATUS_SPRINT: u16 = 50;
+
+    #[test]
+    fn same_dot_from_two_players_keeps_separate_ticks_and_expirations(){
+        let mut s=StatusEffects::default();let a=ObjectId(1);let b=ObjectId(2);
+        s.add_tick(1228,0,2.0,TickEffectKind::DamagePhysical,50,None,a);
+        s.add_tick(1228,0,30.0,TickEffectKind::DamagePhysical,50,None,b);
+        assert_ne!(s.position_of_from(1228,a),s.position_of_from(1228,b));
+        assert_eq!(s.tick_effects(Instant::now()).count(),2);
+        let future=Instant::now()+Duration::from_secs(3);
+        assert_eq!(s.expired_effects(future).collect::<Vec<_>>(),vec![(1228,a)]);
+        assert_eq!(s.tick_effects(future).map(|t|t.source_actor_id).collect::<Vec<_>>(),vec![b]);
+        s.remove_from(1228,a);assert!(s.get_from(1228,b).is_some());assert_eq!(s.tick_effects(Instant::now()).count(),1);
+    }
+
+    #[test]
+    fn independent_hots_refresh_only_their_caster_and_global_clear_removes_all(){
+        let mut s=StatusEffects::default();for source in[ObjectId(1),ObjectId(2)]{s.add_tick(143,0,15.0,TickEffectKind::Heal,100,None,source);}
+        s.add_tick(143,0,15.0,TickEffectKind::Heal,200,None,ObjectId(1));
+        let ticks=s.tick_effects(Instant::now()).collect::<Vec<_>>();assert_eq!(ticks.len(),2);assert_eq!(ticks.iter().find(|t|t.source_actor_id==ObjectId(2)).unwrap().potency,100);
+        s.remove(143);assert!(s.get(143).is_none());assert_eq!(s.tick_effects(Instant::now()).count(),0);
+    }
+
+    #[test]
+    fn source_scoped_marks_coexist_but_same_named_shields_stay_exclusive(){
+        let mut s=StatusEffects::default();for source in[ObjectId(1),ObjectId(2)]{s.add_with_source(2586,10,30.0,source);s.add_barrier(297,0,30.0,500,source,10000);}
+        assert!(s.get_from(2586,ObjectId(1)).is_some());assert!(s.get_from(2586,ObjectId(2)).is_some());assert_eq!(s.barrier_amount(),500);assert_eq!(s.get(297).unwrap().source_actor_id,ObjectId(2));
+    }
 
     #[test]
     fn test_status_effects() {

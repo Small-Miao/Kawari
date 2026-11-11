@@ -774,12 +774,12 @@ pub enum ServerZoneIpcData {
     ActorGauge {
         /// The class (ideally the one you actually are) to update the gauge for. Index into the ClassJob Excel sheet.
         classjob_id: u8,
-        /// Class-specific gauge data: a little-endian `u64` (the client's `ActorGauge.Payload`). On
-        /// the wire it sits one pad byte after `classjob_id` (so at byte 2), followed by 6 trailing
-        /// pad bytes — a 16-byte payload total. The leading pad and the length both matter: without
-        /// them the gauge is read off-by-one / the packet is dropped, and the gauge stays blank.
-        #[brw(pad_before = 1, pad_after = 6)]
+        /// 职业数据从载荷偏移 2 开始；保留原有低 8 字节接口。
+        #[brw(pad_before = 1)]
         data: u64,
+        /// 后 6 字节并非全是填充：14251465 暗黑录像的偏移 10 保存血乱连招段数。
+        /// 载荷总长仍为 16 字节。未使用扩展的职业发送零。
+        extra: [u8; 6],
     },
     FreeCompanyInfo {
         unk: [u8; 80],
@@ -1083,6 +1083,10 @@ pub enum ServerZoneIpcData {
     HousingWardInfo(HousingWardInfo),
     HousingOccupiedLandInfo(HousingOccupiedLandInfo),
     HousingVacantLandInfo(HousingVacantLandInfo),
+    HousingLandPrice {
+        price: u32,
+        seconds_until_reduction: u32,
+    },
     HousingEstateGreeting(HousingEstateGreeting),
     ScenarioGuide {
         /// Not sure what this controls.
@@ -1178,16 +1182,8 @@ pub enum ServerZoneIpcData {
     StrategyBoardReceivedAck {
         /// The client ID of the player who received the board.
         content_id: u64,
-        #[brw(pad_after = 4)] // Seems to be empty/always zeroes
-        /// Unknown, possibly a result value. Observed as 1.
-        unk: u32,
-    },
-    BeginStrategyBoardSession {
-        /// All of these unknowns are possibly booleans or bitflags. See zone_connection/social.rs::received_strategy_board.
-        unk1: u32,
-        unk2: u32,
-        #[brw(pad_after = 4)] // Seems to be empty/always zeroes
-        unk3: u32,
+        #[brw(pad_after = 7)]
+        board_index: u8,
     },
     StrategyBoard {
         /// The content id of the sending player.
@@ -1197,7 +1193,10 @@ pub enum ServerZoneIpcData {
     },
     StrategyBoardUpdate(StrategyBoardUpdate),
     EndStrategyBoardSession {
-        unk: [u8; 16], // Always zeroes?
+        /// Zero closes the session; a nonzero value announces the current host.
+        host_content_id: u64,
+        #[brw(pad_after = 6)]
+        status: u16,
     },
     WaymarkUpdate {
         /// The id number of this waymark. 0 = A, 1 = B, and so on.
@@ -1341,15 +1340,15 @@ pub enum ServerZoneIpcData {
     },
     FurnitureList(FurnitureList),
     OwnedHousing {
-        #[brw(pad_after = 8)] // believe these are always empty?
-        unk1: LandData,
         #[brw(pad_after = 8)]
-        unk2: LandData,
+        free_company: LandData,
         #[brw(pad_after = 8)]
-        unk3: LandData,
-        unk4: LandData,
+        personal: LandData,
         #[brw(pad_after = 8)]
-        unk5: LandData,
+        personal_chambers: LandData,
+        shared_estate_1: LandData,
+        #[brw(pad_after = 8)]
+        shared_estate_2: LandData,
         /// Your apartment unit.
         #[brw(pad_after = 8)]
         apartment: LandData,

@@ -154,6 +154,7 @@ mod tests {
             let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
                 classjob_id: CLASSJOB_ASTROLOGIAN,
                 data: state.gauge(100),
+                extra: [0;6],
             });
             let mut wire = Cursor::new(Vec::new());
             ipc.write_le(&mut wire).unwrap();

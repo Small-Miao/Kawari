@@ -20,25 +20,16 @@ impl ZoneConnection {
     ) {
         let mut member_count = 0;
         if let Some((party_id, chatchannel_id, leader_actor_id, mut party_list)) = party_info {
-            if self.party_id == 0 {
-                self.party_id = party_id;
-            }
-
             member_count = party_list.len() as u8;
 
             let Some(leader_index) = party_list
                 .iter()
                 .position(|x: &PartyMemberEntry| x.actor_id == leader_actor_id)
             else {
-                tracing::error!(
-                    "Unable to determine party leader! What happened? {} {} {} {:#?}",
-                    party_id,
-                    chatchannel_id,
-                    leader_actor_id,
-                    party_list
-                );
+                tracing::error!(party_id, %leader_actor_id, member_count, "Party roster is missing its leader");
                 return;
             };
+            self.party_id = party_id;
 
             // We edit the party list to hide information of players not in our zone.
             for member in party_list.iter_mut() {
@@ -205,15 +196,6 @@ impl ZoneConnection {
     }
 
     pub async fn received_strategy_board(&mut self, content_id: u64, board_data: StrategyBoard) {
-        // TODO: Figure out what all these mean!
-        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::BeginStrategyBoardSession {
-            unk1: 0x01010100,
-            unk2: 0x04010101,
-            unk3: 0x00010101,
-        });
-
-        self.send_ipc_self(ipc).await;
-
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::StrategyBoard {
             content_id,
             board_data,
@@ -222,10 +204,10 @@ impl ZoneConnection {
         self.send_ipc_self(ipc).await;
     }
 
-    pub async fn strategy_board_ack(&mut self, content_id: u64) {
+    pub async fn strategy_board_ack(&mut self, content_id: u64, board_index: u8) {
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::StrategyBoardReceivedAck {
             content_id,
-            unk: 1,
+            board_index,
         });
 
         self.send_ipc_self(ipc).await;
@@ -237,9 +219,11 @@ impl ZoneConnection {
         self.send_ipc_self(ipc).await;
     }
 
-    pub async fn strategy_board_realtime_finished(&mut self) {
-        let ipc =
-            ServerZoneIpcSegment::new(ServerZoneIpcData::EndStrategyBoardSession { unk: [0; 16] });
+    pub async fn strategy_board_host(&mut self, host_content_id: u64, status: u16) {
+        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::EndStrategyBoardSession {
+            host_content_id,
+            status,
+        });
 
         self.send_ipc_self(ipc).await;
     }

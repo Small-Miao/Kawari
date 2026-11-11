@@ -220,6 +220,20 @@ fn duration_to_centisec(duration: Duration) -> u32 {
 
 #[derive(Debug, Clone, Default)]
 pub struct PlayerCombatState {
+    /// 普通复活请求仅属于当前实例，不随区域迁移保留。
+    pub(crate) pending_raise: Option<super::revival::PendingRaise>,
+    pub warrior: super::jobs::warrior::WarriorState,
+    pub dark_knight: super::jobs::dark_knight::DarkKnightState,
+    pub gunbreaker: super::jobs::gunbreaker::GunbreakerState,
+    pub scholar: super::jobs::scholar::ScholarState,
+    pub sage: super::jobs::sage::SageState,
+    pub machinist: super::jobs::machinist::MachinistState,
+    pub monk: super::jobs::monk::MonkState,
+    pub samurai: super::jobs::samurai::SamuraiState,
+    pub dancer: super::jobs::dancer::DancerState,
+    pub viper: super::jobs::viper::ViperState,
+    pub red_mage: super::jobs::red_mage::RedMageState,
+    pub reaper: super::jobs::reaper::ReaperState,
     /// GM 会话无敌；随区域迁移保留，不写入角色数据库。
     pub god_mode: bool,
     pub cooldowns: Vec<Option<CooldownState>>,
@@ -230,6 +244,7 @@ pub struct PlayerCombatState {
     pub paladin: PaladinState,
     pub(in crate::server) astrologian_heals: Vec<DelayedHeal>,
     pub white_mage: WhiteMageState,
+    pub pictomancer: super::jobs::pictomancer::PictomancerState,
     /// Whether the player currently has aggro (something hates them). Tracked so the server only
     /// sends a battle-state toggle (weapon drawn + combat music) when it actually changes.
     pub in_combat: bool,

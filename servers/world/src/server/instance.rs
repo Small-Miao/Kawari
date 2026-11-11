@@ -133,6 +133,12 @@ pub enum QueuedTaskData {
     DeadDespawn {
         actor_id: ObjectId,
     },
+    /// 爆炸/治疗演出结束后释放职业召唤物，不受主人的施法取消影响。
+    RetireJobPet {
+        owner_id: ObjectId,
+        actor_id: ObjectId,
+        stage: u8,
+    },
     /// Complete an EventAction
     CastEventAction {
         target: ObjectId,

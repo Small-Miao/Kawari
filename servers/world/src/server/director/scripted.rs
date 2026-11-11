@@ -140,6 +140,7 @@ pub fn mitigate(
     let mut multiplier = 1.0_f64;
     for (ids, scale) in [
         (&[71, 1191][..], 0.8),
+        (&[1179][..], 0.8),
         (&[74, 89, 747, 1834][..], 0.7),
         (&[3832, 3835, 3838][..], 0.6),
         (&[2674][..], 0.85),
@@ -149,7 +150,6 @@ pub fn mitigate(
         (&[299, 2638][..], 0.9),
         (&[2618][..], 0.9),
         (&[1873, 3985][..], 0.9),
-        (&[1826, 1934, 1951][..], 0.9),
         (&[1839][..], 0.9),
         (&[1894][..], 0.9),
     ] {
@@ -160,6 +160,9 @@ pub fn mitigate(
     if has(source, 1193) {
         multiplier *= 0.9;
     }
+    if has(source, 860) { multiplier *= 0.9; }
+    multiplier *= target.map_or(1.0,crate::server::jobs::machinist::mitigation);
+    multiplier *= target.map_or(1.0,crate::server::jobs::samurai::mitigation);
     if has(source, 1195) {
         multiplier *= if physical { 0.9 } else { 0.95 };
     }
@@ -174,15 +177,93 @@ pub fn mitigate(
     damage
 }
 
+fn ordained_action_effects(action: u32) -> Option<(TargetEffectKind, TargetEffectKind, f32)> {
+    let effect = match action {
+        18558 | 18559 | 18584 | 18858 | 18859 | 18860 | 19213 | 19214 => {
+            TargetEffectKind::Teleport {
+                unk: [0; 5],
+                territory: 0,
+            }
+        }
+        19039 | 19040 => TargetEffectKind::Miss,
+        18585 | 18586 => TargetEffectKind::Damage {
+            damage_kind: Default::default(),
+            damage_type: DamageType::Unique,
+            damage_element: DamageElement::Unknown,
+            bonus_percent: 0,
+            unk3: 0,
+            unk4: 0,
+            amount: 9_999_999,
+        },
+        _ => return None,
+    };
+    // 国服录像的两条效果依次为技能结果和携带本动作 ID 的 0x1B。
+    let continuation = TargetEffectKind::ExecuteCombo {
+        sequence: 0,
+        unk2: 0,
+        unk3: 0,
+        unk4: 0,
+        unk5: 0x80,
+        action_id: action as u16,
+    };
+    let animation_lock = match action {
+        18558 | 18559 | 18584 | 18858 | 18859 | 18860 => 3.1,
+        _ => 1.1,
+    };
+    Some((effect, continuation, animation_lock))
+}
+
+#[cfg(test)]
+mod ordained_tests {
+    use super::*;
+    use binrw::BinWrite;
+    use std::io::Cursor;
+
+    #[test]
+    fn ordained_results_encode_the_two_captured_effects() {
+        for (action, expected, expected_lock) in [
+            (18558, [0x3d, 0, 0, 0, 0, 0, 0, 0], 3.1),
+            (18559, [0x3d, 0, 0, 0, 0, 0, 0, 0], 3.1),
+            (19039, [0x01, 0, 0, 0, 0, 0, 0, 0], 1.1),
+            (19040, [0x01, 0, 0, 0, 0, 0, 0, 0], 1.1),
+            (18585, [0x03, 0, 0, 0, 0x98, 0x40, 0x7f, 0x96], 1.1),
+        ] {
+            let (effect, followup, animation_lock) = ordained_action_effects(action).unwrap();
+            let mut bytes = Cursor::new(Vec::new());
+            TargetEffect(effect).write_le(&mut bytes).unwrap();
+            TargetEffect(followup).write_le(&mut bytes).unwrap();
+            let [lo, hi] = (action as u16).to_le_bytes();
+            assert_eq!(&bytes.get_ref()[..8], &expected);
+            assert_eq!(&bytes.get_ref()[8..], &[0x1b, 0, 0, 0, 0, 0x80, lo, hi]);
+            assert_eq!(animation_lock, expected_lock);
+        }
+        assert!(ordained_action_effects(1).is_none());
+    }
+}
+
 pub fn register<M: UserDataMethods<LuaDirector>>(methods: &mut M) {
     // 演员自身动作或朝玩家发动的跳跃，不用通用地面 Helper 代替施法者。
-    methods.add_method_mut("play_action_targeted", |_, this, (source, action, target): (u32, u32, u32)| {
-        this.tasks.push(LuaDirectorTask::EmitEffect {
-            target: ObjectId(target), source: Some(ObjectId(source)), action_id: action,
-            effect: TargetEffectKind::None,
-        });
-        Ok(())
-    });
+    methods.add_method_mut(
+        "play_action_targeted",
+        |_, this, (source, action, target, ordained): (u32, u32, u32, Option<bool>)| {
+            let (effect, followup, animation_lock) = if ordained.unwrap_or(false) {
+                let (effect, followup, animation_lock) = ordained_action_effects(action)
+                    .ok_or_else(|| mlua::Error::runtime("未知的绝亚行动或静止特效动作"))?;
+                (effect, Some(followup), animation_lock)
+            } else {
+                (TargetEffectKind::None, None, ANIMATION_LOCK_TIME)
+            };
+            this.tasks.push(LuaDirectorTask::EmitEffect {
+                target: ObjectId(target),
+                source: Some(ObjectId(source)),
+                action_id: action,
+                effect,
+                followup,
+                animation_lock,
+            });
+            Ok(())
+        },
+    );
     methods.add_method_mut("slide_actor", |lua, this, (actor, pos, rotation): (u32, Value, f32)| {
         let position: Position = lua.from_value(pos)?;
         if !position.0.is_finite() || !rotation.is_finite() {

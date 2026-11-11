@@ -1,5 +1,5 @@
 -- 医养 / Medica III — AoE heal (server fans out) + HoT on the primary target.
--- TODO: the server does not fan the HoT out to the other heal targets yet.
+-- 范围持续恢复由服务器按实际队伍与半径传播。
 HEAL_POTENCY = 250
 HOT_DURATION = 15.0
 HOT_POTENCY = 175

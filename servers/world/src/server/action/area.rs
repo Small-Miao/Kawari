@@ -57,10 +57,24 @@ impl AreaResult {
         parameters: &BaseParameters,
         profile: AreaDamage,
     ) {
+        self.apply_damage_up_to(instance, caster, parameters, profile, MAX_AOE_TARGETS);
+    }
+
+    /// 混合伤害与治疗的动作需为后续队伍结果保留包内目标槽位。
+    pub fn apply_damage_up_to(
+        &mut self,
+        instance: &mut Instance,
+        caster: ObjectId,
+        parameters: &BaseParameters,
+        profile: AreaDamage,
+        target_limit: usize,
+    ) {
         let source = instance.find_actor(caster);
         let modifiers = action_damage_modifiers(source);
         let enmity = source.map_or(1, crate::server::jobs::paladin::enmity_multiplier);
-        let capacity = MAX_AOE_TARGETS.saturating_sub(self.targets.len());
+        let capacity = target_limit
+            .min(MAX_AOE_TARGETS)
+            .saturating_sub(self.targets.len());
         for (index, id) in enemies_in_range(instance, self.center.0, profile.radius)
             .into_iter()
             .take(capacity)
@@ -77,7 +91,7 @@ impl AreaResult {
                 parameters.calc_physical_damage(potency)
             };
             let (amount, kind) = parameters
-                .roll_damage_with_modifiers(modifiers.apply_base_damage(base), modifiers.roll);
+                .roll_damage_with_modifiers(modifiers.apply_base_damage(base), modifiers.against_target(instance.find_actor(id)).roll);
             let actor = instance.find_actor_mut(id).unwrap();
             if matches!(
                 actor,

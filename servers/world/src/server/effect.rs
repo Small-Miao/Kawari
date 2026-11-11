@@ -221,10 +221,10 @@ pub fn gain_effect_instance(
     // if the status already existed (a refresh, or the DoT/HoT tick registered it first via
     // add_tick), `add` reuses that slot instead of appending. Reporting the wrong index here makes
     // the client show the buff twice (one from this packet's index, one from the StatusEffectList).
-    let Some(index) = status_effects.position_of(effect_id).map(|i| i as u8) else {
+    let Some(index) = status_effects.position_of_from(effect_id,effect_source_actor_id).map(|i| i as u8) else {
         return 0;
     };
-    let effect = status_effects.get(effect_id).unwrap();
+    let effect = status_effects.get_from(effect_id,effect_source_actor_id).unwrap();
     if let Some(director) = &mut instance.director {
         if director.battle_started_at.is_some() {
             director
@@ -283,15 +283,20 @@ pub fn remove_effect_instance(
     Some(effect)
 }
 
-fn remove_effect_and_notify(
+pub(super) fn remove_effect_and_notify(
     network: &Arc<Mutex<NetworkState>>,
     instance: &mut Instance,
     actor_id: ObjectId,
     effect_id: u16,
 ) -> Option<StatusEffect> {
+    let source=instance.find_actor(actor_id)?.status_effects()?.get(effect_id)?.source_actor_id;
+    remove_effect_source_and_notify(network,instance,actor_id,effect_id,source)
+}
+
+fn remove_effect_source_and_notify(network:&Arc<Mutex<NetworkState>>,instance:&mut Instance,actor_id:ObjectId,effect_id:u16,source:ObjectId)->Option<StatusEffect>{
     let statuses = instance.find_actor_mut(actor_id)?.status_effects_mut()?;
-    let effect = statuses.get(effect_id)?;
-    statuses.remove(effect_id);
+    let effect = statuses.get_from(effect_id,source)?;
+    statuses.remove_from(effect_id,source);
     if let Some(director) = &mut instance.director {
         director
             .runtime
@@ -329,7 +334,7 @@ pub(super) fn expire_effects(
     let mut expired_by_actor = Vec::new();
     for (actor_id, actor) in &instance.actors {
         if let Some(statuses) = actor.status_effects() {
-            let ids: Vec<_> = statuses.expired_ids(now).collect();
+            let ids: Vec<_> = statuses.expired_effects(now).collect();
             if !ids.is_empty() {
                 expired_by_actor.push((*actor_id, ids));
             }
@@ -337,11 +342,19 @@ pub(super) fn expire_effects(
     }
     let mut expired = Vec::new();
     for (actor_id, ids) in expired_by_actor {
-        for effect_id in ids {
+        for (effect_id,source) in ids {
             if effect_id == 3532 {
                 super::limit_break::expire_magic_number(network.clone(), instance, actor_id);
             }
-            if remove_effect_and_notify(network, instance, actor_id, effect_id).is_some() {
+            if let Some(effect) = remove_effect_source_and_notify(network, instance, actor_id, effect_id,source) {
+                if effect_id == 3903 {
+                    super::jobs::white_mage::grant_divine_caressed(
+                        &mut network.lock(),
+                        instance,
+                        actor_id,
+                        effect.source_actor_id,
+                    );
+                }
                 expired.push((actor_id, effect_id));
             }
         }
@@ -374,7 +387,7 @@ pub(super) fn clear_job_effects(
                         .contains_key(&(actor_id, effect.effect_id))
                 })
             {
-                removed |= remove_effect_and_notify(network, instance, actor_id, effect.effect_id)
+                removed |= remove_effect_source_and_notify(network, instance, actor_id, effect.effect_id,effect.source_actor_id)
                     .is_some();
             }
         }

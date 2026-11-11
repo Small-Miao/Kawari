@@ -256,6 +256,7 @@ fn native_kefka_solo_and_party_use_recorded_actor_actions_and_reset() {
                         action_id,
                         target,
                         effect: TargetEffectKind::None,
+                        ..
                     } => {
                         if action_id == 47826 || action_id == 47827 {
                             assert_eq!((source, target), (boss, boss));

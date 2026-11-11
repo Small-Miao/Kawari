@@ -31,8 +31,8 @@ use kawari::{
     common::{ObjectId, ObjectTypeId, Position},
     ipc::zone::{
         ActionEffect1, ActionRequest, ActionType, ActorControlCategory, BattleNpcSubKind,
-        CharacterDataFlag, ObjectKind, ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc,
-        SpawnObject, TargetEffect, TargetEffectKind,
+        CharacterDataFlag, DisplayFlag, ObjectKind, ServerZoneIpcData, ServerZoneIpcSegment,
+        SpawnNpc, SpawnObject, TargetEffect, TargetEffectKind,
     },
 };
 
@@ -47,7 +47,6 @@ const ACTION_STONE: u32 = 119;
 const ACTION_CURE: u32 = 120;
 const ACTION_AERO: u32 = 121;
 const ACTION_MEDICA: u32 = 124;
-pub(crate) const ACTION_RAISE: u32 = 125;
 const ACTION_STONE_II: u32 = 127;
 const ACTION_CURE_III: u32 = 131;
 const ACTION_AERO_II: u32 = 132;
@@ -83,17 +82,12 @@ const ACTION_TEMPERANCE: u32 = 16536;
 const ACTION_GLARE_III: u32 = 25859;
 pub(crate) const ACTION_HOLY_III: u32 = 25860;
 pub(crate) const ACTION_LITURGY_OF_THE_BELL: u32 = 25862;
-/// 礼仪之铃（引爆）: the action the CN 7.51 client actually sends when the bell button is pressed
-/// while a bell is active (detonate early). The Action sheet row is an unrelated name — the
-/// client sends this id regardless, as confirmed by retail capture.
-pub(crate) const ACTION_LITURGY_OF_THE_BELL_DETONATE: u32 = 28507;
-/// The bell NPC's heal cast, shared by trigger / manual detonation / expiry.
+/// 当前国服录像中客户端实际请求的礼仪之铃手动引爆。
+pub(crate) const ACTION_LITURGY_OF_THE_BELL_DETONATE: u32 = 28509;
 const ACTION_BELL_HEAL: u32 = 25864;
-/// Animation (spell) id on the bell's heal cast for manual detonation (and, by symmetry, the
-/// damage trigger).
-pub(crate) const BELL_HEAL_SPELL_MANUAL: u16 = 25895;
-/// Animation (spell) id on the bell's heal cast for expiry detonation.
-const BELL_HEAL_SPELL_EXPIRY: u16 = 26108;
+/// 手动引爆录像确认 action 与 spell 均为 25864；自动路径共享本技能。
+pub(crate) const BELL_HEAL_SPELL_MANUAL: u16 = 25864;
+const BELL_HEAL_SPELL_EXPIRY: u16 = 25864;
 const ACTION_MEDICA_III: u32 = 37010;
 const ACTION_GLARE_IV: u32 = 37009;
 pub(crate) const ACTION_DIVINE_CARESS: u32 = 37011;
@@ -152,8 +146,6 @@ pub(crate) const STATUS_DIVINE_CARESSED: u16 = 3904;
 pub(crate) const STATUS_ASYLUM_AREA: u16 = 1911;
 /// 庇护所: standing inside Asylum (+10% healing received).
 pub(crate) const STATUS_ASYLUM_INSIDE: u16 = 1912;
-/// 衰弱: Raise weakness.
-pub(crate) const STATUS_WEAKNESS: u16 = 43;
 
 // ==================== Level gates (Trait sheet) ====================
 
@@ -194,9 +186,6 @@ const BELL_EXPIRE_POTENCY_PER_STACK: u32 = 200;
 const BELL_TRIGGER_COOLDOWN: Duration = Duration::from_secs(1);
 /// Assize restores 5% of max MP.
 const ASSIZE_MP_RESTORE_PERCENT: u32 = 5;
-/// Raise revives with this fraction of max HP, plus Weakness.
-const RAISE_HP_PERCENT: u32 = 30;
-const WEAKNESS_DURATION: f32 = 100.0;
 
 /// White Mage job state tracked server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -319,9 +308,19 @@ pub(crate) fn can_execute_white_mage_action(
     match action_id {
         ACTION_AFFLATUS_SOLACE => white_mage.lily_stacks > 0 && level >= LEVEL_LILY,
         ACTION_AFFLATUS_RAPTURE => white_mage.lily_stacks > 0 && level >= LEVEL_RAPTURE,
-        ACTION_AFFLATUS_MISERY => white_mage.blood_lily_stacks >= MAX_BLOOD_LILY,
-        ACTION_GLARE_IV => white_mage.glare_iv_stacks > 0,
-        ACTION_DIVINE_CARESS => status_effects.get(STATUS_DIVINE_CARESS_READY).is_some(),
+        ACTION_AFFLATUS_MISERY => {
+            level >= LEVEL_BLOOD_LILY && white_mage.blood_lily_stacks >= MAX_BLOOD_LILY
+        }
+        ACTION_GLARE_IV => {
+            level >= LEVEL_GLARE_IV
+                && white_mage.glare_iv_stacks > 0
+                && white_mage
+                    .glare_iv_expires_at
+                    .is_some_and(|t| t > Instant::now())
+        }
+        ACTION_DIVINE_CARESS => {
+            level >= LEVEL_DIVINE_CARESS && status_effects.get(STATUS_DIVINE_CARESS_READY).is_some()
+        }
         ACTION_LITURGY_OF_THE_BELL => level >= 90,
         ACTION_LITURGY_OF_THE_BELL_DETONATE => white_mage.has_bell_active(),
         _ => true,
@@ -378,7 +377,7 @@ pub(crate) fn update_white_mage_state_after_action(
     match action_id {
         ACTION_CURE => {
             // Freecure: 15% chance to make the next Cure II free.
-            if fastrand::u8(0..100) < FREECURE_PROC_CHANCE_PERCENT {
+            if level >= 32 && fastrand::u8(0..100) < FREECURE_PROC_CHANCE_PERCENT {
                 status_effects.add_with_source(
                     STATUS_FREECURE,
                     0,
@@ -548,15 +547,26 @@ pub(crate) fn take_bell_detonation(
 // ==================== Healing & mitigation modifiers ====================
 
 /// Outgoing heal multiplier from the caster's statuses (Temperance self: +20%).
-pub(crate) fn outgoing_heal_multiplier(caster: Option<&NetworkedActor>) -> f64 {
+pub(crate) fn outgoing_heal_multiplier(caster: Option<&NetworkedActor>, action: u32) -> f64 {
+    // 节制只增强治疗魔法，庇护所、铃、神名与法令等能力不受影响。
+    if !matches!(
+        action,
+        120 | 124 | 131 | 133 | 135 | 137 | 16531 | 16534 | 37010
+        | 185 | 186 | 190 | 37013 | 37015 | 37016 | 3541 | 16230
+        | 3594 | 3595 | 3600 | 3601 | 3610 | 37030
+        | 24284 | 24286 | 24291 | 24292 | 37034 | 24318
+    ) {
+        return 1.0;
+    }
     let Some(status_effects) = caster.and_then(NetworkedActor::status_effects) else {
         return 1.0;
     };
-    if status_effects.get(STATUS_TEMPERANCE_SELF).is_some() {
-        1.2
-    } else {
-        1.0
-    }
+    let mut multiplier=1.0;
+    if status_effects.get(STATUS_TEMPERANCE_SELF).is_some(){multiplier*=1.2;}
+    if status_effects.get(317).is_some()||status_effects.get(1875).is_some(){multiplier*=1.1;}
+    if status_effects.get(791).is_some(){multiplier*=1.2;}
+    if status_effects.get(3898).is_some(){multiplier*=1.2;}
+    multiplier
 }
 
 /// Incoming heal multiplier on the heal target (Asylum inside: +10%).
@@ -569,7 +579,12 @@ pub(crate) fn incoming_heal_multiplier(target: Option<&NetworkedActor>) -> f64 {
     } else {
         1.0
     };
-    asylum * target.map_or(1.0, super::astrologian::incoming_heal_multiplier)
+    let thrill = if status_effects.get(87).is_some_and(|s|s.duration>0.0 && s.param==20) {1.2} else {1.0};
+    let rampart=if status_effects.get(1191).is_some_and(|s|s.duration>0.0){1.15}else{1.0};
+    let protraction=if status_effects.get(2710).is_some_and(|s|s.duration>0.0){1.1}else{1.0};
+    let mantra=if status_effects.get(104).is_some(){1.1}else{1.0};
+    let magick_barrier=if status_effects.get(2707).is_some(){1.05}else{1.0};
+    asylum * thrill * rampart * protraction * mantra * magick_barrier * target.map_or(1.0, super::astrologian::incoming_heal_multiplier) * target.map_or(1.0,super::sage::incoming)
 }
 
 /// Damage mitigation multiplier from a player target's WHM statuses (Aquaveil 15%,
@@ -628,7 +643,7 @@ pub(crate) fn aoe_heal_profile(action_id: u32) -> Option<(f32, bool)> {
 pub(crate) fn party_buff_profile(action_id: u32) -> Option<(f32, u16, f32, u16)> {
     match action_id {
         // Plenary Indulgence: Confession (10% mitigation + bonus heal proc, 10s).
-        ACTION_PLENARY_INDULGENCE => Some((30.0, STATUS_CONFESSION, 10.0, 0)),
+        ACTION_PLENARY_INDULGENCE => Some((30.0, STATUS_CONFESSION, 10.0, (-10i16) as u16)),
         // Temperance: party mitigation (10%, 20s). The caster's +20% heal buff is applied by Lua.
         ACTION_TEMPERANCE => Some((50.0, STATUS_TEMPERANCE_PARTY, 20.0, 0)),
         _ => None,
@@ -676,7 +691,9 @@ pub(crate) fn fan_out_aoe_heal(
         let Some(actor) = instance.find_actor(member_id) else {
             continue;
         };
-        if actor.position().0.distance(center) > radius {
+        if actor.get_common_spawn().health_points == 0
+            || actor.position().0.distance(center) > radius
+        {
             continue;
         }
 
@@ -703,13 +720,7 @@ pub(crate) fn fan_out_aoe_heal(
         let Some(actor) = instance.find_actor_mut(member_id) else {
             continue;
         };
-        let common_spawn = actor.get_common_spawn_mut();
-        let before = common_spawn.health_points;
-        common_spawn.health_points = common_spawn
-            .health_points
-            .saturating_add(amount)
-            .min(common_spawn.max_health_points);
-        let amount_healed = common_spawn.health_points.saturating_sub(before);
+        let amount_healed = actor.apply_heal(amount);
 
         // Healing generates enmity for the caster, split across enemies engaged with the target.
         if amount_healed > 0 {
@@ -743,8 +754,9 @@ pub(crate) fn fan_out_aoe_heal(
                     }
                 }
             }
-            healed.push((member_id, amount_healed));
         }
+        // 满血仍需发送治疗演出；仇恨只按实际恢复量计算。
+        healed.push((member_id, amount));
     }
 
     healed
@@ -822,15 +834,6 @@ pub(crate) fn fan_out_divine_caress(
             from_actor_id,
             max_health_points,
         );
-        status_effects.add_tick(
-            STATUS_DIVINE_CARESSED,
-            0,
-            15.0,
-            crate::TickEffectKind::Heal,
-            200,
-            None,
-            from_actor_id,
-        );
         // The barrier status itself is shown to the client as a normal gain effect.
         status_effects.add_with_source(STATUS_DIVINE_CARESS_BARRIER, 0, 10.0, from_actor_id);
         buffed.push(member_id);
@@ -887,6 +890,9 @@ pub(crate) fn spawn_bell_actor(
     spawn.common.base_id = BELL_BNPC_BASE;
     spawn.common.name_id = BELL_BNPC_NAME;
     spawn.common.name = BELL_NAME.to_string();
+    // 当前国服录像 49.277 秒：铃模型 3437、显示标志 0x40008。
+    spawn.common.model_chara = 3437;
+    spawn.common.display_flags = DisplayFlag::UNK1 | DisplayFlag::UNK2;
     spawn.common.pet_id = BELL_PET_ID;
     spawn.common.owner_id = owner_actor_id;
     spawn.common.max_health_points = owner_hp;
@@ -899,20 +905,21 @@ pub(crate) fn spawn_bell_actor(
     spawn.character_data_flags = CharacterDataFlag::from_bits_retain(0x1);
 
     instance.insert_npc(bell_actor_id, spawn);
-
-    let Some(actor) = instance.find_actor(bell_actor_id) else {
-        return None;
-    };
-    let NetworkedActor::Npc { spawn, .. } = actor else {
-        return None;
-    };
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::SpawnNpc(spawn.clone()));
-    network.send_in_range_inclusive_instance(
-        bell_actor_id,
-        instance,
-        FromServer::PacketSegment(ipc, bell_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
+    if let Some(NetworkedActor::Npc {
+        state,
+        ai_paused,
+        targetable,
+        currently_invulnerable,
+        ..
+    }) = instance.find_actor_mut(bell_actor_id)
+    {
+        // 固定的技能演出演员：不能套用普通宠物的跟随、寻路或攻击行为。
+        *state = NpcState::Stay;
+        *ai_paused = true;
+        *targetable = false;
+        *currently_invulnerable = true;
+    }
+    network.spawn_inserted_actor_in_range(instance, bell_actor_id);
     send_effects_list_with(network, instance, bell_actor_id);
 
     Some(bell_actor_id)
@@ -1003,11 +1010,19 @@ pub(crate) fn send_bell_heal_effects(
             unk1: [0; 5],
             amount,
         });
+        effects[1] = TargetEffect(TargetEffectKind::ExecuteCombo {
+            sequence: 0,
+            unk2: 0,
+            unk3: 0,
+            unk4: 0,
+            unk5: 0x80,
+            action_id: ACTION_BELL_HEAL as u16,
+        });
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
             animation_target_id: target,
             target_id_again: target,
             action_id: ACTION_BELL_HEAL,
-            animation_lock: 0.0,
+            animation_lock: 1.1,
             rotation: 0.0,
             spell_id,
             source_sequence: 0,
@@ -1186,8 +1201,7 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
             .and_then(|caster| match caster {
                 NetworkedActor::Player { parameters, .. } => {
                     let base = parameters.calc_heal_amount(ASYLUM_TICK_POTENCY);
-                    // Temperance's self buff also boosts Asylum ticks.
-                    Some((base as f64 * outgoing_heal_multiplier(Some(caster))) as u32)
+                    Some(base)
                 }
                 _ => None,
             })
@@ -1198,7 +1212,8 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
             let Some(actor) = instance.find_actor(member_id) else {
                 continue;
             };
-            let inside = actor.position().0.distance(center) <= ASYLUM_RADIUS;
+            let inside = actor.get_common_spawn().health_points > 0
+                && actor.position().0.distance(center) <= ASYLUM_RADIUS;
             let has_status = actor
                 .status_effects()
                 .is_some_and(|s| s.get(STATUS_ASYLUM_INSIDE).is_some());
@@ -1211,19 +1226,14 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
                     heal_amount
                 };
                 let actor = instance.find_actor_mut(member_id).unwrap();
-                let common_spawn = actor.get_common_spawn_mut();
-                let before = common_spawn.health_points;
-                common_spawn.health_points = common_spawn
-                    .health_points
-                    .saturating_add(amount)
-                    .min(common_spawn.max_health_points);
-                let amount_healed = common_spawn.health_points.saturating_sub(before);
+                let amount_healed = actor.apply_heal(amount);
 
                 // Retail refreshes the inside-status every tick (5s duration) and resends the
                 // member's status list alongside the flying tick number.
-                if let Some(status_effects) = instance
-                    .find_actor_mut(member_id)
-                    .and_then(|a| a.status_effects_mut())
+                if level >= 78
+                    && let Some(status_effects) = instance
+                        .find_actor_mut(member_id)
+                        .and_then(|a| a.status_effects_mut())
                 {
                     status_effects.add_with_source(
                         STATUS_ASYLUM_INSIDE,
@@ -1273,7 +1283,7 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
         _ => false,
     };
     if bell_expired {
-        let outgoing_multiplier = outgoing_heal_multiplier(instance.find_actor(actor_id));
+        let outgoing_multiplier = 1.0;
         let detonation = instance
             .find_actor_mut(actor_id)
             .and_then(take_bell_detonation);
@@ -1307,7 +1317,9 @@ pub(crate) fn refresh_white_mage_runtime_state_on_actor(
             for &(member_id, _) in &healed {
                 send_hp_mp(network, instance, member_id);
             }
-            despawn_bell_actor(network, instance, actor_id, bell_actor_id);
+            if let Some(id) = bell_actor_id {
+                super::transient::retire(instance, actor_id, id);
+            }
             update.status_changed = true;
             update.changed = true;
         }
@@ -1394,7 +1406,7 @@ pub(crate) fn on_white_mage_took_damage(
                 }
                 _ => 0,
             };
-            (base, outgoing_heal_multiplier(Some(caster)))
+            (base, 1.0)
         })
         .unwrap_or((0, 1.0));
 
@@ -1420,7 +1432,9 @@ pub(crate) fn on_white_mage_took_damage(
     }
 
     if stacks_left == 0 {
-        despawn_bell_actor(network, instance, white_mage_actor_id, bell_actor_id);
+        if let Some(id) = bell_actor_id {
+            super::transient::retire(instance, white_mage_actor_id, id);
+        }
     }
     true
 }
@@ -1430,7 +1444,7 @@ pub(crate) fn on_white_mage_took_damage(
 /// Pack the WHM job gauge. Byte layout (FFXIVClientStructs WhiteMageGauge, data starts at
 /// the struct's 0x08, which is what ActorGauge carries):
 ///   [0..2] unused
-///   [2..4] LilyTimer (i16 LE, ms until the next Lily — runs only in combat)
+///   [2..4] LilyTimer (i16 LE, 已累积的毫秒数，战斗中递增)
 ///   [4]    Lily (0-3)
 ///   [5]    BloodLily (0-3)
 ///   [6..8] padding
@@ -1451,11 +1465,12 @@ pub(crate) fn build_white_mage_gauge_data(combat_state: &PlayerCombatState, leve
         white_mage
             .lily_next_at
             .map(|t| {
-                t.saturating_duration_since(Instant::now())
+                LILY_INTERVAL
+                    .saturating_sub(t.saturating_duration_since(Instant::now()))
                     .as_millis()
-                    .min(u128::from(u16::MAX)) as u16
+                    .min(20000) as u16
             })
-            .unwrap_or(20000)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -1465,25 +1480,108 @@ pub(crate) fn build_white_mage_gauge_data(combat_state: &PlayerCombatState, leve
     u64::from_le_bytes(bytes)
 }
 
-// ==================== Raise ====================
+/// 先确认玩家动作，再发送铃治疗与地面物生成，保证客户端演出顺序。
+pub(crate) fn finish_ground_action(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    owner: ObjectId,
+    action: u32,
+    ground_position: Option<Position>,
+    detonation: Option<(glam::Vec3, u32, Option<ObjectId>)>,
+) {
+    if let Some((center, potency, bell)) = detonation {
+        let (base, outgoing) = instance
+            .find_actor(owner)
+            .map(|actor| {
+                let base = match actor {
+                    NetworkedActor::Player { parameters, .. } => {
+                        parameters.calc_heal_amount(potency)
+                    }
+                    _ => 0,
+                };
+                (base, 1.0)
+            })
+            .unwrap_or((0, 1.0));
+        let healed = fan_out_aoe_heal(
+            network,
+            instance,
+            owner,
+            0,
+            center,
+            BELL_RADIUS,
+            base,
+            outgoing,
+        );
+        send_bell_heal_effects(
+            network,
+            instance,
+            bell.unwrap_or(owner),
+            &healed,
+            BELL_HEAL_SPELL_MANUAL,
+        );
+        for &(member, _) in &healed {
+            send_hp_mp(network, instance, member);
+        }
+        if let Some(id) = bell {
+            super::transient::retire(instance, owner, id);
+        }
+    }
+    if action == ACTION_LITURGY_OF_THE_BELL {
+        let position = ground_position.unwrap_or_else(|| {
+            instance
+                .find_actor(owner)
+                .map(|actor| actor.position())
+                .unwrap_or_default()
+        });
+        if let Some(bell_actor_id) = spawn_bell_actor(network, instance, owner, position)
+            && let Some(NetworkedActor::Player { combat_state, .. }) =
+                instance.find_actor_mut(owner)
+        {
+            combat_state.white_mage.bell_actor_id = Some(bell_actor_id);
+        }
+    } else if action == ACTION_ASYLUM {
+        let position = ground_position.unwrap_or_else(|| {
+            instance
+                .find_actor(owner)
+                .map(|actor| actor.position())
+                .unwrap_or_default()
+        });
+        let old_object_id = match instance.find_actor_mut(owner) {
+            Some(NetworkedActor::Player { combat_state, .. }) => {
+                combat_state.white_mage.asylum_object_id.take()
+            }
+            _ => None,
+        };
+        let object_id = spawn_asylum_object(network, instance, owner, position, old_object_id);
+        if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(owner) {
+            combat_state.white_mage.asylum_object_id = Some(object_id);
+        }
+    }
+}
 
-/// Revive a dead party member: back to normal mode with a fraction of max HP, plus
-/// Weakness (衰弱, 100s) as retail applies on raise. No-op if the target isn't dead.
-pub(crate) fn apply_raise(instance: &mut Instance, target_actor_id: ObjectId) -> bool {
-    let Some(actor) = instance.find_actor_mut(target_actor_id) else {
-        return false;
+/// 神爱环只在神爱抚护盾破裂或自然到期后开始，不与初始盾同时生效。
+pub(in crate::server) fn grant_divine_caressed(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    target: ObjectId,
+    source: ObjectId,
+) {
+    let Some(actor) = instance.find_actor_mut(target) else {
+        return;
     };
-
-    let common_spawn = actor.get_common_spawn_mut();
-    if common_spawn.health_points != 0 {
-        return false;
+    if actor.get_common_spawn().health_points == 0 {
+        return;
     }
-
-    common_spawn.mode = kawari::common::CharacterMode::Normal;
-    common_spawn.health_points = common_spawn.max_health_points * RAISE_HP_PERCENT / 100;
-
-    if let Some(status_effects) = actor.status_effects_mut() {
-        status_effects.add_with_source(STATUS_WEAKNESS, 0, WEAKNESS_DURATION, target_actor_id);
+    if let Some(statuses) = actor.status_effects_mut() {
+        statuses.add_tick(
+            STATUS_DIVINE_CARESSED,
+            0,
+            15.0,
+            crate::TickEffectKind::Heal,
+            200,
+            None,
+            source,
+        );
     }
-    true
+    send_effects_list_with(network, instance, target);
 }

@@ -676,6 +676,77 @@ fn proximity_trigger_waits_for_player_to_finish_loading() {
 }
 
 #[test]
+fn debug_limit_break_fills_instance_gauge_before_or_during_battle() {
+    use crate::{ClientHandle, common::ServerHandle, server::limit_break};
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::mpsc::channel;
+
+    let (mut instance, _, player) = actors();
+    let party_member = ObjectId(3);
+    let outsider = ObjectId(4);
+    instance.insert_empty_actor(party_member);
+    instance
+        .find_actor_mut(player)
+        .unwrap()
+        .get_common_spawn_mut()
+        .class_job = 19;
+
+    let mut network = NetworkState::default();
+    let (chan, _) = channel(1);
+    let handle = ServerHandle {
+        chan,
+        next_id: Arc::new(AtomicUsize::new(1)),
+    };
+    let mut recipients = [player, party_member, outsider].map(|actor_id| {
+        let id = handle.next_id();
+        let (channel, receiver) = channel(4);
+        let client = ClientHandle {
+            id,
+            channel,
+            actor_id,
+            content_id: 1,
+            account_id: 1,
+        };
+        network.clients.insert(id, (client, Default::default()));
+        receiver
+    });
+
+    assert_eq!(
+        limit_break::fill_gauge(&mut network, &mut Instance::default()),
+        None,
+    );
+    assert_eq!(
+        limit_break::fill_gauge(&mut network, &mut instance),
+        Some(false),
+    );
+    assert!(!limit_break::allowed(&instance, player, 199));
+    for (actor, receiver) in [player, party_member].into_iter().zip(&mut recipients) {
+        let FromServer::PacketSegment(packet, source) = receiver.try_recv().unwrap() else {
+            panic!("expected limit break gauge packet");
+        };
+        assert_eq!(source, actor);
+        assert!(matches!(
+            packet.data,
+            ServerZoneIpcData::ActorControlSelf(kawari::ipc::zone::ActorControlSelf {
+                category: ActorControlCategory::LimitBreakGauge {
+                    bars: 3,
+                    current_value: 30_000,
+                    max_value_per_bar: 10_000,
+                    ..
+                },
+            }),
+        ));
+    }
+    assert!(recipients[2].try_recv().is_err());
+    instance.director.as_mut().unwrap().start_battle();
+    assert_eq!(
+        limit_break::fill_gauge(&mut network, &mut instance),
+        Some(true),
+    );
+    assert!(limit_break::allowed(&instance, player, 199));
+}
+
+#[test]
 fn ultimate_limit_break_checks_job_consumes_gauge_and_refunds_only_once() {
     use crate::server::limit_break;
     use kawari::ipc::zone::ActionRequest;

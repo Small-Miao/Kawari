@@ -8,7 +8,7 @@ default-run = "kawari-actionaudit"
 workspace = true
 
 [dependencies]
-icarus = { workspace = true }
+icarus = { workspace = true, features = ["Pet"] }
 kawari = { path = "../../core" }
 physis = { workspace = true }
 tracing = { workspace = true }

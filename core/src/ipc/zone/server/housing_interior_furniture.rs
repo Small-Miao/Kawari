@@ -11,8 +11,8 @@ pub struct FurnitureList {
     pub index: u8,
     /// The number of these lists that will be sent.
     pub count: u8,
-    /// Seems to be some sort of outdoor vs indoor flag. If it's 0, it means this is for outdoor furniture, and 100 means it's for an interior.
-    pub unk2: u8,
+    /// 室内包内有效槽位数。室外包固定读取 100 项，此字段填 0。
+    pub slot_count: u8,
     /// The actual furnishings.
     #[br(count = Furniture::COUNT)]
     #[brw(pad_size_to = Furniture::COUNT * Furniture::SIZE)]

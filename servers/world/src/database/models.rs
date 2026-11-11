@@ -158,6 +158,7 @@ pub struct Volatile {
     /// The 8 persistent CPose selections (one index per PoseType category), packed into an
     /// i64 as little-endian bytes so byte `i` holds the pose for category `i`. See `Volatile::poses`.
     pub selected_poses: i64,
+    pub housing_location: i32,
 }
 
 impl Volatile {

@@ -17,8 +17,8 @@ use crate::{
     server::{
         actor::{NetworkedActor, NpcState},
         combat_state::{
-            CarriedPet, PlayerCombatState, SummonerAttunement, SummonerDemiPhase,
-            SummonerNextDemi, SummonerState,
+            CarriedPet, PlayerCombatState, SummonerAttunement, SummonerDemiPhase, SummonerNextDemi,
+            SummonerState,
         },
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{
@@ -758,6 +758,11 @@ pub(crate) fn update_summoner_gauge_if_needed(
     );
 }
 
+// 地星和礼仪之铃由各自技能管理，不能接受普通宠物的移动或召回指令。
+fn accepts_pet_commands(spawn: &SpawnNpc) -> bool {
+    !matches!(spawn.common.pet_id, 8 | 11 | 17 | 18 | 33)
+}
+
 pub(crate) fn dismiss_pet(
     network: &mut NetworkState,
     instance: &mut Instance,
@@ -767,7 +772,9 @@ pub(crate) fn dismiss_pet(
         .actors
         .iter()
         .filter_map(|(id, actor)| match actor {
-            NetworkedActor::Npc { spawn, .. } if spawn.common.owner_id == owner_actor_id => {
+            NetworkedActor::Npc { spawn, .. }
+                if spawn.common.owner_id == owner_actor_id && accepts_pet_commands(spawn) =>
+            {
                 Some(*id)
             }
             _ => None,
@@ -857,7 +864,8 @@ pub(crate) fn apply_pet_command(
                 .iter()
                 .filter_map(|(id, actor)| match actor {
                     NetworkedActor::Npc { spawn, .. }
-                        if spawn.common.owner_id == owner_actor_id =>
+                        if spawn.common.owner_id == owner_actor_id
+                            && accepts_pet_commands(spawn) =>
                     {
                         Some(*id)
                     }
@@ -1783,7 +1791,12 @@ pub(crate) fn spawn_carbuncle_with_fade_in(
     instance: &mut Instance,
     from_actor_id: ObjectId,
 ) {
-    spawn_fresh_carbuncle(network, instance, from_actor_id, CarbuncleReveal::ZoneFadeIn);
+    spawn_fresh_carbuncle(
+        network,
+        instance,
+        from_actor_id,
+        CarbuncleReveal::ZoneFadeIn,
+    );
 }
 
 fn spawn_fresh_carbuncle(
@@ -1921,7 +1934,11 @@ fn spawn_fresh_carbuncle(
 /// INVISIBLE flag so it arrives visible (a fade-in, not a birth animation). All identity/state
 /// (model, pet_id, owner_id, hp/mp, level, name, base_id) is preserved from the capture. Pure/
 /// disk-free so it can be unit-tested without `insert_npc`'s timeline load.
-fn reinstated_pet_spawn(mut spawn: SpawnNpc, owner_position: Position, owner_rotation: f32) -> SpawnNpc {
+fn reinstated_pet_spawn(
+    mut spawn: SpawnNpc,
+    owner_position: Position,
+    owner_rotation: f32,
+) -> SpawnNpc {
     let mut pet_position = owner_position;
     pet_position.0.x += owner_rotation.sin() * SUMMONER_PET_SPAWN_DISTANCE;
     pet_position.0.z += owner_rotation.cos() * SUMMONER_PET_SPAWN_DISTANCE;
@@ -1951,7 +1968,8 @@ pub(crate) fn reinstate_carried_pet(
         return;
     }
 
-    if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(from_actor_id)
+    if let Some(NetworkedActor::Player { combat_state, .. }) =
+        instance.find_actor_mut(from_actor_id)
     {
         combat_state.summoner.carbuncle_summoned = true;
     }

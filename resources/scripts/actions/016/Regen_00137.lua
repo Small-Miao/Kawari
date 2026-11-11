@@ -6,6 +6,7 @@ HOT_POTENCY = 250
 DURATION = 18.0
 
 function doAction(player, in_combo)
+    local HOT_POTENCY = player:get_level() >= 85 and 250 or 200
     effects = EffectsBuilder()
     effects:gain_hot_target(REGEN_STATUS, 0, DURATION, HOT_POTENCY)
 

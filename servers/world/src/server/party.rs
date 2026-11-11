@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod strategy_board;
+
 use parking_lot::Mutex;
 
 use crate::{
@@ -106,7 +108,7 @@ pub struct Party {
     pub members: Vec<PartyMember>,
     pub leader_id: ObjectId,
     pub chatchannel_id: u32, // There's no reason to store a full u64/ChatChannel here, as it's created properly in the chat connection!
-    pub stratboard_realtime_host: Option<u64>, // Only one player can send a board or host real-time sharing at a time
+    pub(crate) strategy_board: strategy_board::StrategyBoardSession,
     pub target_signs: [ObjectTypeId; NUM_TARGET_SIGNS], // NOTE: We deviate from retail here, which seems to have per-instance lists of marked targets, and instead just have one per party for simplicity.
     pub waymarks: HashMap<i32, WaymarkPositions>, // TODO: If/when we ever get unique instance identifiers, use those instead of the zone id.
     pub readycheck_host: Option<ObjectId>, // Only one ready check can be undertaken at a time.
@@ -141,15 +143,17 @@ impl Party {
         }
     }
 
-    pub fn auto_promote_member(&mut self) -> ObjectId {
-        for member in &self.members {
-            if member.is_valid() && member.is_online() && member.actor_id != self.leader_id {
-                self.leader_id = member.actor_id;
-                break;
-            }
+    fn ensure_loaded_leader(&mut self, party_list: &[PartyMemberEntry]) -> Option<ObjectId> {
+        let mut loaded_members = party_list
+            .iter()
+            .map(|member| member.actor_id)
+            .filter(|id| *id != ObjectId(0) && id.is_valid());
+        let first_loaded = loaded_members.next()?;
+        if first_loaded != self.leader_id && !loaded_members.any(|id| id == self.leader_id) {
+            self.leader_id = first_loaded;
         }
 
-        self.leader_id
+        Some(self.leader_id)
     }
 
     pub fn get_member_by_content_id(&self, content_id: u64) -> Option<PartyMember> {
@@ -181,56 +185,48 @@ impl Party {
 }
 
 fn build_party_list(party: &Party, data: &WorldServer) -> Vec<PartyMemberEntry> {
-    let mut party_list = Vec::<PartyMemberEntry>::new();
-
-    // NOTE: The client expects active party members to be at the beginning of the list, and for invalid party members (read: they have INVALID_OBJECT_ID as their actor id) to be at the end of the list! Failure to do this can cause very strange behaviour!
-
-    // Online members
-    for member in &party.members {
-        if member.is_online() {
-            'instance: for instance in &data.instances {
-                for (id, actor) in &instance.actors {
-                    let spawn = match actor {
-                        NetworkedActor::Player { spawn, .. } => spawn,
-                        _ => continue,
-                    };
-
-                    if member.actor_id == *id {
-                        party_list.push(PartyMemberEntry {
-                            account_id: spawn.account_id,
-                            content_id: spawn.content_id,
-                            name: spawn.common.name.clone(),
-                            actor_id: *id,
-                            classjob_id: spawn.common.class_job,
-                            classjob_level: spawn.common.level,
-                            health_points: spawn.common.health_points,
-                            max_health_points: spawn.common.max_health_points,
-                            resource_points: spawn.common.resource_points,
-                            max_resource_points: spawn.common.max_resource_points,
-                            current_zone_id: instance.zone.id,
-                            home_world_id: spawn.home_world_id,
-                            sync_positions: 1,
-                            unk2: 1,
-                            ..Default::default()
-                        });
-                        break 'instance; // break out of the instance loop to move on to the next member
-                    }
+    // Keep each member in their roster slot, including those still loading or offline.
+    party
+        .members
+        .iter()
+        .map(|member| {
+            if member.zone_client_id != ClientId::default()
+                && let Some(instance) = data.find_actor_instance(member.actor_id)
+                && let Some(spawn) = instance
+                    .find_actor(member.actor_id)
+                    .and_then(NetworkedActor::get_player_spawn)
+                && spawn.content_id != 0
+                && spawn.content_id == member.content_id
+            {
+                PartyMemberEntry {
+                    account_id: spawn.account_id,
+                    content_id: spawn.content_id,
+                    name: spawn.common.name.clone(),
+                    actor_id: member.actor_id,
+                    classjob_id: spawn.common.class_job,
+                    classjob_level: spawn.common.level,
+                    health_points: spawn.common.health_points,
+                    max_health_points: spawn.common.max_health_points,
+                    resource_points: spawn.common.resource_points,
+                    max_resource_points: spawn.common.max_resource_points,
+                    current_zone_id: instance.zone.id,
+                    home_world_id: spawn.home_world_id,
+                    sync_positions: 1,
+                    unk2: 1,
+                    ..Default::default()
+                }
+            } else {
+                PartyMemberEntry {
+                    account_id: member.account_id,
+                    content_id: member.content_id,
+                    name: member.name.clone(),
+                    home_world_id: member.world_id,
+                    actor_id: ObjectId(0),
+                    ..Default::default()
                 }
             }
-        } else {
-            // Offline members
-            party_list.push(PartyMemberEntry {
-                account_id: member.account_id,
-                content_id: member.content_id,
-                name: member.name.clone(),
-                home_world_id: member.world_id,
-                actor_id: ObjectId(0), // It doesn't seem to matter, but retail sets offline members' actor ids to 0. This is not the same as an invalid member with INVALID_OBJECT_ID!
-                ..Default::default()
-            });
-        }
-    }
-
-    party_list
+        })
+        .collect()
 }
 
 /// Helper function to retrieve an actor's party when given only an actor id.
@@ -722,6 +718,7 @@ pub fn handle_party_messages(
 
                 network.to_remove.append(&mut to_remove);
                 network.parties.get_mut(&party_id).unwrap().members = party; // Now we can give the clone back after all that nonsense
+                strategy_board::member_joined(&mut network, party_id, *new_member_content_id);
                 network.commit_parties = true;
             } else {
                 tracing::error!("AddPartyMember: Party id wasn't in the hashmap! What happened?");
@@ -739,9 +736,14 @@ pub fn handle_party_messages(
         ) => {
             let data = data.lock();
             let mut network = network.lock();
-            let party = network.parties.get(party_id).unwrap();
-
+            let Some(party) = network.parties.get_mut(party_id) else {
+                return true;
+            };
+            let previous_leader = party.leader_id;
             let party_list = build_party_list(party, &data);
+            let Some(leader_id) = party.ensure_loaded_leader(&party_list) else {
+                return true;
+            };
 
             let msg = FromServer::PartyUpdate(
                 PartyUpdateTargets {
@@ -751,8 +753,9 @@ pub fn handle_party_messages(
                     ..Default::default()
                 },
                 PartyUpdateStatus::MemberChangedZones,
-                Some((*party_id, party.chatchannel_id, party.leader_id, party_list)),
+                Some((*party_id, party.chatchannel_id, leader_id, party_list)),
             );
+            network.commit_parties |= leader_id != previous_leader;
 
             // Finally, tell everyone in the party about the update.
             network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
@@ -822,12 +825,14 @@ pub fn handle_party_messages(
 
             // A member leaving cancels any in-progress ContentFinder pop for the whole party.
             cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+            let disbanding = network.parties.get(party_id).is_some_and(|party| party.get_member_count() <= 2);
+            strategy_board::member_departed(&mut network, *party_id, *execute_content_id, disbanding);
 
             let party_list;
             let leaving_zone_client_id;
             let leaving_chat_client_id;
             let chatchannel_id;
-            let mut leader_id;
+            let leader_id;
             let member_count;
             {
                 let Some(party) = network.parties.get_mut(party_id) else {
@@ -848,14 +853,14 @@ pub fn handle_party_messages(
                 party.remove_member(*execute_actor_id);
                 party.portraits.remove(execute_actor_id);
                 member_count = party.get_member_count();
-                leader_id = party.leader_id;
-
-                // If the leader left the party, and there are still enough members, auto-promote the next available player
-                if *execute_actor_id == party.leader_id && member_count >= 2 {
-                    leader_id = party.auto_promote_member();
-                }
-
                 party_list = build_party_list(party, &data);
+                leader_id = party.ensure_loaded_leader(&party_list);
+                if leader_id.is_none() && party.leader_id == *execute_actor_id
+                    && let Some(member) = party.members.iter().find(|member| member.is_valid())
+                {
+                    // Keep a persistable leader until a remaining member finishes loading.
+                    party.leader_id = member.actor_id;
+                }
             }
 
             let update_status;
@@ -866,38 +871,24 @@ pub fn handle_party_messages(
                 party_info = None;
             } else {
                 update_status = PartyUpdateStatus::MemberLeftParty;
-                party_info = Some((*party_id, chatchannel_id, leader_id, party_list));
+                party_info = leader_id.map(|id| (*party_id, chatchannel_id, id, party_list));
             }
 
-            let msg = FromServer::PartyUpdate(
-                PartyUpdateTargets {
-                    execute_account_id: *execute_account_id,
-                    execute_content_id: *execute_content_id,
-                    execute_name: execute_name.clone(),
-                    ..Default::default()
-                },
-                update_status,
-                party_info,
-            );
-
-            let leaver_msg = FromServer::PartyUpdate(
-                PartyUpdateTargets {
-                    execute_account_id: *execute_account_id,
-                    execute_content_id: *execute_content_id,
-                    execute_name: execute_name.clone(),
-                    ..Default::default()
-                },
-                update_status,
-                None,
-            );
-
-            // Tell everyone in the party about the update.
-            network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
+            let targets = PartyUpdateTargets {
+                execute_account_id: *execute_account_id,
+                execute_content_id: *execute_content_id,
+                execute_name: execute_name.clone(),
+                ..Default::default()
+            };
+            if party_info.is_some() || member_count < 2 {
+                let msg = FromServer::PartyUpdate(targets.clone(), update_status, party_info);
+                network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
+            }
 
             // Tell the leaver that they're not in the party anymore.
             network.send_to(
                 leaving_zone_client_id,
-                leaver_msg,
+                FromServer::PartyUpdate(targets, update_status, None),
                 DestinationNetwork::ZoneClients,
             );
             network.send_to(
@@ -928,6 +919,7 @@ pub fn handle_party_messages(
             // Disbanding cancels any in-progress ContentFinder pop before the party is removed, so
             // accepted members (who have no client-side timer) aren't stranded in the waiting popup.
             cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+            strategy_board::close(&mut network, *party_id);
 
             let msg = FromServer::PartyUpdate(
                 PartyUpdateTargets {
@@ -971,11 +963,15 @@ pub fn handle_party_messages(
             // Kicking a member cancels any in-progress ContentFinder pop for the whole party.
             cancel_content_finder_vote(&mut network, *party_id, 0x0373);
 
-            let party = network.parties.get_mut(party_id).unwrap();
-
+            let Some(party) = network.parties.get(party_id) else {
+                return true;
+            };
             let Some(member) = party.get_member_by_content_id(*target_content_id) else {
                 return true;
             };
+            let disbanding = party.get_member_count() <= 2;
+            strategy_board::member_departed(&mut network, *party_id, *target_content_id, disbanding);
+            let party = network.parties.get_mut(party_id).unwrap();
             party.remove_member(member.actor_id);
             party.portraits.remove(&member.actor_id);
 
@@ -1068,21 +1064,14 @@ pub fn handle_party_messages(
 
             // A member disconnecting mid-vote cancels the ContentFinder pop for the whole party.
             cancel_content_finder_vote(&mut network, *party_id, 0x0373);
+            strategy_board::member_departed(&mut network, *party_id, *execute_content_id, false);
 
             let party = &mut network.parties.get_mut(party_id).unwrap();
             party.set_member_offline(*from_actor_id);
 
-            if party.get_online_member_count() > 0 {
-                let party_list = build_party_list(party, &data);
-
-                // Auto-promote the first available player to leader if the previous leader went offline.
-                // In this situation: retail uses PartyLeaderWentOffline as the update status, followed by sending another full MemberWentOffline update,
-                // but this is very inefficient and wasteful, so we will not do that (unless we have good reason to).
-                // The client still accepts a leader change during MemberWentOffline.
-                if party.leader_id == *from_actor_id {
-                    party.leader_id = party.auto_promote_member();
-                }
-
+            let previous_leader = party.leader_id;
+            let party_list = build_party_list(party, &data);
+            if let Some(leader_id) = party.ensure_loaded_leader(&party_list) {
                 let msg = FromServer::PartyUpdate(
                     PartyUpdateTargets {
                         execute_account_id: *execute_account_id,
@@ -1091,11 +1080,16 @@ pub fn handle_party_messages(
                         ..Default::default()
                     },
                     PartyUpdateStatus::MemberWentOffline,
-                    Some((*party_id, party.chatchannel_id, party.leader_id, party_list)),
+                    Some((*party_id, party.chatchannel_id, leader_id, party_list)),
                 );
+                network.commit_parties |= leader_id != previous_leader;
 
                 network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
-            } else {
+            } else if party
+                .members
+                .iter()
+                .all(|member| member.zone_client_id == ClientId::default())
+            {
                 // If nobody in the party is online, disband it.
                 // Retail keeps it around for ~2 hours or so if everyone is offline, but there's no point doing that.
                 // TODO: If we care about parties persisting through everyone being offline, so that instanced content for example can be fully restored, then we should instead either keep it in the global state regardless, or only push this party for removal *after* writing to the db. It should be fairly simple to do with something like a "to_remove_parties" vec that we process in mod.rs. If we do end up implementing this idea, then ToServer::PartyMemberReturned should also be updated to recreate the party in the global server state since currently it has no logic to do so.
@@ -1113,30 +1107,14 @@ pub fn handle_party_messages(
                 return true;
             };
 
-            let member;
-            {
-                let Some(my_member) = party
-                    .members
-                    .iter()
-                    .find(|m| m.actor_id == *execute_actor_id)
-                else {
-                    return true;
-                };
-
-                member = my_member.clone();
-            }
-
-            // If the returning player is the only one online, promote them to ensure we can have someone manage their party and so that the ZoneConnection won't reject our update.
-            if party.get_online_member_count() == 1 {
-                party.auto_promote_member();
-            }
-
-            let party_list;
-            {
-                party_list = build_party_list(party, &data);
-            }
-
-            let chatchannel_id = party.chatchannel_id;
+            let Some(member) = party.get_member_by_actor_id(*execute_actor_id) else {
+                return true;
+            };
+            let previous_leader = party.leader_id;
+            let party_list = build_party_list(party, &data);
+            let Some(leader_id) = party.ensure_loaded_leader(&party_list) else {
+                return true;
+            };
 
             let msg = FromServer::PartyUpdate(
                 PartyUpdateTargets {
@@ -1146,19 +1124,16 @@ pub fn handle_party_messages(
                     ..Default::default()
                 },
                 PartyUpdateStatus::MemberReturned,
-                Some((*party_id, party.chatchannel_id, party.leader_id, party_list)),
+                Some((*party_id, party.chatchannel_id, leader_id, party_list)),
             );
+            network.commit_parties |= leader_id != previous_leader;
 
             network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
-
-            // Inform the returner about their party's chatchannel.
-            let msg = FromServer::SetPartyChatChannel(chatchannel_id);
-            network.send_to_by_actor_id(*execute_actor_id, msg, DestinationNetwork::ChatClients);
 
             // Next, inform the player about the party's target markers/signs, and waymarks.
             send_party_target_signs(&mut network, *party_id, *execute_actor_id);
             send_party_waymarks(&mut network, *party_id, *execute_actor_id, *zone_id);
-            network.commit_parties = true; // We might've changed leaders here, so commit the new changes.
+            strategy_board::member_joined(&mut network, *party_id, member.content_id);
 
             true
         }
@@ -1166,48 +1141,15 @@ pub fn handle_party_messages(
             from_actor_id,
             from_content_id,
             party_id,
-            client_content_id,
+            recipient_content_id,
             board_data,
         ) => {
-            let mut network = network.lock();
-
-            // TODO: Once we understand the board data, should we perform validation/sanitization to ensure it's not malicious in some way?
-
-            // client_content_id is what the client passed to us. If it's 0, they're either starting a regular share, or beginning a real-time share, which is followed up by a second share moments later that has the content id set. If it's set, the board is not sent to the party again, and we should be expecting to see real-time update opcodes.
-            if *client_content_id == 0 {
-                // Inform the party about the board.
-                let msg = FromServer::StrategyBoardShared(*from_content_id, board_data.clone());
-                network.send_to_party(
-                    *party_id,
-                    Some(*from_actor_id),
-                    msg,
-                    DestinationNetwork::ZoneClients,
-                );
-            }
-
+            strategy_board::share(&mut network.lock(), *party_id, *from_actor_id, *from_content_id,
+                *recipient_content_id, board_data);
             true
         }
-        ToServer::StrategyBoardReceived(party_id, from_content_id, dest_content_id) => {
-            let mut network = network.lock();
-
-            // Only send the ack to the board sharer if we're doing the first board share in a sequence (in real-time sharing, the client sends two at the beginning for unknown reasons).
-            if let Some(party) = network.parties.get(party_id)
-                && let None = party.stratboard_realtime_host
-            {
-                let msg = FromServer::StrategyBoardSharedAck(*from_content_id);
-
-                // Tell the board sender a party member received it.
-                let mut dest_actor_id = ObjectId::default();
-                for my_member in &network.parties[party_id].members {
-                    if my_member.content_id == *dest_content_id {
-                        dest_actor_id = my_member.actor_id;
-                        break;
-                    }
-                }
-
-                network.send_to_by_actor_id(dest_actor_id, msg, DestinationNetwork::ZoneClients);
-            }
-
+        ToServer::StrategyBoardReceived(party_id, from_content_id, dest_content_id, index) => {
+            strategy_board::acknowledge(&mut network.lock(), *party_id, *from_content_id, *dest_content_id, *index);
             true
         }
         ToServer::StrategyBoardRealtimeUpdate(
@@ -1216,38 +1158,11 @@ pub fn handle_party_messages(
             party_id,
             board_update,
         ) => {
-            let mut network = network.lock();
-            let msg = FromServer::StrategyBoardRealtimeUpdate(board_update.clone());
-
-            // Until we get realtime updates for the first time in a sharing session, it doesn't matter for our records who the sender is.
-            // TODO: We should probably make better use of the content id field in the initial share opcode, but this works just as well for now.
-            network.parties.entry(*party_id).and_modify(|v| {
-                if v.stratboard_realtime_host.is_none() {
-                    v.stratboard_realtime_host = Some(*from_content_id)
-                }
-            });
-
-            // Tell everyone except the board sharer about the updates.
-            network.send_to_party(
-                *party_id,
-                Some(*from_actor_id),
-                msg,
-                DestinationNetwork::ZoneClients,
-            );
-
+            strategy_board::update(&mut network.lock(), *party_id, *from_actor_id, *from_content_id, board_update);
             true
         }
-        ToServer::StrategyBoardRealtimeFinished(party_id) => {
-            let mut network = network.lock();
-            let msg = FromServer::StrategyBoardRealtimeFinished();
-
-            // Tell everyone about the session ending, and reset state so further real-time sessions can be initiated.
-            network.send_to_party(*party_id, None, msg, DestinationNetwork::ZoneClients);
-            network
-                .parties
-                .entry(*party_id)
-                .and_modify(|v| v.stratboard_realtime_host = None);
-
+        ToServer::StrategyBoardRealtimeControl(party_id, actor, content_id, operation) => {
+            strategy_board::control(&mut network.lock(), *party_id, *actor, *content_id, *operation);
             true
         }
         ToServer::ApplyWaymarkPreset(from_id, party_id, waymark_preset, zone_id) => {
@@ -1592,6 +1507,115 @@ pub fn handle_party_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_with_offline_leader_broadcasts_full_roster() {
+        use crate::{ClientHandle, common::ServerHandle, server::instance::Instance};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::mpsc::channel;
+
+        let (chan, _) = channel(1);
+        let world_handle = ServerHandle {
+            chan,
+            next_id: Arc::new(AtomicUsize::new(1)),
+        };
+        let mut network = NetworkState::default();
+        let mut instance = Instance::default();
+        let mut party = Party {
+            leader_id: ObjectId(1),
+            chatchannel_id: 10,
+            ..Default::default()
+        };
+        let mut recipients = Vec::new();
+        for id in 1..=5 {
+            let actor_id = ObjectId(id);
+            let content_id = u64::from(id);
+            let mut member = PartyMember {
+                actor_id,
+                content_id,
+                ..Default::default()
+            };
+            if id != 1 {
+                let client_id = world_handle.next_id();
+                let (channel, receiver) = channel(8);
+                member.zone_client_id = client_id;
+                if id == 3 || id == 4 {
+                    member.chat_client_id = world_handle.next_id();
+                }
+                network.clients.insert(
+                    client_id,
+                    (
+                        ClientHandle {
+                            id: client_id,
+                            channel,
+                            actor_id,
+                            content_id,
+                            account_id: 1,
+                        },
+                        Default::default(),
+                    ),
+                );
+                recipients.push(receiver);
+                instance.insert_empty_actor(actor_id);
+                if id != 5 {
+                    let actor = instance.find_actor_mut(actor_id).unwrap();
+                    actor.get_player_spawn_mut().unwrap().content_id = content_id;
+                }
+            }
+            party.members.push(member);
+        }
+        network.parties.insert(100, party);
+        let network = Arc::new(Mutex::new(network));
+        let data = Arc::new(Mutex::new(WorldServer {
+            instances: vec![instance],
+            ..Default::default()
+        }));
+
+        assert!(handle_party_messages(
+            data,
+            network.clone(),
+            &ToServer::PartyMemberReturned(ObjectId(3), 0, 100),
+        ));
+
+        let network = network.lock();
+        assert_eq!(network.parties[&100].leader_id, ObjectId(2));
+        assert!(network.commit_parties);
+        for receiver in &mut recipients {
+            let FromServer::PartyUpdate(
+                _,
+                PartyUpdateStatus::MemberReturned,
+                Some((100, 10, leader, roster)),
+            ) = receiver.try_recv().unwrap()
+            else {
+                panic!("expected a restored party list");
+            };
+            assert_eq!(leader, ObjectId(2));
+            assert_eq!(
+                roster.iter().map(|member| member.content_id).collect::<Vec<_>>(),
+                [1, 2, 3, 4, 5],
+            );
+            assert_eq!(
+                roster.iter().map(|member| member.actor_id.0).collect::<Vec<_>>(),
+                [0, 2, 3, 4, 0],
+            );
+        }
+    }
+
+    #[test]
+    fn loaded_leader_keeps_leadership() {
+        let mut party = Party {
+            leader_id: ObjectId(2),
+            ..Default::default()
+        };
+        let roster = [1, 2].map(|id| PartyMemberEntry {
+            actor_id: ObjectId(id),
+            ..Default::default()
+        });
+
+        assert_eq!(party.ensure_loaded_leader(&roster), Some(ObjectId(2)));
+        assert_eq!(party.ensure_loaded_leader(&[]), None);
+        assert_eq!(party.leader_id, ObjectId(2));
+    }
 
     fn vote_of(participants: &[u32]) -> ContentFinderVote {
         ContentFinderVote {

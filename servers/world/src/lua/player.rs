@@ -185,9 +185,11 @@ impl LuaPlayer {
         self.queued_tasks.push(LuaTask::FinishEvent {});
     }
 
-    fn unlock_classjob(&mut self, classjob_id: u8) {
-        self.queued_tasks
-            .push(LuaTask::UnlockClassJob { classjob_id });
+    fn unlock_classjob(&mut self, classjob_id: u8, ensure_crystal: bool) {
+        self.queued_tasks.push(LuaTask::UnlockClassJob {
+            classjob_id,
+            ensure_crystal,
+        });
     }
 
     fn warp_aetheryte(&mut self, aetheryte_id: u32, housing_aethernet: bool) {
@@ -726,9 +728,31 @@ impl UserData for LuaPlayer {
             this.finish_event();
             Ok(())
         });
-        methods.add_method_mut("unlock_classjob", |_, this, classjob_id: u8| {
-            this.unlock_classjob(classjob_id);
+        methods.add_method_mut(
+            "unlock_classjob",
+            |_, this, (classjob_id, ensure_crystal): (u8, Option<bool>)| {
+                this.unlock_classjob(classjob_id, ensure_crystal.unwrap_or(false));
+                Ok(())
+            },
+        );
+        methods.add_method_mut("clear_job_crystals", |_, this, _: ()| {
+            this.queued_tasks.push(LuaTask::ClearJobCrystals);
             Ok(())
+        });
+        methods.add_method("get_levelable_classjobs", |lua, this, _: ()| {
+            let data = lua.globals().get::<mlua::AnyUserData>("GAME_DATA")?;
+            let data = data.borrow::<Arc<Mutex<GameData>>>()?;
+            let slot_count = this.player_data.classjob.levels.0.len();
+            let jobs = data
+                .lock()
+                .classjob_exp_indexes
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, index)| usize::try_from(**index).is_ok_and(|i| i < slot_count))
+                .filter_map(|(id, _)| u8::try_from(id).ok())
+                .collect::<Vec<_>>();
+            Ok(jobs)
         });
         methods.add_method_mut(
             "warp_aetheryte",
@@ -1157,6 +1181,27 @@ impl UserData for LuaPlayer {
                 Ok(())
             },
         );
+        methods.add_method_mut(
+            "enter_housing_ward",
+            |_, this, (territory_id, ward, pop_range_id): (u16, u8, u32)| {
+                this.queued_tasks.push(LuaTask::EnterHousingWard {
+                    territory_id,
+                    ward,
+                    pop_range_id,
+                });
+                Ok(())
+            },
+        );
+        methods.add_method_mut("leave_estate", |_, this, _: ()| {
+            let managed = this
+                .zone_data
+                .housing
+                .is_some_and(|address| address.plot.is_some());
+            if managed {
+                this.queued_tasks.push(LuaTask::LeaveEstate);
+            }
+            Ok(managed)
+        });
         methods.add_method_mut("remove_cooldowns", |_, this, _: ()| {
             this.remove_cooldowns();
             Ok(())
@@ -1183,6 +1228,10 @@ impl UserData for LuaPlayer {
         });
         methods.add_method_mut("call", |_, this, name: String| {
             this.call(name);
+            Ok(())
+        });
+        methods.add_method_mut("call_all", |_, this, _: ()| {
+            this.queued_tasks.push(LuaTask::CallAll);
             Ok(())
         });
         methods.add_method_mut("finish_dyeing", |_, this, _: ()| {
@@ -1255,5 +1304,118 @@ impl UserData for LuaPlayer {
             Ok(this.player_data.grand_company.active_company)
         });
         fields.add_field_method_get("city_state", |_, this| Ok(this.player_data.city_state));
+    }
+}
+
+#[cfg(test)]
+mod job100_tests {
+    use super::*;
+
+    #[test]
+    fn init_command_queues_character_setup_before_changing_zones() {
+        use crate::lua::{KawariLua, KawariLuaState};
+
+        let mut runtime = KawariLua::new();
+        runtime
+            .init(Arc::new(Mutex::new(GameData::default())))
+            .unwrap();
+        let lua = &runtime.0;
+        let command = lua
+            .app_data_ref::<KawariLuaState>()
+            .unwrap()
+            .command_scripts["init"]
+            .clone();
+        lua.globals().set("player", LuaPlayer::default()).unwrap();
+        lua.load(std::fs::read(format!("resources/scripts/{command}")).unwrap())
+            .exec()
+            .unwrap();
+        lua.load("assert(required_rank == GM_RANK_DEBUG); onCommand(player, {'invalid'})")
+            .exec()
+            .unwrap();
+
+        let userdata: mlua::AnyUserData = lua.globals().get("player").unwrap();
+        {
+            let mut player = userdata.borrow_mut::<LuaPlayer>().unwrap();
+            assert!(matches!(player.queued_tasks.as_slice(), [LuaTask::SendSegment { .. }]));
+            player.queued_tasks.clear();
+        }
+
+        let jobs: Vec<u8> = lua
+            .load("return player:get_levelable_classjobs()")
+            .eval()
+            .unwrap();
+        assert!(!jobs.is_empty());
+        lua.load("onCommand(player, {})").exec().unwrap();
+        let player = userdata.borrow::<LuaPlayer>().unwrap();
+        let (job_tasks, setup_tasks) = player.queued_tasks.split_at(jobs.len() * 2);
+        for (tasks, job) in job_tasks.chunks_exact(2).zip(jobs) {
+            assert!(matches!(
+                tasks,
+                [LuaTask::UnlockClassJob { classjob_id, ensure_crystal: true },
+                 LuaTask::SetClassJobLevel { classjob_id: level_job, level: 100 }]
+                    if *classjob_id == job && *level_job == job
+            ));
+        }
+        assert!(matches!(
+            setup_tasks,
+            [LuaTask::UnlockAll {}, LuaTask::Unlock { id: 4 }, LuaTask::Unlock { id: 14 },
+             LuaTask::Unlock { id: 15 }, LuaTask::FinishQuest { id: 66746 },
+             LuaTask::FinishQuest { id: 65535 },
+             LuaTask::ModifyCurrency { id: CurrencyKind::Gil, amount: 10_000_000, send_client_update: true },
+             LuaTask::SendSegment { .. },
+             LuaTask::ChangeTerritory { zone_id: 128, exit_position: Some(position), exit_rotation: None }]
+                if position.0 == glam::Vec3::new(0.0, 40.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn job100_requires_debug_rank_and_queues_each_supported_job_at_100() {
+        let lua = mlua::Lua::new();
+        lua.globals().set("player", LuaPlayer::default()).unwrap();
+        lua.load(
+            r#"
+            GM_RANK_DEBUG = 4
+            function printf() end
+            fake = {}
+            function fake:get_levelable_classjobs() return {1, 8, 19, 43} end
+            function fake:unlock_classjob(id, ensure) player:unlock_classjob(id, ensure) end
+            function fake:set_classjob_level(id, level) player:set_classjob_level(id, level) end
+            "#,
+        )
+        .exec()
+        .unwrap();
+        lua.load(include_str!(
+            "../../../../resources/scripts/commands/debug/Job100.lua"
+        ))
+        .exec()
+        .unwrap();
+        lua.load(
+            r#"
+            assert(required_rank == GM_RANK_DEBUG)
+            onCommand(fake, {"invalid"})
+            onCommand(fake, {})
+            player:unlock_classjob(19)
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let userdata: mlua::AnyUserData = lua.globals().get("player").unwrap();
+        let player = userdata.borrow::<LuaPlayer>().unwrap();
+        assert_eq!(player.queued_tasks.len(), 9);
+        for (tasks, expected) in player.queued_tasks.chunks_exact(2).zip([1, 8, 19, 43]) {
+            assert!(matches!(tasks[0], LuaTask::UnlockClassJob {
+                classjob_id, ensure_crystal: true
+            } if classjob_id == expected));
+            assert!(matches!(tasks[1], LuaTask::SetClassJobLevel {
+                classjob_id, level: 100
+            } if classjob_id == expected));
+        }
+        assert!(matches!(
+            player.queued_tasks[8],
+            LuaTask::UnlockClassJob {
+                classjob_id: 19,
+                ensure_crystal: false
+            }
+        ));
     }
 }

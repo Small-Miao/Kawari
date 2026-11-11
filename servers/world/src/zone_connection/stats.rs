@@ -826,6 +826,8 @@ pub struct BaseParameters {
     pub classjob_id: u8,
     pub level: u8,
     pub job_attack_modifier: u16,
+    /// 自动攻击按物理主属性计算，法系不能复用智力/精神修正。
+    pub job_auto_attack_modifier: u16,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -949,6 +951,7 @@ impl BaseParameters {
             5 => modifiers.mind,
             _ => 100,
         };
+        self.job_auto_attack_modifier = if classjob_uses_dexterity(classjob_id) {modifiers.dexterity} else {modifiers.strength};
 
         // `ParamGrow` has no MAIN column: its `BaseSpeed` is the SUB constant and its
         // `LevelModifier` is DIV, which is why `BaseSpeed` is the right base for the speed
@@ -1266,6 +1269,23 @@ impl BaseParameters {
         self.calc_expected_damage(potency)
     }
 
+    /// 自动攻击使用武器间隔，远敏的战技增伤特性不应用于自动攻击。
+    pub(crate) fn calc_auto_attack_damage(&self, delay_ms:u32)->u32{
+        let level=level_modifier_for(u32::from(self.level));
+        let stat=if classjob_uses_dexterity(self.classjob_id){self.dexterity}else{self.strength};
+        if stat==0||self.physical_damage==0{return 0;}
+        let coefficient=if classjob_uses_tenacity(self.classjob_id){tank_attack_modifier_for_level(u32::from(self.level))}else{attack_modifier_for_level(u32::from(self.level))};
+        let attack=100+positive_scaled_bonus(stat,level.main,coefficient,level.main);
+        let modifier=if self.job_auto_attack_modifier>0{self.job_auto_attack_modifier}else{self.job_attack_modifier};
+        let weapon=self.physical_damage+u32::from(level.main)*u32::from(modifier)/1000;
+        let mut damage=u64::from(delay_ms)*100/3000;
+        damage=apply_factor(damage,attack,100);
+        damage=apply_factor(damage,weapon,100);
+        damage=apply_factor(damage,self.determination_factor(level),1000);
+        damage=apply_factor(damage,self.tenacity_factor(level),1000);
+        damage.min(u64::from(u32::MAX)) as u32
+    }
+
     /// Calculates amount of magic damage to apply based on potency.
     pub fn calc_magical_damage(&self, potency: u32) -> u32 {
         self.calc_expected_damage(potency)
@@ -1277,14 +1297,19 @@ impl BaseParameters {
     }
 
     pub(crate) fn calc_heal_amount_with_critical(&self, potency: u32, force_critical: bool) -> u32 {
+        self.roll_heal_amount(potency,force_critical).0
+    }
+
+    /// 返回同一次治疗的数值与暴击结果，护盾与协议标志不能各自重新掷骰。
+    pub(crate) fn roll_heal_amount(&self,potency:u32,force_critical:bool)->(u32,bool){
         if potency == 0 {
-            return 0;
+            return (0,false);
         }
 
         let level_modifier = level_modifier_for(u32::from(self.level));
         let weapon_damage_factor = self.weapon_damage_factor(level_modifier);
         if self.primary_damage_stat_value() == 0 || weapon_damage_factor == 0 {
-            return 0;
+            return (0,false);
         }
 
         let mut heal = u64::from(potency);
@@ -1296,12 +1321,13 @@ impl BaseParameters {
             heal = apply_factor(heal, self.damage_trait_factor(), 100);
         }
         // Roll a critical heal (heals can crit but never direct-hit) plus ±5% variance.
-        if force_critical || fastrand::f64() < self.expected_crit_rate(level_modifier) {
+        let critical=force_critical || fastrand::f64() < self.expected_crit_rate(level_modifier);
+        if critical {
             heal = apply_factor(heal, self.crit_damage_factor(level_modifier), 1000);
         }
         heal = apply_factor(heal, 95 + fastrand::u32(0..11), 100);
 
-        heal.min(u64::from(u32::MAX)) as u32
+        (heal.min(u64::from(u32::MAX)) as u32,critical)
     }
 
     /// Iterates over the given equipped items and calculates defense, along with any stat bonuses.
@@ -1466,6 +1492,7 @@ impl ZoneConnection {
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
             classjob_id: self.player_data.classjob.current_class as u8,
             data: gauge_data,
+            extra: [0;6],
         });
         self.send_ipc_self(ipc).await;
     }
@@ -1832,6 +1859,13 @@ impl ZoneConnection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn red_mage_auto_attack_uses_strength_and_physical_weapon_damage(){
+        let mut p=super::BaseParameters{classjob_id:35,level:100,strength:500,intelligence:4000,physical_damage:100,magic_damage:150,job_attack_modifier:115,job_auto_attack_modifier:55,..Default::default()};
+        let baseline=p.calc_auto_attack_damage(2240);assert!(baseline>0);
+        p.intelligence=8000;p.magic_damage=300;assert_eq!(p.calc_auto_attack_damage(2240),baseline);
+        p.strength=1000;assert!(p.calc_auto_attack_damage(2240)>baseline);
+    }
     use super::*;
     use crate::gamedata::cap_for;
     use crate::inventory::Item;

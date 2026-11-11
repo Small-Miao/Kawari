@@ -2,6 +2,7 @@
 POTENCY = 400
 
 function doAction(player, in_combo)
+    local POTENCY = player:get_level() >= 85 and 400 or 300
     effects = EffectsBuilder()
     effects:heal(player.parameters:calc_heal_amount(POTENCY))
 

@@ -3,7 +3,7 @@ DURATION = 12.0
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:gain_effect_self(EFFECT_THIN_AIR, 0, DURATION)
+    effects:gain_effect_self(EFFECT_THIN_AIR, 65436, DURATION)
 
     return effects
 end

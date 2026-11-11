@@ -50,6 +50,7 @@ mod bitmask;
 pub use bitmask::{Bitmask, QuestBitmask};
 
 mod gamedata;
+pub mod housing;
 pub use gamedata::{
     GameData, GatheringPointItem, ItemInfoQuery, ItemRow, Recipe, Roulette, TerritoryNameKind,
 };

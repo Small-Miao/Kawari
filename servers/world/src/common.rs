@@ -135,6 +135,7 @@ pub fn duty_relation(viewer: Option<(u64, u16)>, target: Option<(u64, u16)>) -> 
 
 #[derive(Clone, Debug)]
 pub enum FromServer {
+    RefreshHousing,
     /// A chat message.
     Message(MessageInfo),
     /// An actor has been spawned.
@@ -224,11 +225,11 @@ pub enum FromServer {
     /// Inform the client that a member of their party has shared a strategy board.
     StrategyBoardShared(u64, StrategyBoard),
     /// Inform the sending client that another client received their strategy board.
-    StrategyBoardSharedAck(u64),
+    StrategyBoardSharedAck(u64, u8),
     /// Inform the client that the board sharer has made a real-time update.
     StrategyBoardRealtimeUpdate(StrategyBoardUpdate),
-    /// Inform the client that the board sharer has ended their real-time sharing session.
-    StrategyBoardRealtimeFinished(),
+    /// Announce or clear the current real-time board host.
+    StrategyBoardHost(u64, u16),
     /// Inform the client that a waymark was placed or updated.
     WaymarkUpdated(u8, WaymarkPlacementMode, WaymarkPosition, i32),
     /// Inform the client that a waymark preset was applied.
@@ -316,6 +317,7 @@ impl FromServer {
             Self::LoseEffect(..) => "LoseEffect",
             Self::Conditions(..) => "Conditions",
             Self::ChangeZone(..) => "ChangeZone",
+            Self::RefreshHousing => "RefreshHousing",
             Self::TellMessageReceived(..) => "TellMessageReceived",
             Self::ChatDisconnected() => "ChatDisconnected",
             Self::SetPartyChatChannel(..) => "SetPartyChatChannel",
@@ -334,7 +336,7 @@ impl FromServer {
             Self::StrategyBoardShared(..) => "StrategyBoardShared",
             Self::StrategyBoardSharedAck(..) => "StrategyBoardSharedAck",
             Self::StrategyBoardRealtimeUpdate(..) => "StrategyBoardRealtimeUpdate",
-            Self::StrategyBoardRealtimeFinished() => "StrategyBoardRealtimeFinished",
+            Self::StrategyBoardHost(..) => "StrategyBoardHost",
             Self::WaymarkUpdated(..) => "WaymarkUpdated",
             Self::WaymarkPreset(..) => "WaymarkPreset",
             Self::EnteredInstanceEntranceRange(..) => "EnteredInstanceEntranceRange",
@@ -463,7 +465,24 @@ pub enum ToServer {
     /// Warp with the specified aetheryte id.
     WarpAetheryte(ClientId, ObjectId, u32, bool),
     /// Ready to spawn the player (this happens during initrequest)
-    ReadySpawnPlayer(ClientId, ObjectId, u16, Position, f32, Option<u8>),
+    ReadySpawnPlayer(
+        ClientId,
+        ObjectId,
+        u16,
+        Position,
+        f32,
+        Option<u8>,
+        Option<crate::housing::HousingAddress>,
+    ),
+    HousingTravel(
+        ClientId,
+        ObjectId,
+        crate::housing::HousingAddress,
+        u16,
+        Option<u32>,
+        Option<u8>,
+    ),
+    RefreshHousing(ObjectId),
     /// Ready to send the ZoneIn ACS
     ZoneIn(ClientId, ObjectId, bool),
     /// We need to summon a player's minion, and tell other clients
@@ -522,7 +541,14 @@ pub enum ToServer {
     /// The client is requesting to join the following content.
     JoinContent(ClientId, ObjectId, u16),
     /// The c lient is requesting to leave their current content, the connection is in charge of keeping track of the old position.
-    LeaveContent(ClientId, ObjectId, u16, Position, f32),
+    LeaveContent(
+        ClientId,
+        ObjectId,
+        u16,
+        Position,
+        f32,
+        Option<crate::housing::HousingAddress>,
+    ),
     /// Update the global server state of the client's conditions.
     UpdateConditions(ObjectId, Conditions),
     /// (Temporary) Signal to the server to commence the duty.
@@ -537,6 +563,8 @@ pub enum ToServer {
     ),
     /// GM 查询/停止/重置当前实例原生 Lua 时间轴，不接受任意程序路径。
     TimelineCommand(ObjectId, String, tokio::sync::oneshot::Sender<String>),
+    /// Fill the current scripted duty's shared limit break gauge. Reply indicates battle readiness.
+    FillLimitBreak(ObjectId, tokio::sync::oneshot::Sender<Option<bool>>),
     /// Inform the server to update our HP to this value.
     SetHP(ClientId, ObjectId, u32),
     /// Inform the server to update our MP to this value.
@@ -546,11 +574,11 @@ pub enum ToServer {
     /// The client is sharing a strategy board with their party.
     ShareStrategyBoard(ObjectId, u64, u64, u64, StrategyBoard),
     /// The client received a strategy board from another member in their party.
-    StrategyBoardReceived(u64, u64, u64),
+    StrategyBoardReceived(u64, u64, u64, u8),
     /// The client is making edits to their strategy board via real-time sharing.
     StrategyBoardRealtimeUpdate(ObjectId, u64, u64, StrategyBoardUpdate),
-    /// The client finished their real-time sharing session.
-    StrategyBoardRealtimeFinished(u64),
+    /// The client ended sharing or requested a fresh live snapshot.
+    StrategyBoardRealtimeControl(u64, ObjectId, u64, u8),
     /// The client applied a waymark preset for their party.
     ApplyWaymarkPreset(ObjectId, u64, WaymarkPreset, i32),
     /// Inform the server of our new basic stat values.
@@ -615,6 +643,7 @@ pub enum ToServer {
     Jump(ClientId, String),
     /// Teleport the player to this one.
     Call(ObjectId, String),
+    CallAll(ObjectId),
     /// Spawns an NPC defined by the layout or drop-in.
     SpawnLayoutNpc(ObjectId, u32),
     /// The client places a piece of furniture.
@@ -676,6 +705,8 @@ impl ToServer {
             Self::Warp(..) => "Warp",
             Self::WarpAetheryte(..) => "WarpAetheryte",
             Self::ReadySpawnPlayer(..) => "ReadySpawnPlayer",
+            Self::HousingTravel(..) => "HousingTravel",
+            Self::RefreshHousing(..) => "RefreshHousing",
             Self::ZoneIn(..) => "ZoneIn",
             Self::ActorSummonsMinion(..) => "ActorSummonsMinion",
             Self::ActorDespawnsMinion(..) => "ActorDespawnsMinion",
@@ -701,13 +732,14 @@ impl ToServer {
             Self::Kill(..) => "Kill",
             Self::GodMode(..) => "GodMode",
             Self::TimelineCommand(..) => "TimelineCommand",
+            Self::FillLimitBreak(..) => "FillLimitBreak",
             Self::SetHP(..) => "SetHP",
             Self::SetMP(..) => "SetMP",
             Self::NewLocationDiscovered(..) => "NewLocationDiscovered",
             Self::ShareStrategyBoard(..) => "ShareStrategyBoard",
             Self::StrategyBoardReceived(..) => "StrategyBoardReceived",
             Self::StrategyBoardRealtimeUpdate(..) => "StrategyBoardRealtimeUpdate",
-            Self::StrategyBoardRealtimeFinished(..) => "StrategyBoardRealtimeFinished",
+            Self::StrategyBoardRealtimeControl(..) => "StrategyBoardRealtimeControl",
             Self::ApplyWaymarkPreset(..) => "ApplyWaymarkPreset",
             Self::SetNewStatValues(..) => "SetNewStatValues",
             Self::StartCountdown(..) => "StartCountdown",
@@ -738,6 +770,7 @@ impl ToServer {
             Self::SendLetterTo(..) => "SendLetterTo",
             Self::Jump(..) => "Jump",
             Self::Call(..) => "Call",
+            Self::CallAll(..) => "CallAll",
             Self::SpawnLayoutNpc(..) => "SpawnLayoutNpc",
             Self::PlaceFurniture(..) => "PlaceFurniture",
             Self::TranslateFurniture(..) => "TranslateFurniture",

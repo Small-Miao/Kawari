@@ -23,7 +23,9 @@ pub enum LuaTask {
     FinishEvent {},
     UnlockClassJob {
         classjob_id: u8,
+        ensure_crystal: bool,
     },
+    ClearJobCrystals,
     WarpAetheryte {
         aetheryte_id: u32,
         housing_aethernet: bool,
@@ -219,6 +221,12 @@ pub enum LuaTask {
         territory_id: u16,
         pop_range_id: u32,
     },
+    EnterHousingWard {
+        territory_id: u16,
+        ward: u8,
+        pop_range_id: u32,
+    },
+    LeaveEstate,
     RemoveCooldowns {},
     ToggleHowTo {
         value: bool,
@@ -237,6 +245,7 @@ pub enum LuaTask {
     Call {
         name: String,
     },
+    CallAll,
     FinishDyeing {},
     FinishMateriaRetrieval {},
 }

@@ -154,6 +154,32 @@ impl ZoneConnection {
         let parts: Vec<&str> = chat_message.split(' ').collect();
 
         match parts[0] {
+            "!lb3" => {
+                if self.player_data.character.gm_rank != GameMasterRank::Debug {
+                    self.send_notice("该指令需要 Debug GM 权限。").await;
+                    return true;
+                }
+                if chat_message.split_whitespace().count() != 1 {
+                    self.send_notice("用法：!lb3").await;
+                    return true;
+                }
+
+                let (reply, response) = tokio::sync::oneshot::channel();
+                self.handle
+                    .send(crate::ToServer::FillLimitBreak(
+                        self.player_data.character.actor_id,
+                        reply,
+                    ))
+                    .await;
+                let message = match response.await {
+                    Ok(Some(true)) => "已补满当前副本的三段极限技量谱。",
+                    Ok(Some(false)) => "已补满三段极限技量谱，战斗开始后可使用。",
+                    Ok(None) => "请进入支持极限技的脚本副本后使用 !lb3。",
+                    Err(_) => "补充极限技量谱失败，请重试。",
+                };
+                self.send_notice(message).await;
+                true
+            }
             "!timeline" | "!controller" => {
                 let action = match parts.as_slice() {
                     [_] | [_, "status"] => "status",

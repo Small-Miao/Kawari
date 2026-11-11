@@ -74,6 +74,7 @@ pub fn npc_behavior(
 
         // const pass
         for (id, actor) in &instance.actors {
+            if actor.is_movement_locked(){continue;}
             if let NetworkedActor::Npc {
                 navmesh_path: current_path,
                 navmesh_path_lerp: current_path_lerp,
@@ -184,6 +185,7 @@ pub fn npc_behavior(
 
         // mut pass
         for (id, actor) in &mut instance.actors {
+            if actor.is_action_locked(){continue;}
             if let NetworkedActor::Npc {
                 state,
                 navmesh_path: current_path,
@@ -670,6 +672,7 @@ pub fn npc_behavior(
         let mut follow_moves = Vec::new();
 
         for (id, actor) in &mut instance.actors {
+            if actor.is_action_locked(){continue;}
             if let NetworkedActor::Npc {
                 state,
                 hate_list,

@@ -5,6 +5,8 @@ DOT_POTENCY = 85
 EFFECT_DIA_DOT = 1871 -- 天辉
 
 function doAction(player, in_combo)
+    local POTENCY = player:get_level() >= 94 and 85 or 65
+    local DOT_POTENCY = POTENCY
     effects = EffectsBuilder()
     effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_MAGIC, player.parameters:calc_magical_damage(POTENCY))
     effects:gain_dot(EFFECT_DIA_DOT, 0, DOT_DURATION, DOT_POTENCY)

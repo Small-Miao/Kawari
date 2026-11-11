@@ -2,7 +2,7 @@
 
 use crate::{
     ItemInfoQuery, ToServer, ZoneConnection,
-    inventory::{DesiredHousingInventoryPages, EQUIP_RESTRICTED, Item, Storage, get_next_free_slot},
+    inventory::{EQUIP_RESTRICTED, Item, Storage, get_next_free_slot},
 };
 use kawari::{
     common::{ContainerType, ItemOperationKind, LegacyEquipmentModelId, ObjectId, WeaponModelId},
@@ -12,7 +12,7 @@ use kawari::{
     },
 };
 
-use physis::equipment::EquipSlot;
+use physis::equipment::{EquipSlot, EquipSlotCategory};
 use strum::IntoEnumIterator;
 
 /// Reserved log-message ID for a dye/glamour result notification; awaiting a send-site.
@@ -99,28 +99,58 @@ impl ZoneConnection {
             .await;
     }
 
-    pub async fn send_housing_inventory(&mut self, which: DesiredHousingInventoryPages) {
-        let cloned_inv = match which {
-            DesiredHousingInventoryPages::Interior => {
-                self.player_data.house_inventory.interior.clone()
-            }
-            DesiredHousingInventoryPages::InteriorStoreroom => {
-                self.player_data.house_inventory.interior_storeroom.clone()
-            }
-            DesiredHousingInventoryPages::Exterior => {
-                self.player_data.house_inventory.exterior.clone()
-            }
-            DesiredHousingInventoryPages::ExteriorStoreroom => {
-                self.player_data.house_inventory.exterior_storeroom.clone()
-            }
-            DesiredHousingInventoryPages::None => {
-                return;
-            }
+    pub(super) async fn clear_job_crystals(&mut self) {
+        let removed = {
+            let mut game_data = self.gamedata.lock();
+            self.player_data.inventory.clear_job_crystals(|id| {
+                game_data
+                    .get_item_info(ItemInfoQuery::ById(id))
+                    .is_some_and(|item| item.equip_category == EquipSlotCategory::SoulCrystal)
+            })
         };
-
-        for container in cloned_inv.into_iter() {
-            self.send_container(&container, container.kind).await;
+        if removed.is_empty() {
+            self.send_notice("当前角色没有可清除的职业水晶。").await;
+            return;
         }
+
+        let mut count = 0u64;
+        let mut equipped_changed = false;
+        for (container, slot, quantity) in removed {
+            count += u64::from(quantity);
+            equipped_changed |= container == ContainerType::Equipped;
+            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateInventorySlot(ItemInfo {
+                sequence: self.player_data.item_sequence,
+                container,
+                slot,
+                ..Default::default()
+            }));
+            self.send_ipc_self(ipc).await;
+            self.player_data.item_sequence += 1;
+        }
+
+        if equipped_changed {
+            self.change_class_based_on_weapon().await;
+            self.remove_incompatible_armor(&ItemOperation {
+                operation_type: ItemOperationKind::Discard,
+                src_storage_id: ContainerType::Equipped,
+                src_container_index: EquipSlot::SoulCrystal as u16,
+                ..Default::default()
+            })
+            .await;
+            {
+                let mut game_data = self.gamedata.lock();
+                self.player_data.inventory.prepare_equipped(&mut game_data);
+            }
+            self.inform_equip().await;
+            self.send_stats().await;
+        }
+        self.database
+            .lock()
+            .commit_classjob_and_inventory(&self.player_data);
+        self.actor_control_self(ActorControlCategory::GearSetRefresh {})
+            .await;
+        self.send_notice(&format!("已清除 {count} 颗职业水晶。"))
+            .await;
     }
 
     pub async fn send_container(&mut self, container: &dyn Storage, container_type: ContainerType) {
@@ -168,7 +198,7 @@ impl ZoneConnection {
         self.player_data.item_sequence += 1;
     }
 
-    /// Sends two containers to the client, particularly helpful when doing various housing operations, such as moving an item from the main inventory directly to the storeroom.
+    /// Sends the two personal inventory containers involved in an item operation.
     pub async fn send_affected_containers(
         &mut self,
         src_container_type: ContainerType,
@@ -176,17 +206,7 @@ impl ZoneConnection {
     ) {
         // This cloning is sort of ugly, but we run into numerous borrowing issues if we don't.
         let main_inventory = self.player_data.inventory.clone();
-        let house_inventory = self.player_data.house_inventory.clone();
-
-        let get_container = |kind: &ContainerType| -> Option<&dyn Storage> {
-            if let Some(temp_container) = main_inventory.get_container(*kind) {
-                return Some(temp_container);
-            } else if let Some(temp_container) = house_inventory.get_container(*kind) {
-                return Some(temp_container);
-            }
-
-            None
-        };
+        let get_container = |kind: &ContainerType| main_inventory.get_container(*kind);
 
         let Some(src_container) = get_container(&src_container_type) else {
             return;
@@ -1100,6 +1120,51 @@ impl ZoneConnection {
 #[cfg(test)]
 mod tests {
     use super::retrieval_target_slot;
+
+    #[test]
+    fn clear_job_crystals_only_removes_crystals_from_personal_inventory() {
+        use crate::{
+            GameData, ItemInfoQuery,
+            inventory::{Inventory, Item},
+        };
+        use kawari::common::ContainerType;
+        use physis::equipment::{EquipSlot, EquipSlotCategory};
+
+        let mut data = GameData::default();
+        let crystal = data.get_soul_crystal_item_id(19).unwrap();
+        let mut inventory = Inventory::default();
+        let stone = Item {
+            item_id: crystal,
+            quantity: 1,
+            ..Default::default()
+        };
+        inventory.equipped.soul_crystal = stone;
+        inventory.armoury_soul_crystal.slots[7] = stone;
+        inventory.pages[2].slots[4] = Item { quantity: 2, ..stone };
+        inventory.pages[2].slots[5] = Item {
+            item_id: 2,
+            quantity: 1,
+            ..Default::default()
+        };
+
+        let mut is_crystal = |id| {
+            data.get_item_info(ItemInfoQuery::ById(id))
+                .is_some_and(|item| item.equip_category == EquipSlotCategory::SoulCrystal)
+        };
+        assert_eq!(
+            inventory.clear_job_crystals(&mut is_crystal),
+            [
+                (ContainerType::Equipped, EquipSlot::SoulCrystal as u16, 1),
+                (ContainerType::Inventory2, 4, 2),
+                (ContainerType::ArmorySoulCrystal, 7, 1),
+            ]
+        );
+        assert!(inventory.equipped.soul_crystal.is_empty_slot());
+        assert!(inventory.armoury_soul_crystal.slots[7].is_empty_slot());
+        assert!(inventory.pages[2].slots[4].is_empty_slot());
+        assert_eq!(inventory.pages[2].slots[5].item_id, 2);
+        assert!(inventory.clear_job_crystals(is_crystal).is_empty());
+    }
 
     #[test]
     fn retrieval_takes_the_last_melded_materia_only() {

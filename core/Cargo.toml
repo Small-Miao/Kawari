@@ -39,6 +39,8 @@ diesel = { workspace = true, optional = true }
 libsqlite3-sys = { workspace = true, optional = true }
 bstr = { workspace = true }
 glam = { workspace = true }
+crc32fast = "1.5.0"
+flate2 = "1.1.9"
 
 # Used for managing our insane amount of opcodes.
 kawari-core-macro = { path = "macro" }

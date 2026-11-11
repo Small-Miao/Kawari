@@ -232,6 +232,16 @@ impl NetworkedActor {
         self.status_effects().is_some_and(|s| s.get(2165).is_some())
     }
 
+    /// 控制状态阻止动作；止步只约束移动，不禁止攻击。
+    pub fn is_action_locked(&self) -> bool {
+        self.is_time_stopped() || self.status_effects().is_some_and(|s|
+            [2,3].iter().any(|id|s.get(*id).is_some_and(|s|s.duration>0.0)))
+    }
+    pub fn is_movement_locked(&self) -> bool {
+        self.is_action_locked() || self.status_effects().is_some_and(|s|
+            s.get(13).is_some_and(|s|s.duration>0.0))
+    }
+
     pub fn can_be_raised(&self) -> bool {
         !self.status_effects().is_some_and(|s| s.get(5144).is_some())
     }
@@ -252,13 +262,22 @@ impl NetworkedActor {
     }
 
     pub fn apply_damage(&mut self, damage: u32) -> u32 {
-        if self.is_god_mode() {
+        if self.is_god_mode() || super::revival::is_protected(self) {
             return 0;
         }
+        if damage>0{super::jobs::samurai::on_damage(self);}
         let hp_damage = self
             .status_effects_mut()
             .map(|status_effects| status_effects.absorb_damage(damage))
             .unwrap_or(damage);
+
+        let holmgang = self.status_effects().is_some_and(|s|s.get(409).is_some_and(|s|s.duration>0.0))
+            || super::jobs::dark_knight::death_floor(self,hp_damage);
+
+        if hp_damage > 0 && let Some(statuses)=self.status_effects_mut(){
+            statuses.remove(3);
+            statuses.remove(13);
+        }
 
         let Some(common) = self.common_spawn_mut() else {
             return hp_damage;
@@ -271,7 +290,8 @@ impl NetworkedActor {
                 common.health_points -= hp_damage;
             }
         } else {
-            common.health_points = common.health_points.saturating_sub(hp_damage);
+            let floor = if holmgang && common.health_points > 0 { 1 } else { 0 };
+            common.health_points = common.health_points.saturating_sub(hp_damage).max(floor);
         }
 
         if hp_damage > 0
@@ -284,7 +304,20 @@ impl NetworkedActor {
             }
         }
 
+        if hp_damage > 0 { super::jobs::warrior::damage_taken(self); }
+        if hp_damage > 0 { super::jobs::monk::on_damage(self); }
         hp_damage
+    }
+
+    /// 统一治疗入口，保留已死亡判定并向职业生命周期传递治疗量。
+    pub fn apply_heal(&mut self, amount:u32)->u32 {
+        let Some(common)=self.common_spawn_mut()else{return 0;};
+        if common.health_points==0{return 0;}
+        let old=common.health_points;
+        common.health_points=old.saturating_add(amount).min(common.max_health_points);
+        let restored=common.health_points.saturating_sub(old);
+        super::jobs::dark_knight::healed(self,amount);
+        restored
     }
 
     pub fn npc_hate_list(&self) -> Option<&HashMap<ObjectId, u32>> {

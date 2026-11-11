@@ -3,7 +3,6 @@ use std::{collections::HashMap, f32::consts::FRAC_PI_2, sync::Arc};
 use glam::{Affine3A, EulerRot, Vec3};
 use parking_lot::Mutex;
 use physis::{
-    TerritoryIntendedUse,
     layer::{
         ExitRangeInstanceObject, InstanceObject, LayerEntryData, PopRangeInstanceObject, PopType,
         TriggerBoxShape,
@@ -13,7 +12,7 @@ use physis::{
 };
 
 use crate::{
-    ClientId, FromServer, GameData, TerritoryNameKind, ToServer,
+    ClientId, FromServer, GameData, TerritoryNameKind, ToServer, WorldDatabase,
     lua::LuaZone,
     server::{
         NetworkedActor, WorldServer,
@@ -29,8 +28,8 @@ use crate::{
 use kawari::{
     common::{
         DropIn, DropInLayer, DropInObjectData, ENTRANCE_CIRCLE_IDS, EOBJ_EXIT,
-        EOBJ_HOUSING_ENTRANCE, EOBJ_SHORTCUT, EOBJ_SHORTCUT_EXPLORER_MODE, EventState, HandlerType,
-        ObjectId, Position, WARP_DELAY, euler_to_direction, internal_housing_row,
+        EOBJ_HOUSING_ENTRANCE, EOBJ_SHORTCUT, EOBJ_SHORTCUT_EXPLORER_MODE, EventState, HandlerId,
+        HandlerType, ObjectId, Position, WARP_DELAY, euler_to_direction, internal_housing_row,
     },
     config::get_config,
     ipc::zone::{
@@ -88,7 +87,18 @@ pub struct MapRange {
 
 #[derive(Debug)]
 struct HousingPlot {
-    entrance_position: Vec3,
+    index: u8,
+    placard: u32,
+    placard_position: Vec3,
+    entrance_id: ObjectId,
+    room_exit_position: Option<Vec3>,
+    bounds: crate::housing::PlotBounds,
+}
+
+impl HousingPlot {
+    fn entrance_position(&self) -> Position {
+        Position(self.room_exit_position.unwrap_or(self.placard_position))
+    }
 }
 
 /// Represents a loaded zone
@@ -102,6 +112,7 @@ pub struct Zone {
     pub layer_groups: Vec<Lgb>,
     pub navimesh_path: String,
     pub map_id: u16,
+    pub housing: Option<crate::housing::HousingAddress>,
     cached_npc_base_ids: HashMap<ObjectId, u32>,
     pub map_ranges: Vec<MapRange>,
     dropin_layers: Vec<DropInLayer>,
@@ -112,6 +123,7 @@ pub struct Zone {
     layer_set: i32,
     bg_path: String,
     cached_housing_plots: Vec<HousingPlot>,
+    housing_placards: HashMap<ObjectId, (u8, u32)>,
     cached_eobj_base_ids: HashMap<ObjectId, u32>,
 }
 
@@ -379,11 +391,10 @@ impl Zone {
             .unwrap_or(fallback.to_string());
 
         // create housing plot cache
-        if zone.intended_use == TerritoryIntendedUse::HousingOutdoor as u8 {
-            let land_sets = game_data
-                .get_land_sets(internal_housing_row(id).unwrap())
-                .unwrap();
-            for land_set in land_sets {
+        if let Some(land_sets) =
+            internal_housing_row(id).and_then(|row| game_data.get_land_sets(row))
+        {
+            for (index, land_set) in land_sets.into_iter().enumerate() {
                 let map_ranges: Vec<&MapRange> = zone
                     .map_ranges
                     .iter()
@@ -395,9 +406,21 @@ impl Zone {
                     );
                 } else {
                     let map_range = map_ranges.first().unwrap();
+                    let room_exit_position = zone
+                        .find_pop_range(land_set.RoomExit)
+                        .map(|(object, _)| Vec3::from_array(object.transform.translation));
 
                     zone.cached_housing_plots.push(HousingPlot {
-                        entrance_position: map_range.position,
+                        index: index as u8,
+                        placard: land_set.PlacardId,
+                        placard_position: map_range.position,
+                        entrance_id: ObjectId(fastrand::u32(..)),
+                        room_exit_position,
+                        bounds: crate::housing::PlotBounds {
+                            center: map_range.position,
+                            half_extent: map_range.scale,
+                            rotation: map_range.rotation,
+                        },
                     });
                 }
             }
@@ -486,6 +509,28 @@ impl Zone {
             place_name: self.place_name.clone(),
             intended_use: self.intended_use,
             map_id: self.map_id,
+            housing: self.housing,
+            housing_entrances: self
+                .cached_housing_plots
+                .iter()
+                .map(|plot| (plot.entrance_id, plot.index))
+                .collect(),
+            housing_placards: self.housing_placards.clone(),
+            housing_plot_positions: self
+                .cached_housing_plots
+                .iter()
+                .map(|plot| (plot.index, Position(plot.placard_position)))
+                .collect(),
+            housing_entrance_positions: self
+                .cached_housing_plots
+                .iter()
+                .map(|plot| (plot.index, plot.entrance_position()))
+                .collect(),
+            housing_plot_bounds: self
+                .cached_housing_plots
+                .iter()
+                .map(|plot| (plot.index, plot.bounds))
+                .collect(),
             cached_npc_base_ids: self.cached_npc_base_ids.clone(),
             cached_eobj_base_ids: self.cached_eobj_base_ids.clone(),
             ..Default::default()
@@ -607,6 +652,17 @@ impl Zone {
                         self.cached_objects.insert(eobj.parent_data.base_id, spawn);
                         self.cached_eobj_base_ids
                             .insert(spawn.entity_id, spawn.base_id);
+                        if let Some(plot) = self
+                            .cached_housing_plots
+                            .iter_mut()
+                            .find(|plot| plot.placard == spawn.layout_id)
+                        {
+                            plot.placard_position = translation;
+                            self.housing_placards
+                                .insert(spawn.entity_id, (plot.index, plot.placard));
+                            self.housing_placards
+                                .insert(ObjectId(spawn.layout_id), (plot.index, plot.placard));
+                        }
 
                         if game_data.get_eobj_pop_type(eobj.parent_data.base_id) == 1 {
                             object_spawns.push((spawn, layer.header.name.value.clone()));
@@ -653,20 +709,6 @@ impl Zone {
                     object_spawns.push((spawn, String::default()));
                 }
             }
-        }
-
-        // housing plot entrances
-        for (i, plot) in self.cached_housing_plots.iter().enumerate() {
-            let spawn = SpawnObject {
-                kind: ObjectKind::EventObj,
-                base_id: EOBJ_HOUSING_ENTRANCE,
-                entity_id: ObjectId(fastrand::u32(..)),
-                radius: 1.0,
-                position: Position(plot.entrance_position),
-                args2: u32::from_le_bytes([0, i as u8, 0, 0]),
-                ..Default::default()
-            };
-            object_spawns.push((spawn, String::default()));
         }
 
         object_spawns
@@ -903,6 +945,41 @@ fn begin_change_zone<'a>(
     hide_character: u8,
     unk1: u8,
 ) -> (&'a mut Instance, bool) {
+    let current_housing = destination_zone_id.and_then(|zone_id| {
+        data.find_actor_instance(actor_id)
+            .filter(|instance| instance.zone.id == zone_id)
+            .and_then(|instance| instance.zone.housing)
+    });
+    let housing =
+        current_housing.or_else(|| crate::housing::HousingAddress::ward(destination_zone_id?, 0));
+    begin_change_zone_to(
+        data,
+        network,
+        game_data,
+        destination_zone_id,
+        housing,
+        None,
+        actor_id,
+        warp_type,
+        param4,
+        hide_character,
+        unk1,
+    )
+}
+
+fn begin_change_zone_to<'a>(
+    data: &'a mut WorldServer,
+    network: &mut NetworkState,
+    game_data: &mut GameData,
+    destination_zone_id: Option<u16>,
+    housing: Option<crate::housing::HousingAddress>,
+    destination_instance: Option<usize>,
+    actor_id: ObjectId,
+    warp_type: WarpType,
+    param4: u8,
+    hide_character: u8,
+    unk1: u8,
+) -> (&'a mut Instance, bool) {
     if let Some(destination_zone_id) = destination_zone_id {
         let mut needs_init_zone = false;
 
@@ -931,8 +1008,19 @@ fn begin_change_zone<'a>(
         let mut carried_combat_state = None;
 
         // inform the players in this zone that this actor left
-        if let Some(current_instance) = data.find_actor_instance_mut(actor_id) {
-            if current_instance.zone.id != destination_zone_id {
+        if let Some(current_index) = data
+            .instances
+            .iter()
+            .position(|instance| instance.actors.contains_key(&actor_id))
+        {
+            let current_instance = &mut data.instances[current_index];
+            let switching_instances = if let Some(destination_index) = destination_instance {
+                current_index != destination_index
+            } else {
+                current_instance.zone.id != destination_zone_id
+                    || current_instance.zone.housing != housing
+            };
+            if switching_instances {
                 // Cross-zone warp: fully despawn the actor for everyone in the old zone.
                 carried_combat_state =
                     take_combat_state_and_despawn_pets(current_instance, network, actor_id);
@@ -963,7 +1051,13 @@ fn begin_change_zone<'a>(
         }
 
         // then find or create a new instance with the zone id
-        let instance = data.ensure_exists(destination_zone_id, game_data);
+        let instance = if let Some(destination_index) = destination_instance {
+            &mut data.instances[destination_index]
+        } else if let Some(address) = housing {
+            data.ensure_housing_instance(destination_zone_id, address, game_data)
+        } else {
+            data.ensure_exists(destination_zone_id, game_data)
+        };
         // Insert an empty actor that will be filled later
         instance.insert_empty_actor(actor_id);
 
@@ -1009,6 +1103,48 @@ pub fn take_combat_state_and_despawn_pets(
     network: &mut NetworkState,
     actor_id: ObjectId,
 ) -> Option<PlayerCombatState> {
+    super::revival::clear(network, current_instance, actor_id);
+    if let Some(actors) = current_instance.find_actor(actor_id)
+        .and_then(|a| crate::server::jobs::dispatch::job_for(a.get_common_spawn().class_job))
+        .and_then(|j| j.persistent_actors())
+    {
+        actors.on_zone_leaving(network, current_instance, actor_id);
+    }
+    crate::server::jobs::scholar::take_for_zone(network,current_instance,actor_id);
+    crate::server::jobs::machinist::take_for_zone(network,current_instance,actor_id);
+    // 领域属于旧地图；保留个人量谱，清除地面物和对应状态。
+    let mut ground = Vec::new();
+    if let Some(NetworkedActor::Player {
+        combat_state,
+        status_effects,
+        ..
+    }) = current_instance.find_actor_mut(actor_id)
+    {
+        let whm = &mut combat_state.white_mage;
+        ground.extend(whm.asylum_object_id.take());
+        whm.asylum_position = None;
+        whm.asylum_expires_at = None;
+        whm.asylum_next_tick_at = None;
+        whm.bell_actor_id = None;
+        whm.bell_position = None;
+        whm.bell_expires_at = None;
+        whm.bell_stacks = 0;
+        whm.bell_last_trigger_at = None;
+        let pct = &mut combat_state.pictomancer;
+        ground.extend(pct.field_object.take());
+        pct.field_center = None;
+        pct.field_until = None;
+        pct.inspired = false;
+        for id in [1911, 1912, 2709, 3689] {
+            status_effects.remove(id);
+        }
+    }
+    for id in ground {
+        network.remove_actor(current_instance, id);
+    }
+    let can_carry_pet = current_instance
+        .find_actor(actor_id)
+        .is_some_and(|a| matches!(a.get_common_spawn().class_job, 26 | 27));
     let mut carried_combat_state = if let Some(NetworkedActor::Player { combat_state, .. }) =
         current_instance.find_actor(actor_id)
     {
@@ -1030,7 +1166,7 @@ pub fn take_combat_state_and_despawn_pets(
         // and clears the gauge demi/Aetherflow/arcanum/attunement state — tracked separately.)
         let carrying_demi_or_primal = state.summoner.demi_expires_at.is_some()
             || state.summoner.primal_summon_expires_at.is_some();
-        if !carrying_demi_or_primal {
+        if !carrying_demi_or_primal && can_carry_pet {
             for (id, actor) in &current_instance.actors {
                 if let NetworkedActor::Npc {
                     state: npc_state,
@@ -1070,6 +1206,7 @@ pub fn take_combat_state_and_despawn_pets(
         })
         .collect();
     for pet_id in pet_ids {
+        current_instance.cancel_actor_tasks(pet_id);
         network.remove_actor(current_instance, pet_id);
     }
 
@@ -1236,22 +1373,32 @@ pub fn change_zone_to_player(
     from_id: ClientId,
     to_actor_id: ObjectId,
 ) {
-    let destination_zone_id;
-    {
-        let Some(target_instance) = data.find_actor_instance(to_actor_id) else {
-            return;
-        };
+    let Some(destination) = data
+        .instances
+        .iter()
+        .position(|instance| instance.actors.contains_key(&to_actor_id))
+    else {
+        return;
+    };
+    let target_instance = &data.instances[destination];
+    let target_actor = &target_instance.actors[&to_actor_id];
+    let position = target_actor.position();
+    let rotation = target_actor.rotation();
+    let destination_zone_id = target_instance.zone.id;
+    let address = target_instance.zone.housing;
 
-        destination_zone_id = target_instance.zone.id;
-    }
+    let Some((client, _)) = network.clients.get(&from_id) else {
+        return;
+    };
+    let from_actor_id = client.actor_id;
 
-    let from_actor_id = network.clients.get(&from_id).unwrap().0.actor_id;
-
-    let (target_instance, needs_init_zone) = begin_change_zone(
+    let (target_instance, needs_init_zone) = begin_change_zone_to(
         data,
         network,
         game_data,
         Some(destination_zone_id),
+        address,
+        Some(destination),
         from_actor_id,
         WarpType::Normal,
         0,
@@ -1259,19 +1406,48 @@ pub fn change_zone_to_player(
         0,
     );
 
-    let Some(target_actor) = target_instance.find_actor(to_actor_id) else {
-        return;
-    };
-
     do_change_zone(
         network,
         target_instance,
         needs_init_zone,
-        Some(target_actor.position()),
-        Some(target_actor.rotation()),
+        Some(position),
+        Some(rotation),
         from_id,
         WarpType::Normal,
     );
+}
+
+pub(super) fn call_all_players(
+    network: &mut NetworkState,
+    data: &mut WorldServer,
+    game_data: &mut GameData,
+    host: ObjectId,
+) {
+    let loaded_player = |actor_id| {
+        data.find_actor_instance(actor_id)
+            .and_then(|instance| instance.find_actor(actor_id))
+            .is_some_and(|actor| {
+                matches!(actor, NetworkedActor::Player { spawn, .. } if spawn.content_id != 0)
+            })
+    };
+    if !loaded_player(host) {
+        return;
+    }
+
+    let clients: Vec<_> = network
+        .clients
+        .iter()
+        .filter(|(id, (client, _))| {
+            client.actor_id != host
+                && !network.to_remove.contains(id)
+                && loaded_player(client.actor_id)
+        })
+        .map(|(&id, _)| id)
+        .collect();
+    tracing::info!(actor_id = %host, count = clients.len(), "GM 执行全服玩家传送");
+    for id in clients {
+        change_zone_to_player(network, data, game_data, id, host);
+    }
 }
 
 /// Sends the needed information to ZoneConnection for a zone change.
@@ -1365,14 +1541,121 @@ fn do_change_zone(
     }
 }
 
+fn sync_housing_entrances(
+    instance: &mut Instance,
+    network: &mut NetworkState,
+    database: &Mutex<WorldDatabase>,
+) {
+    let Some(address) = instance.zone.housing.filter(|address| address.plot.is_none()) else {
+        return;
+    };
+    let result = database.lock().built_housing_plots(address);
+    let Ok(built_plots) =
+        result.inspect_err(|error| tracing::error!(%error, ?address, "读取已建住宅失败"))
+    else {
+        return;
+    };
+
+    for index in 0..instance.zone.cached_housing_plots.len() {
+        let plot = &instance.zone.cached_housing_plots[index];
+        let id = plot.entrance_id;
+        match (
+            built_plots.contains(&i32::from(plot.index)),
+            instance.actors.contains_key(&id),
+        ) {
+            (true, false) => {
+                let object = SpawnObject {
+                    kind: ObjectKind::EventObj,
+                    base_id: EOBJ_HOUSING_ENTRANCE,
+                    entity_id: id,
+                    handler_id: HandlerId(crate::housing::ENTER_ESTATE_EVENT),
+                    radius: 1.0,
+                    position: plot.entrance_position(),
+                    args2: u32::from_le_bytes([0, plot.index, 0, 0]),
+                    ..Default::default()
+                };
+                instance.insert_object(id, object, String::new());
+            }
+            (false, true) => network.remove_actor(instance, id),
+            _ => {}
+        }
+    }
+}
+
 /// Process zone-related messages.
 pub fn handle_zone_messages(
     data: Arc<Mutex<WorldServer>>,
     network: Arc<Mutex<NetworkState>>,
     game_data: Arc<Mutex<GameData>>,
+    database: &Mutex<WorldDatabase>,
     msg: &ToServer,
 ) -> bool {
     match msg {
+        ToServer::RefreshHousing(actor_id) => {
+            let mut data = data.lock();
+            if let Some(instance) = data.find_actor_instance_mut(*actor_id) {
+                let mut network = network.lock();
+                sync_housing_entrances(instance, &mut network, database);
+                network.send_to_instance(
+                    *actor_id,
+                    instance,
+                    FromServer::RefreshHousing,
+                    DestinationNetwork::ZoneClients,
+                );
+            }
+            true
+        }
+        ToServer::HousingTravel(from_id, actor_id, address, zone_id, pop_range, return_plot) => {
+            let mut data = data.lock();
+            let mut network = network.lock();
+            if !network.clients.contains_key(from_id)
+                || data.find_actor_instance(*actor_id).is_none()
+            {
+                return true;
+            }
+            let mut game_data = game_data.lock();
+            let (instance, needs_init) = begin_change_zone_to(
+                &mut data,
+                &mut network,
+                &mut game_data,
+                Some(*zone_id),
+                Some(*address),
+                None,
+                *actor_id,
+                WarpType::Normal,
+                0,
+                0,
+                0,
+            );
+            let destination = pop_range
+                .and_then(|id| instance.zone.find_pop_range(id))
+                .map(|(object, _)| {
+                    let (_, rotation, _) =
+                        Affine3A::from(object.transform).to_scale_rotation_translation();
+                    (
+                        pick_point_in_pop_range(object),
+                        euler_to_direction(rotation.to_euler(EulerRot::XYZ)),
+                    )
+                });
+            let position = return_plot.and_then(|index| {
+                instance
+                    .zone
+                    .cached_housing_plots
+                    .iter()
+                    .find(|plot| plot.index == index)
+                    .map(HousingPlot::entrance_position)
+            });
+            do_change_zone(
+                &mut network,
+                instance,
+                needs_init,
+                position.or(destination.map(|point| point.0)),
+                destination.map(|point| point.1),
+                *from_id,
+                WarpType::Normal,
+            );
+            true
+        }
         ToServer::ZoneLoaded(from_id, from_actor_id, player_spawn) => {
             tracing::info!(
                 "Client {from_id:?} has now loaded into the zone, sending them existing player data."
@@ -1382,6 +1665,7 @@ pub fn handle_zone_messages(
 
             // replace the connection's actor in the table
             let instance = data.find_actor_instance_mut(*from_actor_id).unwrap();
+            sync_housing_entrances(instance, &mut network.lock(), database);
             let (
                 status_effects,
                 teleport_query,
@@ -1534,14 +1818,27 @@ pub fn handle_zone_messages(
             // Re-send the job gauge so the carried-over state shows immediately (the zone-in setup
             // sends a blank gauge, which would otherwise leave it empty until the next action).
             if let Some((classjob_id, data)) = gauge_data {
+                let extra=instance.find_actor(*from_actor_id).and_then(|actor| match actor {
+                    NetworkedActor::Player{combat_state,spawn,..}=>job_for(classjob_id)
+                        .map(|job|job.build_gauge_extra(combat_state,spawn.common.level)),
+                    _=>None,
+                }).unwrap_or([0;6]);
                 let ipc =
-                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
+                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data,extra });
                 let mut network = network.lock();
                 network.send_to_by_actor_id(
                     *from_actor_id,
                     FromServer::PacketSegment(ipc, *from_actor_id),
                     DestinationNetwork::ZoneClients,
                 );
+            }
+
+            if let Some(value) = instance
+                .director
+                .as_ref()
+                .and_then(|director| director.runtime.limit_break_gauge)
+            {
+                super::limit_break::send_gauge(&mut network.lock(), *from_actor_id, value);
             }
 
             true
@@ -1675,9 +1972,12 @@ pub fn handle_zone_messages(
             let mut game_data = game_data.lock();
 
             // first, find the warp and it's destination
-            let (destination_instance_id, destination_zone_id) = game_data
-                .get_aetheryte(*aetheryte_id, *housing_aethernet)
-                .expect("Failed to find the aetheryte!");
+            let Some((destination_instance_id, destination_zone_id)) =
+                game_data.get_aetheryte(*aetheryte_id, *housing_aethernet)
+            else {
+                tracing::warn!(aetheryte_id, "找不到传送目的地");
+                return true;
+            };
 
             // Aetheryte teleports use WarpType::Teleport (4), NOT Normal (1). The client echoes this
             // in PrepareZoning/ActorSetPos/FinishZoning and it selects the teleport-specific arrival
@@ -1863,8 +2163,12 @@ pub fn handle_zone_messages(
                 *plot_index,
             );
 
-            // We *do* want to include the sender here
-            network.send_in_range_inclusive_instance(
+            network.send_to_by_actor_id(
+                *from_actor_id,
+                msg.clone(),
+                DestinationNetwork::ZoneClients,
+            );
+            network.send_to_instance(
                 *from_actor_id,
                 instance,
                 msg,
@@ -1891,8 +2195,7 @@ pub fn handle_zone_messages(
             let msg =
                 FromServer::FurnitureTranslated(*plot_info, *slot, *position, *rotation, *indoors);
 
-            // We *don't* want to include the sender here
-            network.send_in_range_instance(
+            network.send_to_instance(
                 *from_actor_id,
                 instance,
                 msg,
@@ -1972,6 +2275,11 @@ mod tests {
         let mut network = NetworkState::default();
 
         instance.insert_empty_actor(owner);
+        instance
+            .find_actor_mut(owner)
+            .unwrap()
+            .get_common_spawn_mut()
+            .class_job = 27;
         insert_owned_pet(&mut instance, pet, owner);
 
         let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
@@ -1996,6 +2304,91 @@ mod tests {
         let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
             .expect("player exists so combat state is returned");
         assert!(carried.summoner.carried_pet.is_none());
+    }
+
+    #[test]
+    fn zone_change_does_not_carry_healer_pets_or_pct_ground_field() {
+        for job in [24, 33, 42] {
+            let owner = ObjectId(1);
+            let pet = ObjectId(2);
+            let mut instance = Instance::default();
+            let mut network = NetworkState::default();
+            instance.insert_empty_actor(owner);
+            insert_owned_pet(&mut instance, pet, owner);
+            if let NetworkedActor::Player {
+                spawn,
+                combat_state,
+                status_effects,
+                ..
+            } = instance.find_actor_mut(owner).unwrap()
+            {
+                spawn.common.class_job = job;
+                combat_state.pictomancer.paint = 3;
+                combat_state.pictomancer.canvas = 16;
+                combat_state.pictomancer.field_object = Some(pet);
+                combat_state.pictomancer.field_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(20));
+                combat_state.pictomancer.inspired = true;
+                combat_state.white_mage.bell_actor_id = Some(pet);
+                combat_state.white_mage.bell_stacks = 5;
+                status_effects.add(3689, 0, 5.0);
+            }
+            let carried =
+                take_combat_state_and_despawn_pets(&mut instance, &mut network, owner).unwrap();
+            assert!(carried.summoner.carried_pet.is_none());
+            assert!(instance.find_actor(pet).is_none());
+            assert!(carried.pictomancer.field_object.is_none());
+            assert!(!carried.pictomancer.inspired);
+            assert_eq!(
+                (carried.pictomancer.paint, carried.pictomancer.canvas),
+                (3, 16)
+            );
+            assert!(carried.white_mage.bell_actor_id.is_none());
+            assert_eq!(carried.white_mage.bell_stacks, 0);
+        }
+    }
+
+    #[test]
+    fn retiring_healer_pet_preserves_replacement_and_survives_owner_cancel() {
+        let owner = ObjectId(1);
+        let old = ObjectId(2);
+        let new = ObjectId(3);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+        instance.insert_empty_actor(owner);
+        instance
+            .find_actor_mut(owner)
+            .unwrap()
+            .get_common_spawn_mut()
+            .class_job = 24;
+        for id in [old, new] {
+            insert_owned_pet(&mut instance, id, owner);
+            let c = instance.find_actor_mut(id).unwrap().get_common_spawn_mut();
+            c.pet_id = 33;
+            c.health_points = 100;
+        }
+        crate::server::jobs::transient::retire(&mut instance, owner, old);
+        instance.cancel_actor_tasks(owner);
+        crate::server::jobs::transient::finish(&mut network, &mut instance, owner, old, 0);
+        assert_eq!(
+            instance
+                .find_actor(old)
+                .unwrap()
+                .get_common_spawn()
+                .health_points,
+            0
+        );
+        assert!(
+            instance
+                .find_actor(new)
+                .unwrap()
+                .get_common_spawn()
+                .health_points
+                > 0
+        );
+        crate::server::jobs::transient::finish(&mut network, &mut instance, owner, old, 2);
+        assert!(instance.find_actor(old).is_none());
+        assert!(instance.find_actor(new).is_some());
     }
 
     #[test]
@@ -2101,6 +2494,101 @@ mod tests {
     fn find_first_pc_pop_range_ignores_non_pc_ranges() {
         let zone = zone_with_objects(vec![make_pop_range(10, PopType::Npc, [1.0, 2.0, 3.0])]);
         assert!(zone.find_first_pc_pop_range().is_none());
+    }
+
+    #[test]
+    fn call_all_moves_loaded_players_to_the_hosts_exact_instance() {
+        use crate::{ClientHandle, common::ServerHandle};
+        use tokio::sync::mpsc::channel;
+
+        let (world_tx, _world_rx) = channel(1);
+        let ids = ServerHandle {
+            chan: world_tx,
+            next_id: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        };
+        let mut network = NetworkState::default();
+        let mut world = WorldServer::default();
+        world.instances = (0..3)
+            .map(|index| Instance {
+                zone: Zone {
+                    id: if index == 2 { 129 } else { 128 },
+                    ..Default::default()
+                },
+                content_finder_condition_id: if index == 0 { 17 } else { 0 },
+                ..Default::default()
+            })
+            .collect();
+
+        let destination = Position(Vec3::new(11.0, 2.0, 31.0));
+        let mut add = |id, instance: usize, loaded| {
+            let actor = ObjectId(id);
+            let client_id = ids.next_id();
+            let (channel, receiver) = channel(16);
+            network.clients.insert(
+                client_id,
+                (
+                    ClientHandle {
+                        id: client_id,
+                        channel,
+                        actor_id: actor,
+                        content_id: u64::from(id),
+                        account_id: u64::from(id),
+                    },
+                    Default::default(),
+                ),
+            );
+            world.instances[instance].insert_empty_actor(actor);
+            if loaded
+                && let Some(NetworkedActor::Player { spawn, .. }) =
+                    world.instances[instance].find_actor_mut(actor)
+            {
+                spawn.content_id = u64::from(id);
+                spawn.common.position = destination;
+                spawn.common.rotation = 0.75;
+            }
+            receiver
+        };
+        let mut host = add(1, 0, true);
+        let mut nearby = add(2, 0, true);
+        let mut another_copy = add(3, 1, true);
+        let mut another_zone = add(4, 2, true);
+        let mut loading = add(5, 1, false);
+
+        call_all_players(
+            &mut network,
+            &mut world,
+            &mut GameData::default(),
+            ObjectId(1),
+        );
+
+        for client in [&mut another_copy, &mut another_zone] {
+            assert!(matches!(client.try_recv(), Ok(FromServer::PacketSegment(_, _))));
+            assert!(matches!(
+                client.try_recv(),
+                Ok(FromServer::ChangeZone(128, 17, _, position, 0.75, _, false, _))
+                    if position == destination
+            ));
+        }
+        for id in [3, 4] {
+            assert!(world.instances[0].actors.contains_key(&ObjectId(id)));
+            assert!(!world.instances[1].actors.contains_key(&ObjectId(id)));
+            assert!(!world.instances[2].actors.contains_key(&ObjectId(id)));
+        }
+        assert!(
+            world.instances[0]
+                .queued_task
+                .iter()
+                .any(|task| task.from_actor_id == ObjectId(2))
+        );
+        assert!(matches!(
+            nearby.try_recv(),
+            Ok(FromServer::PacketSegment(_, ObjectId(2)))
+        ));
+        assert!(!std::iter::from_fn(|| host.try_recv().ok()).any(|msg| matches!(
+            msg,
+            FromServer::ChangeZone(..) | FromServer::PacketSegment(..)
+        )));
+        assert!(loading.try_recv().is_err());
     }
 
     /// While a demi is active the pet is not carried (INTERIM exclusion): ZoneLoaded falls back to

@@ -1,4 +1,4 @@
-//! 最终阶段练习实例的三级极限技。由 Director 显式开启，普通实例不走此路径。
+//! 由副本 Director 管理的三级极限技。
 use super::{
     action::update_actor_hp_mp,
     actor::NetworkedActor,
@@ -18,6 +18,10 @@ use kawari::{
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
+
+const BARS: u32 = 3;
+const POINTS_PER_BAR: u32 = 10_000;
+const FULL_GAUGE: u32 = BARS * POINTS_PER_BAR;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -56,7 +60,7 @@ pub fn specification(action: u32) -> Option<(u8, Kind)> {
 }
 
 pub fn set_gauge(network: &mut NetworkState, instance: &mut Instance, value: u32) {
-    let value = value.min(30000);
+    let value = value.min(FULL_GAUGE);
     if let Some(d) = &mut instance.director {
         d.runtime.limit_break_gauge = Some(value);
     }
@@ -66,23 +70,31 @@ pub fn set_gauge(network: &mut NetworkState, instance: &mut Instance, value: u32
         .filter_map(|(id, a)| matches!(a, NetworkedActor::Player { .. }).then_some(*id))
         .collect();
     for id in ids {
-        network.send_to_by_actor_id(
-            id,
-            FromServer::PacketSegment(
-                ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
-                    category: ActorControlCategory::LimitBreakGauge {
-                        bars: 3,
-                        current_value: value,
-                        max_value_per_bar: 10000,
-                        unk4: 0,
-                        lb_type: 0,
-                    },
-                })),
-                id,
-            ),
-            DestinationNetwork::ZoneClients,
-        );
+        send_gauge(network, id, value);
     }
+}
+
+pub(super) fn fill_gauge(network: &mut NetworkState, instance: &mut Instance) -> Option<bool> {
+    let in_battle = instance.director.as_ref()?.battle_started_at.is_some();
+    set_gauge(network, instance, FULL_GAUGE);
+    Some(in_battle)
+}
+
+pub(super) fn send_gauge(network: &mut NetworkState, actor: ObjectId, value: u32) {
+    let packet = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorControlSelf(ActorControlSelf {
+        category: ActorControlCategory::LimitBreakGauge {
+            bars: BARS,
+            current_value: value,
+            max_value_per_bar: POINTS_PER_BAR,
+            unk4: 0,
+            lb_type: 0,
+        },
+    }));
+    network.send_to_by_actor_id(
+        actor,
+        FromServer::PacketSegment(packet, actor),
+        DestinationNetwork::ZoneClients,
+    );
 }
 
 pub fn allowed(instance: &Instance, source: ObjectId, action: u32) -> bool {
@@ -90,7 +102,7 @@ pub fn allowed(instance: &Instance, source: ObjectId, action: u32) -> bool {
         return false;
     };
     instance.director.as_ref().is_some_and(|d| {
-        d.battle_started_at.is_some() && d.runtime.limit_break_gauge == Some(30000)
+        d.battle_started_at.is_some() && d.runtime.limit_break_gauge == Some(FULL_GAUGE)
     }) && instance.find_actor(source).is_some_and(|a| {
         matches!(a, NetworkedActor::Player { .. })
             && !a.is_time_stopped()
@@ -359,7 +371,7 @@ pub fn execute(
             .runtime
             .owned_effects
             .insert((source, 3448), source);
-        set_gauge(&mut network.lock(), instance, 30000);
+        set_gauge(&mut network.lock(), instance, FULL_GAUGE);
     }
     true
 }

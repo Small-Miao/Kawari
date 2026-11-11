@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    GameData, Navmesh, SpawnAllocator,
+    GameData, Navmesh, SpawnAllocator, WorldDatabase,
     lua::KawariLua,
     server::{
         action::{
@@ -77,6 +77,7 @@ mod network;
 mod party;
 pub use party::{Party, PartyMember};
 mod npc_behavior;
+mod revival;
 mod social;
 mod zone;
 
@@ -251,11 +252,17 @@ fn deactivate_job(
     };
     let ground_object = if black_mage::is_black_mage(old_class) {
         black_mage::deactivate(actor)
+    } else if old_class == jobs::pictomancer::CLASS_JOB {
+        jobs::pictomancer::deactivate(actor)
     } else if old_class == astrologian::CLASSJOB_ASTROLOGIAN {
         astrologian::deactivate(actor)
     } else {
         if paladin::is_paladin(old_class) {
             paladin::deactivate(actor);
+        } else if jobs::warrior::is_warrior(old_class) {
+            jobs::warrior::deactivate(actor);
+        } else if old_class==37 {
+            jobs::gunbreaker::deactivate(actor);
         } else if let NetworkedActor::Player { combat_state, .. } = actor {
             if white_mage::is_white_mage(old_class) {
                 let state = std::mem::take(&mut combat_state.white_mage);
@@ -301,6 +308,14 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
             common.class_job
         };
 
+        if class_job == jobs::pictomancer::CLASS_JOB {
+            jobs::pictomancer::refresh_field(network, instance, actor_id);
+        }
+        if let Some(actors)=job_for(class_job).and_then(|job|job.persistent_actors()) {actors.on_tick(network,instance,actor_id);}
+        jobs::pictomancer::on_barrier_break(network, instance, actor_id);
+        jobs::gunbreaker::tick_support(network,instance,actor_id);
+        jobs::scholar::tick_support(network,instance,actor_id);
+        jobs::sage::tick_support(network,instance,actor_id);
         if white_mage::is_white_mage(class_job) {
             let result =
                 white_mage::refresh_white_mage_runtime_state_on_actor(network, instance, actor_id);
@@ -318,6 +333,7 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                     let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
                         classjob_id: white_mage::gauge_class_job_id(),
                         data: gauge_data,
+                        extra: [0;6],
                     });
                     network.send_to_by_actor_id(
                         actor_id,
@@ -342,7 +358,10 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
 
         let class_job = common.class_job;
         if let Some(job) = job_for(class_job) {
+            let previous_hp=actor.get_common_spawn().health_points;
             let result = job.refresh_runtime_state_on_actor(actor_id, actor);
+            let hp_changed=previous_hp!=actor.get_common_spawn().health_points;
+            let died=previous_hp>0&&actor.get_common_spawn().health_points==0;
             let gauge_update = if result.changed {
                 let level = actor
                     .common_spawn()
@@ -350,7 +369,7 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                     .level;
                 if let NetworkedActor::Player { combat_state, .. } = actor {
                     job.build_gauge_data(combat_state, level)
-                        .map(|data| (job.gauge_class_job_id(class_job), data))
+                        .map(|data| (job.gauge_class_job_id(class_job), data,job.build_gauge_extra(combat_state,level)))
                 } else {
                     None
                 }
@@ -358,11 +377,11 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                 None
             };
 
-            if let Some((classjob_id, data)) = gauge_update
+            if let Some((classjob_id, data,extra)) = gauge_update
                 && !result.demi_just_ended
             {
                 let ipc =
-                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
+                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data,extra });
                 network.send_to_by_actor_id(
                     actor_id,
                     FromServer::PacketSegment(ipc, actor_id),
@@ -370,12 +389,14 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                 );
             }
 
+            if hp_changed {white_mage::send_hp_mp(network,instance,actor_id);}
+            if died {set_character_mode(instance,network,actor_id,CharacterMode::Dead,0);network.send_ac_in_range_inclusive_instance(instance,actor_id,ActorControlCategory::Kill{animation_id:0});}
             // Demi window just expired this tick — retail kills/despawns the demi actor, clears the
             // demi hotbar, then re-spawns/re-binds carbuncle instead of only flipping UI state.
             if result.demi_just_ended
                 && let Some(actors) = job.persistent_actors()
             {
-                actors.on_demi_expired(network, instance, actor_id, gauge_update);
+                actors.on_demi_expired(network, instance, actor_id, gauge_update.map(|(id,data,_)|(id,data)));
             }
 
             if let Some(cooldown_update) = result.cooldown_update {
@@ -405,6 +426,7 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                 let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
                     classjob_id: black_mage::gauge_class_job_id(),
                     data: gauge_data,
+                    extra: [0;6],
                 });
                 network.send_to_by_actor_id(
                     actor_id,
@@ -430,6 +452,9 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
 impl WorldServer {
     /// Ensures an instance exists, and creates one if not found.
     fn ensure_exists(&mut self, zone_id: u16, game_data: &mut GameData) -> &mut Instance {
+        if let Some(address) = crate::housing::HousingAddress::ward(zone_id, 0) {
+            return self.ensure_housing_instance(zone_id, address, game_data);
+        }
         let is_public_instance;
         if let Some(intended_use) = game_data.get_intended_use(zone_id as u32) {
             is_public_instance = !is_private_area(intended_use);
@@ -439,24 +464,49 @@ impl WorldServer {
 
         if is_public_instance {
             // create a new instance if necessary
-            if !self
-                .instances
-                .iter()
-                .any(|x| x.zone.id == zone_id && x.content_finder_condition_id == 0)
-            {
+            if !self.instances.iter().any(|x| {
+                x.zone.id == zone_id
+                    && x.content_finder_condition_id == 0
+                    && x.zone.housing.is_none()
+            }) {
                 tracing::info!("Creating new public instance for zone {zone_id}!");
                 self.instances.push(Instance::new(zone_id, game_data));
             }
 
             self.instances
                 .iter_mut()
-                .find(|x| x.zone.id == zone_id && x.content_finder_condition_id == 0)
+                .find(|x| {
+                    x.zone.id == zone_id
+                        && x.content_finder_condition_id == 0
+                        && x.zone.housing.is_none()
+                })
                 .unwrap()
         } else {
             tracing::info!("Creating new private instance for zone {zone_id}!");
             self.instances.push(Instance::new(zone_id, game_data));
             self.instances.last_mut().unwrap()
         }
+    }
+
+    fn ensure_housing_instance(
+        &mut self,
+        zone_id: u16,
+        address: crate::housing::HousingAddress,
+        game_data: &mut GameData,
+    ) -> &mut Instance {
+        let index = self
+            .instances
+            .iter()
+            .position(|instance| {
+                instance.zone.id == zone_id && instance.zone.housing == Some(address)
+            })
+            .unwrap_or_else(|| {
+                let mut instance = Instance::new(zone_id, game_data);
+                instance.zone.housing = Some(address);
+                self.instances.push(instance);
+                self.instances.len() - 1
+            });
+        &mut self.instances[index]
     }
 
     /// Finds the instance associated with an actor, or returns None if they are not found.
@@ -883,7 +933,13 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
         // damage from the caster's stats). NPC sources have no BaseParameters, so fall back to a
         // rough flat value derived from potency.
         for tick in &ticks {
-            let source_actor = instance.find_actor(tick.source_actor_id);
+            let source_actor = instance.find_actor(tick.stat_source_actor_id.unwrap_or(tick.source_actor_id));
+            // 仙女等宠物仍以宠物实体归属状态，但持续效果按主人的战斗参数计算。
+            let source_actor = source_actor.and_then(|a| {
+                if matches!(a,NetworkedActor::Npc{..}) && a.get_common_spawn().owner_id.is_valid() {
+                    instance.find_actor(a.get_common_spawn().owner_id)
+                } else {Some(a)}
+            });
             let source_damage_modifiers = action_damage_modifiers(source_actor);
             let source_params = source_actor.and_then(|a| {
                 if let NetworkedActor::Player { parameters, .. } = a {
@@ -934,7 +990,9 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
                         .as_ref()
                         .map(|p| p.calc_heal_amount(tick.potency as u32) as i64)
                         .unwrap_or((tick.potency / 2) as i64) as f64)
-                        * astrologian::incoming_heal_multiplier(actor)) as i64
+                        * tick.healing_multiplier
+                        * white_mage::incoming_heal_multiplier(Some(actor)))
+                        as i64
                 }
                 TickEffectKind::RestoreMp => tick.potency as i64,
             };
@@ -1026,18 +1084,13 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
         let Some(actor) = instance.find_actor_mut(plan.id) else {
             continue;
         };
-        let max_hp = actor.get_common_spawn().max_health_points.max(1);
         let max_mp = actor.get_common_spawn().max_resource_points;
 
         if plan.hp_delta < 0 {
             let damage = (-plan.hp_delta) as u32;
             actor.apply_damage(damage);
         } else if plan.hp_delta > 0 {
-            let common = actor.get_common_spawn_mut();
-            common.health_points = common
-                .health_points
-                .saturating_add(plan.hp_delta as u32)
-                .min(max_hp);
+            actor.apply_heal(plan.hp_delta as u32);
         }
 
         if plan.mp_delta > 0 {
@@ -1754,6 +1807,7 @@ fn server_logic_tick(
                 let mut network = network.lock();
                 actors_to_refresh_effects.extend(refresh_runtime_job_state(instance, &mut network));
                 astrologian::refresh_delayed_actions(&mut network, instance);
+                revival::tick(&mut network, instance, Instant::now());
             }
 
             expired_effects.extend(expire_effects(&network, instance, Instant::now()));
@@ -1833,6 +1887,7 @@ fn server_logic_tick(
 
 pub async fn server_main_loop(
     game_data: GameData,
+    database: Arc<Mutex<WorldDatabase>>,
     parties: HashMap<u64, Party>,
     linkshells: HashMap<u64, Vec<ObjectId>>,
     mut recv: Receiver<ToServer>,
@@ -1939,6 +1994,22 @@ pub async fn server_main_loop(
                                         QueuedTaskData::DeadDespawn {
                                             actor_id: *actor_id,
                                         },
+                                    );
+                                }
+                            }
+                            QueuedTaskData::RetireJobPet {
+                                owner_id,
+                                actor_id,
+                                stage,
+                            } => {
+                                let mut data = data.lock();
+                                if let Some(instance) = data.find_actor_instance_mut(*actor_id) {
+                                    jobs::transient::finish(
+                                        &mut network.lock(),
+                                        instance,
+                                        *owner_id,
+                                        *actor_id,
+                                        *stage,
                                     );
                                 }
                             }
@@ -2224,7 +2295,13 @@ pub async fn server_main_loop(
             &msg,
         );
         handled |= handle_social_messages(data.clone(), network.clone(), &msg);
-        handled |= handle_zone_messages(data.clone(), network.clone(), game_data.clone(), &msg);
+        handled |= handle_zone_messages(
+            data.clone(),
+            network.clone(),
+            game_data.clone(),
+            &database,
+            &msg,
+        );
         handled |= handle_action_messages(
             data.clone(),
             game_data.clone(),
@@ -2282,19 +2359,25 @@ pub async fn server_main_loop(
 
                     let mut network = network.lock();
 
-                    // Refresh the party member's client id, if applicable.
-                    'outer: for party in &mut network.parties.values_mut() {
-                        for member in &mut party.members {
-                            if member.actor_id == handle.actor_id {
-                                member.chat_client_id = handle.id; // The chat connection doesn't get informed here since it'll happen later.
-                                break 'outer;
-                            }
-                        }
-                    }
+                    // Restore party chat independently of when the zone finishes loading.
+                    let chatchannel_id = network.parties.values_mut().find_map(|party| {
+                        let chatchannel_id = party.chatchannel_id;
+                        let member = party.get_member_by_actor_id_mut(handle.actor_id)?;
+                        member.chat_client_id = handle.id;
+                        Some(chatchannel_id)
+                    });
 
+                    let handle_id = handle.id;
                     network
                         .chat_clients
-                        .insert(handle.id, (handle, ClientState::default()));
+                        .insert(handle_id, (handle, ClientState::default()));
+                    if let Some(chatchannel_id) = chatchannel_id {
+                        network.send_to(
+                            handle_id,
+                            FromServer::SetPartyChatChannel(chatchannel_id),
+                            DestinationNetwork::ChatClients,
+                        );
+                    }
                 }
                 ToServer::ReadySpawnPlayer(
                     from_id,
@@ -2303,6 +2386,7 @@ pub async fn server_main_loop(
                     position,
                     rotation,
                     city_state_opening,
+                    housing,
                 ) => {
                     tracing::info!("Player {from_id:?} is now spawning into {zone_id}....");
 
@@ -2313,7 +2397,11 @@ pub async fn server_main_loop(
                     let instance;
                     {
                         let mut game_data = game_data.lock();
-                        instance = data.ensure_exists(zone_id, &mut game_data);
+                        instance = if let Some(address) = housing {
+                            data.ensure_housing_instance(zone_id, address, &mut game_data)
+                        } else {
+                            data.ensure_exists(zone_id, &mut game_data)
+                        };
                     }
 
                     instance.insert_empty_actor(from_actor_id);
@@ -2342,6 +2430,14 @@ pub async fn server_main_loop(
                             exit_position = position;
                             exit_rotation = rotation;
                         }
+                    } else if housing.is_some_and(|address| address.plot.is_none())
+                        && position == Position::default()
+                        && let Some(object) = instance.zone.find_first_pc_pop_range()
+                    {
+                        let (_, rotation, translation) =
+                            Affine3A::from(object.transform).to_scale_rotation_translation();
+                        exit_position = Position(translation);
+                        exit_rotation = euler_to_direction(rotation.to_euler(EulerRot::XYZ));
                     } else {
                         exit_position = position;
                         exit_rotation = rotation;
@@ -2375,7 +2471,7 @@ pub async fn server_main_loop(
                     if let Some(instance) = data.find_actor_instance_mut(actor_id) {
                         if let Some(actor) = instance
                             .find_actor(actor_id)
-                            .filter(|a| a.is_time_stopped())
+                            .filter(|a| a.is_movement_locked())
                         {
                             network.lock().send_to_by_actor_id(
                                 actor_id,
@@ -2467,6 +2563,14 @@ pub async fn server_main_loop(
                     }
                 }
                 ToServer::ClientTrigger(from_id, from_actor_id, trigger) => {
+                    {
+                        let mut world = data.lock();
+                        if let Some(instance) = world.find_actor_instance_mut(from_actor_id)
+                            && revival::handle_trigger(&mut network.lock(), instance, from_actor_id, &trigger.trigger, Instant::now())
+                        {
+                            continue;
+                        }
+                    }
                     match &trigger.trigger {
                         ClientTriggerCommand::TeleportQuery { aetheryte_id, .. } => {
                             let msg =
@@ -2551,7 +2655,7 @@ pub async fn server_main_loop(
                             let mut world = data.lock();
                             if let Some(instance) = world.find_actor_instance_mut(from_actor_id)
                                 && let Some(actor) = instance.find_actor_mut(from_actor_id)
-                                && paladin::is_paladin(actor.get_common_spawn().class_job)
+                                && paladin::uses_native_auto_attack(actor.get_common_spawn().class_job)
                             {
                                 paladin::toggle_auto_attack(actor, *on, *target, *is_manual_toggle);
                                 network.lock().send_ac_in_range_inclusive_instance(
@@ -2594,7 +2698,7 @@ pub async fn server_main_loop(
                                 && let Some(actor) = instance.find_actor_mut(from_actor_id)
                             {
                                 actor.get_common_spawn_mut().target_id = target;
-                                if paladin::is_paladin(actor.get_common_spawn().class_job) {
+                                if paladin::uses_native_auto_attack(actor.get_common_spawn().class_job) {
                                     paladin::retarget_auto_attack(actor, *actor_id);
                                 }
                             }
@@ -3803,6 +3907,7 @@ pub async fn server_main_loop(
                     old_zone_id,
                     old_position,
                     old_rotation,
+                    old_housing,
                 ) => {
                     let mut data = data.lock();
                     let mut network = network.lock();
@@ -3830,7 +3935,11 @@ pub async fn server_main_loop(
                     let instance;
                     {
                         let mut game_data = game_data.lock();
-                        instance = data.ensure_exists(old_zone_id, &mut game_data);
+                        instance = if let Some(address) = old_housing {
+                            data.ensure_housing_instance(old_zone_id, address, &mut game_data)
+                        } else {
+                            data.ensure_exists(old_zone_id, &mut game_data)
+                        };
                     }
 
                     instance.insert_empty_actor(from_actor_id);
@@ -3964,6 +4073,13 @@ pub async fn server_main_loop(
                         .and_then(|instance| instance.director.as_mut())
                         .map(|director| director.timeline_command(&action))
                         .unwrap_or_else(|| "当前不在脚本副本中。".into());
+                    let _ = reply.send(result);
+                }
+                ToServer::FillLimitBreak(actor, reply) => {
+                    let result = data
+                        .lock()
+                        .find_actor_instance_mut(actor)
+                        .and_then(|instance| limit_break::fill_gauge(&mut network.lock(), instance));
                     let _ = reply.send(result);
                 }
                 ToServer::GodMode(from_actor_id, enabled, reply) => {
@@ -4237,6 +4353,12 @@ pub async fn server_main_loop(
                             from_actor_id,
                         );
                     }
+                }
+                ToServer::CallAll(host) => {
+                    let mut data = data.lock();
+                    let mut network = network.lock();
+                    let mut game_data = game_data.lock();
+                    zone::call_all_players(&mut network, &mut data, &mut game_data, host);
                 }
                 ToServer::SpawnLayoutNpc(from_actor_id, layout_id) => {
                     let mut data = data.lock();

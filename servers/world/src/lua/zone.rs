@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use mlua::{UserData, UserDataFields};
 
-use kawari::{common::ObjectId, ipc::zone::ServerZoneIpcSegment, packet::PacketSegment};
+use kawari::{
+    common::{ObjectId, Position},
+    ipc::zone::ServerZoneIpcSegment,
+    packet::PacketSegment,
+};
 
 use super::QueueSegments;
 
@@ -15,6 +19,12 @@ pub struct LuaZone {
     pub place_name: String,
     pub intended_use: u8,
     pub map_id: u16,
+    pub housing: Option<crate::housing::HousingAddress>,
+    pub housing_entrances: HashMap<ObjectId, u8>,
+    pub housing_placards: HashMap<ObjectId, (u8, u32)>,
+    pub housing_plot_positions: HashMap<u8, Position>,
+    pub housing_entrance_positions: HashMap<u8, Position>,
+    pub housing_plot_bounds: HashMap<u8, crate::housing::PlotBounds>,
     pub queued_segments: Vec<PacketSegment<ServerZoneIpcSegment>>,
     // NOTE: These are here to be accessed in Lua via the injected BASE_ID
     pub cached_npc_base_ids: HashMap<ObjectId, u32>,

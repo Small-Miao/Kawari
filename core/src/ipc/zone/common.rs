@@ -1,25 +1,83 @@
+use std::io::Read;
+
 use binrw::binrw;
 use bitflags::bitflags;
 use strum::FromRepr;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StrategyBoardShare {
+    pub index: u8,
+    pub realtime: bool,
+    pub refresh: bool,
+}
 
 #[binrw]
 #[brw(little)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StrategyBoard {
-    /// Apparently compressed data. Completely unknown what's in here, but it seems the server doesn't care about it, unless we want to document it someday!
+    /// Checksum, packed board, names and folder position after the packet's content ID.
     #[br(count = 1176)]
     #[bw(pad_size_to = 1176)]
     data: Vec<u8>,
+}
+
+impl StrategyBoard {
+    pub fn validate_share(&self) -> Option<StrategyBoardShare> {
+        let packed = self.data.get(8..1048)?;
+        let checksum = u32::from_le_bytes(self.data[..4].try_into().ok()?);
+        let size = usize::from(u16::from_le_bytes(packed[..2].try_into().ok()?));
+        let index = (*self.data.get(1168)?).max(1);
+        let total = *self.data.get(1169)?;
+        if !(1..=10).contains(&total)
+            || index > total
+            || !(3..=0x820).contains(&size)
+            || crc32fast::hash(packed) != checksum
+        {
+            return None;
+        }
+
+        let mut unpacked = Vec::with_capacity(size);
+        flate2::read::ZlibDecoder::new(&packed[3..])
+            .take((size + 1) as u64)
+            .read_to_end(&mut unpacked)
+            .ok()?;
+        if unpacked.len() != size || unpacked[1] > 75 || unpacked[2] > 8 {
+            return None;
+        }
+        let text_start = 3 + usize::from(unpacked[1]) * 17;
+        let text_end = text_start + usize::from(unpacked[2]);
+        let text_size: usize = unpacked
+            .get(text_start..text_end)?
+            .iter()
+            .map(|len| usize::from(*len))
+            .sum();
+        if unpacked[2] != 0 && text_end + text_size >= size {
+            return None;
+        }
+
+        Some(StrategyBoardShare {
+            index,
+            realtime: packed[2] & 1 != 0,
+            refresh: packed[2] & 2 != 0,
+        })
+    }
 }
 
 #[binrw]
 #[brw(little)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StrategyBoardUpdate {
-    /// Unknown data for now. The server seems not to care about it, unless we want to document it someday!
+    /// Client operation and payload; preserve the original bytes when relaying.
     #[br(count = 64)]
     #[bw(pad_size_to = 64)]
     data: Vec<u8>,
+}
+
+impl StrategyBoardUpdate {
+    pub fn has_valid_checksum(&self) -> bool {
+        self.data.len() == 64
+            && self.data[..4] == crc32fast::hash(&self.data[8..]).to_le_bytes()
+    }
 }
 
 /// Represents housing appeal tags that players can set for their owned housing.

@@ -93,6 +93,14 @@ Actor 的 `MoveTo`、`Follow`、`FaceEnmity`、`StopMovement` 使用实时快照
 
 场景接口：`MapEffect(index, state, timeline)`、`SetupMapEffects(states, flag)`、`SpawnEObj(key, Params)`、`AnimateEObj(key, state, timeline)`、`RemoveEObj(key)`、`PlayBgm(id)`、`SetWeather(id, fade)`、`DirectorEvent(id, args)`。MapEffect 的包装参数顺序是 index/state/timeline，中间层负责转换为原生 index/timeline/state。
 
+### 欧米茄最终阶段音乐（2026-11-10）
+
+`Scenes/z3oz/01_Transition.cs` 保留录像的 57.477 秒切曲 951、67.265 秒结束过场；`02_Engage.cs` 在 67.329 秒先发送 `DirectorEvent(0x80000005, 0, 0, 0, 0)` 解除导演临时音乐覆盖，再通过 `PlayBgm(951)` 交接最终阶段。普通 `SetBGM` 在临时覆盖期间可能只更新缓存，同一 ID 也可能直接返回，因此不能把缓存为 951 当成实际已播放。
+
+`Initial.cs` 先保存恢复曲目 964，再解除临时覆盖，用于入场、停止和重置。此处顺序不能颠倒：当前客户端在基础曲目为 0 时，直接设置临时曲目 0 可能走相等分支而保留覆盖标志。调度继续随实例取消，没有定时轮询补发。
+
+证据来自当前国服 2026.11.03 客户端静态反汇编，地址和校验和见 [修复方案](../../history/2026-11/202611102112_top_bgm/how.md)。服务器自动验证与客户端听感验收分别记录；此次尚待用户确认实际播放。只修改定义即可通过新实例或 `!timeline reload` 加载，`reset` 不重新编译脚本。
+
 该层提供机制编写接口兼容，不是原模拟器所有网络/客户端功能的替代品。任意 VFX 路径、自定义图标绘制、任意模型缩放、客户端消息包不能自动变成游戏原生操作。玩家当前只暴露内部 ID 名称和职业数字字符串；不要按显示名写机制。生成原生演员应优先用 Actors 模板以保留 BNpcBase、布局与模型信息。
 
 ## 已迁移的入口

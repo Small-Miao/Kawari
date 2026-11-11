@@ -7,15 +7,11 @@ use crate::{
     zone_connection::TeleportQuery,
 };
 use kawari::{
-    common::{
-        FestivalId, HandlerId, HandlerType, HouseId, HouseUnit, HousingFlag, LandData, Position,
-        timestamp_secs,
-    },
+    common::{FestivalId, HandlerId, HandlerType, Position, timestamp_secs},
     config::get_config,
     constants::OBFUSCATION_ENABLED_MODE,
     ipc::zone::{
-        ActorControlCategory, Condition, DutyFinderSetting, FurnitureList, House, HouseExterior,
-        HouseList, HouseStatus, HousingInteriorDetails, MapEffects, PlotSize, ServerZoneIpcData,
+        ActorControlCategory, Condition, DutyFinderSetting, MapEffects, ServerZoneIpcData,
         ServerZoneIpcSegment, WarpType, WeatherChange, ZoneInit, ZoneInitFlags,
     },
     packet::{ConnectionState, PacketSegment, ScramblerKeyGenerator, SegmentData, SegmentType},
@@ -81,6 +77,7 @@ impl ZoneConnection {
         // (already BoundByDuty) which would clobber the real overworld location.
         if bound_by_duty && !self.conditions.has_condition(Condition::BoundByDuty) {
             self.old_zone_id = self.player_data.volatile.zone_id as u16;
+            self.old_housing = self.housing_address();
             self.old_position = self.player_data.volatile.position;
             self.old_rotation = self.player_data.volatile.rotation as f32;
         }
@@ -88,6 +85,9 @@ impl ZoneConnection {
         // Commit back our zone id and other volatile info on zone change.
         {
             self.player_data.volatile.zone_id = new_zone_id as i32;
+            self.player_data.volatile.housing_location = lua_zone
+                .housing
+                .map_or(0, crate::housing::HousingAddress::pack);
             self.player_data.volatile.position = exit_position;
             self.player_data.volatile.rotation = exit_rotation as f64;
 
@@ -163,32 +163,7 @@ impl ZoneConnection {
         }))
         .await;
 
-        // Send owned housing list (unsure where this fits in before ZoneInit?!)
-        {
-            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::OwnedHousing {
-                unk1: Default::default(),
-                unk2: Default::default(),
-                unk3: Default::default(),
-                unk4: Default::default(),
-                unk5: Default::default(),
-                apartment: LandData {
-                    id: HouseId {
-                        unit: HouseUnit {
-                            apartment_division_plot_index: 0,
-                            apartment_flag: true,
-                        },
-                        unk1: 0,
-                        ward_index: 0,
-                        room_number: 1,
-                        territory_type_id: 340,
-                        world_id: config.world.world_id,
-                    },
-                    flags: 19,
-                    unk1: 0,
-                },
-            });
-            self.send_ipc_self(ipc).await;
-        }
+        self.send_owned_estate().await;
 
         // Send the list of available items if we're in an inn, since its only accessible via their beds.
         if lua_zone.intended_use == TerritoryIntendedUse::Inn as u8 {
@@ -320,113 +295,9 @@ impl ZoneConnection {
             self.send_crafting_gathering_information().await;
         }
 
-        if lua_zone.intended_use == TerritoryIntendedUse::HousingOutdoor as u8 {
-            let mut houses = [House::default(); 30];
-
-            // First, populate the houses in this ward. Note that for now, we treat every ward the same.
-            // TODO: For now, we hardcode 3 prefab houses as demonstration units until we implement more of the system. One cottage, one house and one mansion, all set to be individually owned and locked. Plots 5, 6, and 12 were chosen due to their close proximity to each other.
-            // Glade house (Wood)
-            houses[4] = House {
-                plot_size: PlotSize::Medium,
-                status: HouseStatus::HouseBuilt,
-                flags: HousingFlag::OPEN,
-                exterior: HouseExterior {
-                    roof_id: 1029,
-                    walls_id: 3589,
-                    windows_id: 2562,
-                    door_id: 514,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            // Hingan mansion (Mokuzo)
-            houses[5] = House {
-                plot_size: PlotSize::Large,
-                status: HouseStatus::HouseBuilt,
-                flags: HousingFlag::OPEN,
-                exterior: HouseExterior {
-                    roof_id: 1081,
-                    walls_id: 3632,
-                    windows_id: 2579,
-                    door_id: 531,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            // Highland cottage (Wood)
-            houses[11] = House {
-                plot_size: PlotSize::Small,
-                status: HouseStatus::HouseBuilt,
-                flags: HousingFlag::OPEN | HousingFlag::OWNED_BY_FC,
-                exterior: HouseExterior {
-                    roof_id: 1136,
-                    walls_id: 3687,
-                    windows_id: 2598,
-                    door_id: 550,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let config = get_config();
-            self.send_ipc_self(ServerZoneIpcSegment::new(ServerZoneIpcData::HouseList(
-                HouseList {
-                    land_id: 0,
-                    ward: 0,
-                    territory_type_id: lua_zone.zone_id,
-                    world_id: config.world.world_id,
-                    subdivision: 257, // TODO: Figure out more about subdivisions
-                    houses,
-                },
-            )))
-            .await;
-
-            // Finally, populate the exterior furniture.
-            // TODO: Actually send some real furniture, once we can do that!
-            for index in 0..8 {
-                self.send_ipc_self(ServerZoneIpcSegment::new(ServerZoneIpcData::FurnitureList(
-                    FurnitureList {
-                        count: 8,
-                        index,
-                        ..Default::default()
-                    },
-                )))
-                .await;
-            }
-        }
-
-        if lua_zone.intended_use == TerritoryIntendedUse::HousingIndoor as u8 {
-            let config = get_config();
-            // Bare minimum stuff to make housing interiors load
-            self.send_ipc_self(ServerZoneIpcSegment::new(
-                ServerZoneIpcData::HousingInteriorDetails(HousingInteriorDetails::default()),
-            ))
-            .await;
-
-            // The LandId is currently set so that plugins like HousingPos/Buildingway can plop stuff down
-            self.send_ipc_self(ServerZoneIpcSegment::new(ServerZoneIpcData::FurnitureList(
-                FurnitureList {
-                    id: HouseId {
-                        unit: HouseUnit {
-                            apartment_division_plot_index: 0,
-                            apartment_flag: true,
-                        },
-                        unk1: 0,
-                        room_number: 1,
-                        ward_index: 0,
-                        territory_type_id: 340,
-                        world_id: config.world.world_id,
-                    },
-                    count: 1,
-                    index: 0,
-                    unk2: 100, // Indoors
-                    ..Default::default()
-                },
-            )))
-            .await;
-        }
+        self.refresh_housing(lua_zone).await;
+        self.conditions
+            .remove_condition(Condition::UsingHousingFunctions);
 
         self.conditions
             .toggle_condition(Condition::BoundByDuty, bound_by_duty);
@@ -645,6 +516,7 @@ impl ZoneConnection {
     pub async fn join_content(&mut self, id: u16) {
         // Store our old information, for when we leave the instance
         self.old_zone_id = self.player_data.volatile.zone_id as u16;
+        self.old_housing = self.housing_address();
         self.old_position = self.player_data.volatile.position;
         self.old_rotation = self.player_data.volatile.rotation as f32;
 
@@ -687,21 +559,6 @@ impl ZoneConnection {
     }
 
     /// Returns the intended usage of the zone the player's currently in.
-    pub fn get_zone_intended_use(&self) -> TerritoryIntendedUse {
-        let mut gamedata = self.gamedata.lock();
-        gamedata
-            .get_intended_use(self.player_data.volatile.zone_id as u32)
-            .unwrap_or(TerritoryIntendedUse::MordionGaol)
-    }
-
-    /// Returns true if the intended use is for housing, false otherwise.
-    pub fn in_housing_area(&self, intended_use: TerritoryIntendedUse) -> bool {
-        matches!(
-            intended_use,
-            TerritoryIntendedUse::HousingIndoor | TerritoryIntendedUse::HousingOutdoor
-        )
-    }
-
     // TODO: probably shove this director setup into server state? we actually do very, very little here.
     pub async fn setup_director(&mut self) {
         // Initialize map effects to their default state.

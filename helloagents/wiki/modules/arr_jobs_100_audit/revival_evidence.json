@@ -1,0 +1,1851 @@
+[
+  {
+    "source": "幻想龙诗绝境战 2026.11.04 23.21.11.dat",
+    "sha256": "c7b9eb1b081ba62bc660f3e13224181549b7273ecd1fcdc7b2481eac68f274bd",
+    "build": 14101351,
+    "raises": [
+      {
+        "ms": 98508,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员1",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 75944,
+          "kind": "cast",
+          "position": [
+            91.9966,
+            -0.0153,
+            82.9938
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": []
+      },
+      {
+        "ms": 404383,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员1",
+        "target": "演员3",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 398908,
+          "kind": "cast",
+          "position": [
+            88.9754,
+            -0.0153,
+            104.9973
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": [
+          {
+            "after_ms": 7821,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 7888,
+            "kind": "position",
+            "warp": 25,
+            "argument": 2,
+            "position": [
+              100.999,
+              -0.0,
+              118.099
+            ]
+          },
+          {
+            "after_ms": 7888,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 7888,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 8150,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 1036224,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员5",
+        "first_person": false,
+        "cast": {
+          "ms": 1033209,
+          "seconds": 7.872,
+          "spell": 173,
+          "position": [
+            105.8518,
+            -0.0153,
+            101.03
+          ]
+        },
+        "source_position": {
+          "ms": 1033209,
+          "kind": "cast",
+          "position": [
+            105.8518,
+            -0.0153,
+            101.03
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1274,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2755,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              107.7192,
+              -0.0,
+              101.6193
+            ]
+          },
+          {
+            "after_ms": 2987,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 5992,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2406693,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员5",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 2401127,
+          "kind": "cast",
+          "position": [
+            99.8398,
+            -0.0153,
+            106.6453
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1640,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 3075,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              99.8585,
+              -0.0,
+              106.647
+            ]
+          },
+          {
+            "after_ms": 3362,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6378,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2799898,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 2797390,
+          "kind": "cast",
+          "position": [
+            100.7248,
+            0.1678,
+            98.8937
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 3022,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 4491,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              99.2521,
+              -0.0,
+              105.5669
+            ]
+          },
+          {
+            "after_ms": 4938,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 7894,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2799968,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员1",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 2797184,
+          "kind": "cast",
+          "position": [
+            100.7248,
+            0.1678,
+            98.8937
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": [
+          {
+            "after_ms": 2952,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 4421,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              99.2521,
+              -0.0,
+              105.5669
+            ]
+          },
+          {
+            "after_ms": 4868,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 7824,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 3317422,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员6",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 3314657,
+          "kind": "cast",
+          "position": [
+            93.7972,
+            -0.0153,
+            100.1144
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1472,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2951,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              93.7976,
+              -0.0,
+              100.1332
+            ]
+          },
+          {
+            "after_ms": 3234,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6238,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 3687345,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员1",
+        "target": "演员7",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 3682008,
+          "kind": "cast",
+          "position": [
+            99.9924,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": [
+          {
+            "after_ms": 5451,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 6915,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              107.9563,
+              -0.0,
+              110.2624
+            ]
+          },
+          {
+            "after_ms": 7206,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 10155,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 3693146,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 3690362,
+          "kind": "cast",
+          "position": [
+            99.9924,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1191,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2663,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              110.2485,
+              -0.0,
+              108.7594
+            ]
+          },
+          {
+            "after_ms": 3022,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6007,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 11086,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              2,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 5447362,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员1",
+        "target": "演员7",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 5444510,
+          "kind": "cast",
+          "position": [
+            90.074,
+            -0.0153,
+            90.074
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": [
+          {
+            "after_ms": 3548,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 5001,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              90.7187,
+              -0.0,
+              88.0442
+            ]
+          },
+          {
+            "after_ms": 5283,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 8303,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 5692331,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 5688192,
+          "kind": "cast",
+          "position": [
+            99.9619,
+            -0.0153,
+            103.2578
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1606,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 3157,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              99.8965,
+              -0.0,
+              103.089
+            ]
+          },
+          {
+            "after_ms": 3496,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6474,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "source": "光暗未来绝境战 2026.11.05 00.18.13.dat",
+    "sha256": "e5ee4c565410cee3b407247538c725fa4f12076bd388764e8ace134979e4422d",
+    "build": 14101351,
+    "raises": [
+      {
+        "ms": 612326,
+        "action": 3603,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 3603,
+        "source": "演员1",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 585352,
+          "kind": "cast",
+          "position": [
+            99.0463,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080130e"
+        ],
+        "trace": [
+          {
+            "after_ms": 3454,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 4918,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              100.3536,
+              0.0,
+              81.6744
+            ]
+          },
+          {
+            "after_ms": 5277,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 8242,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 1135258,
+        "action": 3603,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 3603,
+        "source": "演员1",
+        "target": "演员3",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 1114102,
+          "kind": "cast",
+          "position": [
+            99.321,
+            -0.0153,
+            102.0066
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080130e"
+        ],
+        "trace": [
+          {
+            "after_ms": 1032,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2510,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              100.2647,
+              0.0,
+              96.603
+            ]
+          },
+          {
+            "after_ms": 2921,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 5915,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 1159597,
+        "action": 24287,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 24287,
+        "source": "演员3",
+        "target": "演员1",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 1085880,
+          "kind": "cast",
+          "position": [
+            99.2294,
+            -0.0153,
+            101.4267
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080df5e"
+        ],
+        "trace": [
+          {
+            "after_ms": 1195,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2676,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              100.4433,
+              0.0,
+              100.6843
+            ]
+          },
+          {
+            "after_ms": 3103,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6032,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 1231251,
+        "action": 3603,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 3603,
+        "source": "演员1",
+        "target": "演员4",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 1142557,
+          "kind": "cast",
+          "position": [
+            100.0229,
+            -0.0153,
+            99.4736
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080130e"
+        ],
+        "trace": [
+          {
+            "after_ms": 1303,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2713,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              100.0309,
+              0.0,
+              114.0005
+            ]
+          },
+          {
+            "after_ms": 3106,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6063,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "source": "欧米茄绝境验证战 2026.11.07 21.48.13.dat",
+    "sha256": "92a3e6f260dc446cf241d1c55391c6b0a90ea97d40c0078e67df3ac88254c07e",
+    "build": 14101351,
+    "raises": [
+      {
+        "ms": 441874,
+        "action": 125,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 125,
+        "source": "演员1",
+        "target": "演员2",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 438750,
+          "kind": "cast",
+          "position": [
+            96.9711,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b00000000807d00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1257,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2734,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              94.6339,
+              0.0,
+              102.7818
+            ]
+          },
+          {
+            "after_ms": 3103,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6056,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 1759878,
+        "action": 125,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 125,
+        "source": "演员1",
+        "target": "演员3",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 1728197,
+          "kind": "cast",
+          "position": [
+            100.0229,
+            -0.0153,
+            107.2557
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b00000000807d00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1713,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 3219,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              100.6622,
+              0.0,
+              100.093
+            ]
+          },
+          {
+            "after_ms": 3476,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6455,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2360610,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员3",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 2350881,
+          "kind": "cast",
+          "position": [
+            99.9619,
+            -0.0153,
+            99.5956
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1579,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 3010,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              101.1224,
+              0.0,
+              102.0857
+            ]
+          },
+          {
+            "after_ms": 3441,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6399,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2360674,
+        "action": 125,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 125,
+        "source": "演员1",
+        "target": "演员3",
+        "first_person": false,
+        "cast": null,
+        "source_position": {
+          "ms": 2354797,
+          "kind": "cast",
+          "position": [
+            99.9619,
+            -0.0153,
+            99.5956
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b00000000807d00"
+        ],
+        "trace": [
+          {
+            "after_ms": 1515,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2946,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              101.1224,
+              0.0,
+              102.0857
+            ]
+          },
+          {
+            "after_ms": 3377,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6335,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 2390484,
+        "action": 125,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 125,
+        "source": "演员1",
+        "target": "演员3",
+        "first_person": false,
+        "cast": {
+          "ms": 2383334,
+          "seconds": 7.688,
+          "spell": 125,
+          "position": [
+            101.8235,
+            -0.0153,
+            118.7304
+          ]
+        },
+        "source_position": {
+          "ms": 2383334,
+          "kind": "cast",
+          "position": [
+            101.8235,
+            -0.0153,
+            118.7304
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b00000000807d00"
+        ],
+        "trace": [
+          {
+            "after_ms": 852,
+            "kind": "control",
+            "category": 212,
+            "args": [
+              2,
+              181
+            ]
+          },
+          {
+            "after_ms": 2272,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              96.0537,
+              0.0,
+              99.6615
+            ]
+          },
+          {
+            "after_ms": 2650,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 5601,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 3878345,
+        "action": 173,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 173,
+        "source": "演员4",
+        "target": "演员5",
+        "first_person": true,
+        "cast": null,
+        "source_position": {
+          "ms": 3857826,
+          "kind": "cast",
+          "position": [
+            99.9924,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b0000000080ad00"
+        ],
+        "trace": [
+          {
+            "after_ms": 0,
+            "kind": "statuses",
+            "hp": 0,
+            "max_hp": 81181,
+            "mp": 0,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 148,
+                "param": 8,
+                "seconds": 60.0,
+                "source": "演员4"
+              }
+            ]
+          },
+          {
+            "after_ms": 303,
+            "kind": "statuses",
+            "hp": 0,
+            "max_hp": 81181,
+            "mp": 0,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 148,
+                "param": 8,
+                "seconds": 60.0,
+                "source": "演员1"
+              }
+            ]
+          },
+          {
+            "after_ms": 1188,
+            "kind": "prepare_zoning",
+            "payload": "000000006204b5000000050203020000"
+          },
+          {
+            "after_ms": 2692,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              103.8235,
+              0.0,
+              94.3569
+            ]
+          },
+          {
+            "after_ms": 2954,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 6003,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 6003,
+            "kind": "statuses",
+            "hp": 16236,
+            "max_hp": 81181,
+            "mp": 2000,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 100.0,
+                "source": null
+              },
+              {
+                "id": 418,
+                "param": 0,
+                "seconds": 5.0,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 8504,
+            "kind": "statuses",
+            "hp": 28445,
+            "max_hp": 81181,
+            "mp": 2200,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 97.503,
+                "source": null
+              },
+              {
+                "id": 418,
+                "param": 0,
+                "seconds": 2.503,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 10290,
+            "kind": "statuses",
+            "hp": 29256,
+            "max_hp": 81181,
+            "mp": 2400,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 95.722,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 11467,
+            "kind": "statuses",
+            "hp": 29256,
+            "max_hp": 81181,
+            "mp": 2400,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 94.515,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 13815,
+            "kind": "statuses",
+            "hp": 50112,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 92.239,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 14266,
+            "kind": "statuses",
+            "hp": 50112,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 91.704,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 14510,
+            "kind": "statuses",
+            "hp": 62168,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 91.48,
+                "source": null
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "ms": 3878648,
+        "action": 125,
+        "action_type": 1,
+        "action_kind": "skill",
+        "spell": 125,
+        "source": "演员1",
+        "target": "演员5",
+        "first_person": true,
+        "cast": null,
+        "source_position": {
+          "ms": 3875163,
+          "kind": "cast",
+          "position": [
+            99.9924,
+            -0.0153,
+            99.9924
+          ]
+        },
+        "effects": [
+          "0e00140800009400",
+          "1b00000000807d00"
+        ],
+        "trace": [
+          {
+            "after_ms": 0,
+            "kind": "statuses",
+            "hp": 0,
+            "max_hp": 81181,
+            "mp": 0,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 148,
+                "param": 8,
+                "seconds": 60.0,
+                "source": "演员1"
+              }
+            ]
+          },
+          {
+            "after_ms": 885,
+            "kind": "prepare_zoning",
+            "payload": "000000006204b5000000050203020000"
+          },
+          {
+            "after_ms": 2389,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              103.8235,
+              0.0,
+              94.3569
+            ]
+          },
+          {
+            "after_ms": 2651,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 5700,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 5700,
+            "kind": "statuses",
+            "hp": 16236,
+            "max_hp": 81181,
+            "mp": 2000,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 100.0,
+                "source": null
+              },
+              {
+                "id": 418,
+                "param": 0,
+                "seconds": 5.0,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 8201,
+            "kind": "statuses",
+            "hp": 28445,
+            "max_hp": 81181,
+            "mp": 2200,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 97.503,
+                "source": null
+              },
+              {
+                "id": 418,
+                "param": 0,
+                "seconds": 2.503,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 9987,
+            "kind": "statuses",
+            "hp": 29256,
+            "max_hp": 81181,
+            "mp": 2400,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 95.722,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 11164,
+            "kind": "statuses",
+            "hp": 29256,
+            "max_hp": 81181,
+            "mp": 2400,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 94.515,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 13512,
+            "kind": "statuses",
+            "hp": 50112,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 92.239,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 13963,
+            "kind": "statuses",
+            "hp": 50112,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 91.704,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 14207,
+            "kind": "statuses",
+            "hp": 62168,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 91.48,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 14926,
+            "kind": "statuses",
+            "hp": 62168,
+            "max_hp": 81181,
+            "mp": 2600,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 90.766,
+                "source": null
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "source": "黄金平原帕戈尔赞草原 2026.11.11 17.46.52.dat",
+    "sha256": "4fbe978dcd4200ed4fc8634cce524ae0e685e1b21098bac4b622bb4f9b9584c2",
+    "build": 14251465,
+    "raises": [
+      {
+        "ms": 32660,
+        "action": 4570,
+        "action_type": 2,
+        "action_kind": "item",
+        "spell": 43336,
+        "source": "演员1",
+        "target": "演员2",
+        "first_person": true,
+        "cast": {
+          "ms": 25158,
+          "seconds": 8.0,
+          "spell": 43336,
+          "position": [
+            -827.6646,
+            2.7314,
+            278.0346
+          ]
+        },
+        "source_position": {
+          "ms": 25234,
+          "kind": "move",
+          "position": [
+            -830.2586,
+            2.8534,
+            276.051
+          ]
+        },
+        "effects": [
+          "0e00140800009400"
+        ],
+        "trace": [
+          {
+            "after_ms": 0,
+            "kind": "statuses",
+            "hp": 0,
+            "max_hp": 33621,
+            "mp": 0,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 148,
+                "param": 8,
+                "seconds": 60.0,
+                "source": "演员1"
+              }
+            ]
+          },
+          {
+            "after_ms": 2285,
+            "kind": "prepare_zoning",
+            "payload": "00000000aa03b5000000050203020000"
+          },
+          {
+            "after_ms": 3728,
+            "kind": "position",
+            "warp": 5,
+            "argument": 2,
+            "position": [
+              -830.232,
+              2.8541,
+              276.065
+            ]
+          },
+          {
+            "after_ms": 4119,
+            "kind": "control",
+            "category": 200,
+            "args": [
+              1,
+              1
+            ]
+          },
+          {
+            "after_ms": 7102,
+            "kind": "control",
+            "category": 2,
+            "args": [
+              1,
+              0
+            ]
+          },
+          {
+            "after_ms": 7102,
+            "kind": "statuses",
+            "hp": 6724,
+            "max_hp": 33621,
+            "mp": 2000,
+            "max_mp": 10000,
+            "statuses": [
+              {
+                "id": 43,
+                "param": 0,
+                "seconds": 100.0,
+                "source": null
+              },
+              {
+                "id": 418,
+                "param": 0,
+                "seconds": 5.0,
+                "source": null
+              }
+            ]
+          },
+          {
+            "after_ms": 9148,
+            "kind": "trace_end",
+            "reason": "other_zoning",
+            "warp": 13
+          }
+        ]
+      }
+    ]
+  }
+]

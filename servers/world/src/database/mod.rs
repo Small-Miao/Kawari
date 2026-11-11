@@ -1,5 +1,7 @@
 mod character;
 mod friends;
+mod housing;
+pub(crate) use housing::Estate;
 mod linkshell;
 mod mail;
 

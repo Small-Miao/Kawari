@@ -852,7 +852,7 @@ pub enum ClientTriggerCommand {
     },
 
     #[brw(magic = 1100u32)]
-    BuildHouseOnPlot { ward_index: u32 },
+    BuildHouseOnPlot { plot_index: u32 },
 
     #[brw(magic = 1101u32)]
     EnterExteriorFixturesState { ward_index: u32 },
@@ -950,8 +950,10 @@ pub enum ClientTriggerCommand {
 
     #[brw(magic = 1118u32)]
     SetHousingGuestAccess {
-        /// The house's id.
-        house_id: HouseId,
+        /// 房屋 ID 的高 32 位。
+        territory_world: u32,
+        /// 房屋 ID 的低 32 位。
+        plot_ward: u32,
         /// Known for now: 1 - Teleport permission; 65536 - Enter permission
         flags: u32,
     },

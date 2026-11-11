@@ -15,7 +15,9 @@ public static class InitialScene
         RaidManager.Instance.MapEffect(20, 4, 8);
         RaidManager.Instance.MapEffect(5, 4, 8);
         RaidManager.Instance.SetWeather(174, 0);
+        // 先保存非零的恢复曲目，再解除临时覆盖；客户端初始曲目为 0 时顺序不可颠倒。
         RaidManager.Instance.PlayBgm(964);
+        RaidManager.Instance.DirectorEvent(0x80000005, 0, 0, 0, 0);
     }
     public static void SpawnObjects()
     {

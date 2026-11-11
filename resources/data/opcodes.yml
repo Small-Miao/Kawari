@@ -455,10 +455,6 @@ ServerZoneIpcType:
   comment: Initialize the packet obfuscation system.
   opcode: 757
   size: 16
-- name: BeginStrategyBoardSession
-  comment: A client starts a strategy board sharing session with their party.
-  opcode: 818
-  size: 16
 - name: StrategyBoard
   comment: The content id of the real-time sharing host, and the actual strategy board data to be shared.
   opcode: 712
@@ -472,7 +468,7 @@ ServerZoneIpcType:
   opcode: 373
   size: 64
 - name: EndStrategyBoardSession
-  comment: The client stopped sharing their strategy board, or if it wasn't real-time, the transfer has completed.
+  comment: The server announces or clears the party's real-time strategy board host.
   opcode: 112
   size: 16
 - name: WaymarkUpdate
@@ -739,6 +735,10 @@ ServerZoneIpcType:
   comment: Contains lottery information of a vacant housing plot. This packet is sent when clicking the placard of a vacant plot.
   opcode: 455
   size: 40
+- name: HousingLandPrice
+  comment: Sends the current land price and time until the next price reduction to an open housing placard.
+  opcode: 141
+  size: 8
 - name: HousingEstateGreeting
   comment: Contains the greeting text for a specific housing plot. This packet is sent when hovering the greeting text bubble in the house list.
   opcode: 319
@@ -1124,8 +1124,8 @@ ClientZoneIpcType:
   comment: The client updates their strategy board during real-time sharing.
   opcode: 644
   size: 64
-- name: RealtimeStrategyBoardFinished
-  comment: The client finishes their real-time sharing session.
+- name: RealtimeStrategyBoardControl
+  comment: The host ends sharing or a viewer requests synchronization.
   opcode: 386
   size: 8
 - name: ApplyFieldMarkerPreset
@@ -1256,6 +1256,10 @@ ClientZoneIpcType:
   comment: The client places furniture on their property (indoors or outdoors), or into the relevant storeroom (the furniture is not spawned in that case).
   opcode: 452
   size: 40
+- name: BuildHousingPreset
+  comment: 玩家确认房产证书后，请求在指定地块建房。
+  opcode: 659
+  size: 32
 - name: TranslateFurniture
   comment: The client moves or rotates a piece of furniture.
   opcode: 842

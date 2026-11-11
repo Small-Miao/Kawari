@@ -1103,6 +1103,21 @@ pub enum ActorControlCategory {
         unlocked: bool,
     },
 
+    /// 向客户端确认是否可以打开建筑许可证选择窗。
+    #[brw(magic = 1001u32)]
+    HousingBuildSelect { plot_index: u32, result: u32 },
+
+    /// 清除客户端当前选中的建房地块。
+    #[brw(magic = 1005u32)]
+    HousingBuildComplete { plot_index: u32 },
+
+    #[brw(magic = 1007u32)]
+    YardFurnitureRemoved {
+        index: u16,
+        #[brw(pad_after = 4)]
+        plot_index: u16,
+    },
+
     /// The server acknowledges the client's request to remove an item from the world and put it back into their inventory. Doesn't seem to have any values, but we should keep unknowns for now, just in case...
     #[brw(magic = 1009u32)]
     FurnitureRemovedToInventoryAck {

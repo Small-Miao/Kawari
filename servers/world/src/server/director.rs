@@ -504,7 +504,7 @@ pub enum LuaDirectorTask {
         position: Position,
         rotation: f32,
     },
-    /// Send a single-target `ActionEffect1` carrying one bossmod-style effect (Knockback, Attract,
+    /// Send a single-target `ActionEffect1` carrying scripted effects (Knockback, Attract,
     /// AttractCustom, SetHP, Interrupt, ...). Purely a packet: no server-side state change. `source`
     /// defaults to `target` (animation source) and `action_id` defaults to 0.
     EmitEffect {
@@ -512,6 +512,8 @@ pub enum LuaDirectorTask {
         source: Option<ObjectId>,
         action_id: u32,
         effect: TargetEffectKind,
+        followup: Option<TargetEffectKind>,
+        animation_lock: f32,
     },
     /// Directly set `target`'s HP (clamped to its max) and notify the client via both the `SetHP`
     /// effect (visual) and a normal HP sync packet.
@@ -1459,6 +1461,8 @@ impl UserData for LuaDirector {
                     unk: [0; 4],
                     knockback_id,
                 },
+                followup: None,
+                animation_lock: ANIMATION_LOCK_TIME,
             });
             Ok(())
         });
@@ -1488,6 +1492,8 @@ impl UserData for LuaDirector {
                 source: source.map(ObjectId),
                 action_id,
                 effect,
+                followup: None,
+                animation_lock: ANIMATION_LOCK_TIME,
             });
             Ok(())
         });
@@ -1528,6 +1534,8 @@ impl UserData for LuaDirector {
                 source: source.map(ObjectId),
                 action_id,
                 effect,
+                followup: None,
+                animation_lock: ANIMATION_LOCK_TIME,
             });
             Ok(())
         });
@@ -3580,6 +3588,8 @@ pub fn director_tick(
                 source,
                 action_id,
                 effect,
+                followup,
+                animation_lock,
             } => {
                 let source_id = source.unwrap_or(*target);
                 send_single_effect(
@@ -3589,6 +3599,8 @@ pub fn director_tick(
                     source_id,
                     *action_id,
                     *effect,
+                    *followup,
+                    *animation_lock,
                 );
             }
             LuaDirectorTask::SetActorHp { target, hp } => {
@@ -3616,6 +3628,8 @@ pub fn director_tick(
                         unk: [0; 5],
                         hp: applied_hp,
                     },
+                    None,
+                    ANIMATION_LOCK_TIME,
                 );
                 update_actor_hp_mp(network.clone(), instance, *target);
             }
@@ -3655,7 +3669,7 @@ pub fn director_tick(
     pending_aoes
 }
 
-/// Send a single-target `ActionEffect1` carrying one bossmod-style effect (Knockback, Attract,
+/// Send a single-target `ActionEffect1` carrying scripted effects (Knockback, Attract,
 /// SetHP, Interrupt, ...), animated from `source_id` and sent to everyone in range of it (mirrors
 /// `resolve_aoe`'s `anim_source` pattern). Purely a packet — callers apply any server-side state
 /// change (HP, cast lock, ...) themselves before/after calling this.
@@ -3666,6 +3680,8 @@ fn send_single_effect(
     source_id: ObjectId,
     action_id: u32,
     effect: TargetEffectKind,
+    followup: Option<TargetEffectKind>,
+    animation_lock: f32,
 ) {
     if instance
         .find_actor(target)
@@ -3688,13 +3704,16 @@ fn send_single_effect(
 
     let mut effects = [TargetEffect::default(); 8];
     effects[0] = TargetEffect(effect);
+    if let Some(followup) = followup {
+        effects[1] = TargetEffect(followup);
+    }
 
     let mut network = network.lock();
     let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
         animation_target_id: target_type,
         target_id_again: target_type,
         action_id,
-        animation_lock: ANIMATION_LOCK_TIME,
+        animation_lock,
         rotation,
         spell_id: action_id as u16,
         target_count: 1,
@@ -3922,6 +3941,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
         if let Some(target) = instance.find_actor_mut(*target_id) {
             target.apply_damage(damage);
         }
+        super::jobs::warrior::retaliate(&mut network.lock(),instance,aoe.source_id,*target_id,damage_type,damage);
 
         // Give the source enmity for the hit, so it keeps aggro through mechanic damage.
         if let Some(source) = instance.find_actor_mut(aoe.source_id)

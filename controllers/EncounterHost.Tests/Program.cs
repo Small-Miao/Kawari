@@ -14,6 +14,8 @@ void Submit(EncounterContext context,Simulation simulation)
     simulation.Apply(context.D.Commands);
     trace.WriteLine(JsonSerializer.Serialize(new OutputFrame(1,++sequence,context.D.Commands,context.Report())));
 }
+TopMusicRegression.Run(loader,Check,Submit,()=>trace.WriteLine());
+OrdainedEffectsRegression.Run(loader,Check,Submit,()=>trace.WriteLine());
 foreach(var content in new[]{"r1fz","n4gw","z3oz","d2az","z3oy","kefka_p2","w1fa_2"})
 foreach(var count in new[]{1,8})
 {

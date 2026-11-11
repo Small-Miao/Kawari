@@ -301,7 +301,8 @@ pub(in crate::server) fn action_effects(
                 (f64::from(amount) * multiplier * 2.0) as u32,
             );
         }
-        LIGHTSPEED => effects.push(gain(STATUS_LIGHTSPEED, 0, 15.0, true)),
+        // 当前客户端按有符号参数 × 100 毫秒调整读条；0 只显示图标。
+        LIGHTSPEED => effects.push(gain(STATUS_LIGHTSPEED, (-25i16) as u16, 15.0, true)),
         SYNASTRY => {
             effects.push(gain(STATUS_SYNASTRY, 0, 20.0, false));
             effects.push(gain(STATUS_SYNASTRY_SELF, 0, 20.0, true));
@@ -561,16 +562,55 @@ fn detonate_earthly_star(
         },
     );
     let visual = star.object.filter(|&id| instance.find_actor(id).is_some());
+    if let Some(id) = visual {
+        if let Some(statuses) = instance
+            .find_actor_mut(id)
+            .and_then(|a| a.status_effects_mut())
+        {
+            statuses.add_with_source(1965, 1, 30.0, owner);
+        }
+        send_effects_list_with(network, instance, id);
+        network.send_ac_in_range_instance(
+            instance,
+            id,
+            ActorControlCategory::SetMode {
+                mode: kawari::common::CharacterMode::Dead,
+                mode_arg: 2,
+            },
+        );
+        if let Some((_, row)) = result.targets.first_mut() {
+            if let Some(slot) = row
+                .iter_mut()
+                .find(|e| matches!(e.0, TargetEffectKind::None))
+            {
+                *slot = TargetEffect(TargetEffectKind::ExecuteCombo {
+                    sequence: 0,
+                    unk2: 0,
+                    unk3: 0,
+                    unk4: 0,
+                    unk5: 0x80,
+                    action_id: action as u16,
+                });
+            }
+        }
+    }
+
     crate::server::action::send_area_action_result(
         network,
         instance,
         visual.unwrap_or(owner),
         action,
-        ActionRequest::default(),
+        ActionRequest {
+            target: kawari::common::ObjectTypeId {
+                object_id: owner,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         result,
     );
     if let Some(id) = visual {
-        network.remove_actor(instance, id);
+        crate::server::jobs::transient::retire(instance, owner, id);
     }
     send_effects_list_with(network, instance, owner);
 }
@@ -608,10 +648,7 @@ fn change_hp(actor: &mut NetworkedActor, amount: u32) -> u32 {
     if common.health_points == 0 {
         return 0;
     }
-    common.health_points = common
-        .health_points
-        .saturating_add(amount)
-        .min(common.max_health_points);
+    actor.apply_heal(amount);
     amount
 }
 
@@ -702,6 +739,7 @@ pub(in crate::server) fn apply_support_action(
     ground: Option<Position>,
     direct_heal: u32,
 ) -> Option<AreaResult> {
+    let external_healing=white_mage::outgoing_heal_multiplier(instance.find_actor(caster),action);
     let radius = match action {
         DIVINATION | SUN_SIGN | HOROSCOPE | HOROSCOPE_HEAL | COLLECTIVE => 30.0,
         HELIOS | ASPECTED_HELIOS | HELIOS_CONJUNCTION | OPPOSITION | LADY | LORD | MACROCOSMOS
@@ -824,7 +862,7 @@ pub(in crate::server) fn apply_support_action(
                     } else {
                         base
                     };
-                    let amount = apply_heal(actor, base);
+                    let amount = apply_heal(actor, (base as f64*external_healing) as u32);
                     effects.push(heal(amount));
                     if action != HELIOS {
                         let (status, potency) = if action == ASPECTED_HELIOS {
@@ -833,6 +871,7 @@ pub(in crate::server) fn apply_support_action(
                             (STATUS_CONJUNCTION, 175)
                         };
                         party_regen(actor, caster, status, potency, &mut effects);
+                        actor.status_effects_mut().unwrap().snapshot_healing_multiplier(status,caster,external_healing*if neutral{1.2}else{1.0});
                         if neutral {
                             let barrier = actor.get_common_spawn().max_health_points;
                             actor.status_effects_mut().unwrap().add_barrier(
@@ -1213,7 +1252,7 @@ mod tests {
         ));
         tokio::time::timeout(Duration::from_secs(3), async {
             let mut confirmed = false;
-            let mut burst = false;
+
             loop {
                 match messages.recv().await.unwrap() {
                     FromServer::PacketSegment(packet, source) => match packet.data {
@@ -1222,23 +1261,29 @@ mod tests {
                             assert_eq!(result.source_sequence, 4);
                             confirmed = true;
                         }
-                        ServerZoneIpcData::ActionEffect8(result) if result.header.action_id == STELLAR_BURST => {
+                        ServerZoneIpcData::ActionEffect1(result) if result.action_id == STELLAR_BURST => {
                             assert!(confirmed);
                             assert_eq!(source, star);
-                            assert!(matches!(result.effects[0][0].0, TargetEffectKind::Heal { amount, .. } if amount > 0));
-                            burst = true;
+                            assert!(matches!(result.effects[0].0, TargetEffectKind::Heal { amount, .. } if amount > 0));
+                            break;
                         }
                         _ => {}
                     },
                     FromServer::DeleteActor(id, _) => {
                         assert_eq!(id, star);
-                        assert!(burst);
-                        break;
+                        panic!("爆发后应延迟移除地星");
                     }
                     _ => {}
                 }
             }
-        }).await.expect("未收到地星爆发和移除");
+        }).await.expect("未收到地星爆发");
+        let mut data = world.lock();
+        let instance = data.find_actor_instance_mut(owner).unwrap();
+        assert!(
+            instance.find_actor(star).is_some(),
+            "演出未结束就删除了地星"
+        );
+        assert!(instance.queued_task.iter().any(|t| matches!(t.data, crate::server::instance::QueuedTaskData::RetireJobPet { actor_id, .. } if actor_id==star)));
     }
 
     #[test]

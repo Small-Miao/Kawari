@@ -37,7 +37,7 @@ use physis::{
 use super::{
     WorldDatabase,
     common::{ClientId, ServerHandle},
-    inventory::{BuyBackList, GlamourStorage, HousingInventory, Inventory, PlateStorage},
+    inventory::{BuyBackList, GlamourStorage, Inventory, PlateStorage},
 };
 
 mod actor;
@@ -45,6 +45,7 @@ mod chat;
 mod effect;
 mod event;
 mod friends;
+mod housing;
 mod item;
 mod linkshell;
 mod lua;
@@ -171,8 +172,6 @@ pub struct PlayerData {
     pub grand_company: GrandCompany,
     pub glamour: GlamourStorage,
     pub plate: PlateStorage,
-    // TODO: These inventories need to be made persistent and also vary per property, this is just for initial support
-    pub house_inventory: HousingInventory,
 }
 
 /// Various obsfucation-related bits like the seeds and keys for this connection.
@@ -239,6 +238,7 @@ pub struct ZoneConnection {
 
     /// Information from before we entered the content.
     pub old_zone_id: u16,
+    pub old_housing: Option<crate::housing::HousingAddress>,
     pub old_position: Position,
     pub old_rotation: f32,
 
@@ -463,6 +463,9 @@ impl ZoneConnection {
         // If we were last in an instance, tell the server we're outside of it so we don't get stuck/crash.
         if self.conditions.has_condition(Condition::BoundByDuty) {
             self.player_data.volatile.zone_id = self.old_zone_id as i32;
+            self.player_data.volatile.housing_location = self
+                .old_housing
+                .map_or(0, crate::housing::HousingAddress::pack);
             self.player_data.volatile.position = self.old_position;
             self.player_data.volatile.rotation = self.old_rotation as f64;
         }
