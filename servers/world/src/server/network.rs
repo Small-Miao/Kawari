@@ -324,8 +324,7 @@ impl NetworkState {
         };
 
         for member in &party.members {
-            // Skip offline or otherwise non-existent members
-            if !member.actor_id.is_valid() || member.zone_client_id == ClientId::default() {
+            if !member.actor_id.is_valid() {
                 continue;
             }
 
@@ -338,14 +337,16 @@ impl NetworkState {
 
             match destination {
                 DestinationNetwork::ZoneClients => {
-                    let handle = &mut self.clients.get_mut(&member.zone_client_id).unwrap().0;
-                    if handle.send(message.clone()).is_err() {
+                    if let Some((handle, _)) = self.clients.get_mut(&member.zone_client_id)
+                        && handle.send(message.clone()).is_err()
+                    {
                         self.to_remove.push(member.zone_client_id);
                     }
                 }
                 DestinationNetwork::ChatClients => {
-                    let handle = &mut self.chat_clients.get_mut(&member.chat_client_id).unwrap().0;
-                    if handle.send(message.clone()).is_err() {
+                    if let Some((handle, _)) = self.chat_clients.get_mut(&member.chat_client_id)
+                        && handle.send(message.clone()).is_err()
+                    {
                         self.to_remove_chat.push(member.chat_client_id);
                     }
                 }
