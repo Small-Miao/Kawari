@@ -6,6 +6,7 @@ core/src/doc_*.md
 
 # Agent working artifacts (local only, never commit)
 PLAN.md
+/helloagents/**/*.md
 .agent-memory/
 *.log
 
